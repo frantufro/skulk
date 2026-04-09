@@ -59,6 +59,7 @@ host = "your-server"
 session_prefix = "skulk-"
 base_path = "~/your-project"
 worktree_base = "~/your-project-worktrees"
+# default_branch = "main"   # optional, defaults to "main"
 ```
 
 ## Never Do

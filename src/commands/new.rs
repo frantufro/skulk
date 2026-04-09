@@ -9,8 +9,9 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
     let base_path = &cfg.base_path;
     let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
+    let default_branch = &cfg.default_branch;
     format!(
-        "mkdir -p {worktree_base} && cd {base_path} && git worktree add -b {session_prefix}{name} {worktree_base}/{session_prefix}{name} main"
+        "mkdir -p {worktree_base} && cd {base_path} && git worktree add -b {session_prefix}{name} {worktree_base}/{session_prefix}{name} {default_branch}"
     )
 }
 

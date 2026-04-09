@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::ssh::Ssh;
@@ -77,11 +79,15 @@ pub(crate) fn cmd_logs(
 }
 
 /// Send a prompt to a running agent with delivery verification.
+///
+/// `verify_delay` controls how long to wait before checking pane content changed.
+/// Production callers should use 500ms; tests can pass `Duration::ZERO`.
 pub(crate) fn cmd_send(
     ssh: &impl Ssh,
     name: &str,
     prompt: &str,
     cfg: &Config,
+    verify_delay: Duration,
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
     let session_prefix = &cfg.session_prefix;
@@ -91,7 +97,7 @@ pub(crate) fn cmd_send(
         .map_err(|e| classify_agent_error(name, e, host))?;
     ssh.run(&send_command(name, prompt, cfg))
         .map_err(|e| classify_agent_error(name, e, host))?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(verify_delay);
     match ssh.run(&capture_pane_command(name, cfg)) {
         Ok(after) if after == before => {
             eprintln!(
@@ -261,7 +267,7 @@ mod tests {
             Ok(String::new()),
             Ok("new pane content".into()),
         ]);
-        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg).is_ok());
+        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -272,7 +278,7 @@ mod tests {
             Ok(String::new()),
             Ok("same pane content".into()),
         ]);
-        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg).is_ok());
+        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -281,7 +287,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find session: skulk-gone".into(),
         ))]);
-        let result = cmd_send(&ssh, "gone", "hello", &cfg);
+        let result = cmd_send(&ssh, "gone", "hello", &cfg, Duration::ZERO);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::NotFound(msg) => assert!(msg.contains("gone")),
@@ -295,7 +301,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find pane: skulk-missing".into(),
         ))]);
-        let result = cmd_send(&ssh, "missing", "hello", &cfg);
+        let result = cmd_send(&ssh, "missing", "hello", &cfg, Duration::ZERO);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::NotFound(msg) => assert!(msg.contains("missing")),
@@ -311,6 +317,6 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("connection lost".into())),
         ]);
-        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg).is_ok());
+        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
     }
 }

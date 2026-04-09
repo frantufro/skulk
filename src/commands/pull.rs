@@ -5,6 +5,7 @@ use crate::ssh::Ssh;
 pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
     let host = &cfg.host;
+    let default_branch = &cfg.default_branch;
     // Check if the base clone directory exists and is a git repo
     match ssh.run(&format!("test -d {base_path}/.git && echo exists")) {
         Ok(_) => {} // Directory exists and is a git repo
@@ -20,11 +21,13 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
     if force {
         eprintln!("Warning: This will discard any local changes on {host}.");
         let output = ssh.run(&format!(
-            "cd {base_path} && git fetch origin && git reset --hard origin/main"
+            "cd {base_path} && git fetch origin && git reset --hard origin/{default_branch}"
         ))?;
         println!("{output}");
     } else {
-        match ssh.run(&format!("cd {base_path} && git pull --ff-only origin main")) {
+        match ssh.run(&format!(
+            "cd {base_path} && git pull --ff-only origin {default_branch}"
+        )) {
             Ok(output) => {
                 println!("{output}");
             }
@@ -33,11 +36,10 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
                 if lower.contains("not possible to fast-forward")
                     || lower.contains("non-fast-forward")
                 {
-                    return Err(SkulkError::Validation(
+                    return Err(SkulkError::Validation(format!(
                         "Cannot fast-forward. Remote has diverged.\n  \
-                         Run `skulk pull --force` to discard local changes and reset to origin/main."
-                            .into(),
-                    ));
+                         Run `skulk pull --force` to discard local changes and reset to origin/{default_branch}."
+                    )));
                 } else if lower.contains("please commit your changes or stash them") {
                     return Err(SkulkError::Validation(format!(
                         "Working tree has uncommitted changes on {host}.\n  \
@@ -47,7 +49,7 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
                     || lower.contains("fatal: invalid refspec")
                 {
                     return Err(SkulkError::Validation(format!(
-                        "Cannot find 'main' branch on origin.\n  \
+                        "Cannot find '{default_branch}' branch on origin.\n  \
                          Check remote configuration: ssh {host} 'cd {base_path} && git remote -v'"
                     )));
                 }

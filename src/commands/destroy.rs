@@ -37,6 +37,7 @@ pub(crate) fn cmd_destroy(
     name: &str,
     force: bool,
     cfg: &Config,
+    confirm: &dyn Fn(&str) -> bool,
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
 
@@ -53,7 +54,7 @@ pub(crate) fn cmd_destroy(
         return Err(SkulkError::NotFound(format!("No agent '{name}' found.")));
     }
 
-    if !force && !crate::io::confirm(&format!("Destroy agent '{name}'? [y/N]")) {
+    if !force && !confirm(&format!("Destroy agent '{name}'? [y/N]")) {
         println!("Aborted.");
         return Ok(());
     }
@@ -105,7 +106,12 @@ pub(crate) fn cmd_destroy(
 ///
 /// Uses comprehensive inventory to discover ALL agents including orphans.
 /// Builds unique agent name set from sessions + worktrees + branches.
-pub(crate) fn cmd_destroy_all(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), SkulkError> {
+pub(crate) fn cmd_destroy_all(
+    ssh: &impl Ssh,
+    force: bool,
+    cfg: &Config,
+    confirm: &dyn Fn(&str) -> bool,
+) -> Result<(), SkulkError> {
     let session_prefix = &cfg.session_prefix;
     let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
 
@@ -134,7 +140,7 @@ pub(crate) fn cmd_destroy_all(ssh: &impl Ssh, force: bool, cfg: &Config) -> Resu
         return Ok(());
     }
 
-    if !force && !crate::io::confirm(&format!("Destroy {} agent(s)? [y/N]", agent_names.len())) {
+    if !force && !confirm(&format!("Destroy {} agent(s)? [y/N]", agent_names.len())) {
         println!("Aborted.");
         return Ok(());
     }
@@ -207,6 +213,14 @@ mod tests {
         assert!(cmd.starts_with("cd ~/test-project"));
     }
 
+    fn confirm_yes(_: &str) -> bool {
+        true
+    }
+
+    fn confirm_no(_: &str) -> bool {
+        false
+    }
+
     #[test]
     fn cmd_destroy_force_succeeds() {
         let cfg = test_config();
@@ -220,19 +234,46 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_destroy(&ssh, "target", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
     fn cmd_destroy_not_found_returns_error() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
-        let result = cmd_destroy(&ssh, "ghost", true, &cfg);
+        let result = cmd_destroy(&ssh, "ghost", true, &cfg, &confirm_yes);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
             other => panic!("expected NotFound, got: {other}"),
         }
+    }
+
+    #[test]
+    fn cmd_destroy_aborted_by_user() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(mock_inventory(
+            &["skulk-target"],
+            &[("skulk-target", "/path/skulk-target")],
+            &["skulk-target"],
+        ))]);
+        assert!(cmd_destroy(&ssh, "target", false, &cfg, &confirm_no).is_ok());
+    }
+
+    #[test]
+    fn cmd_destroy_confirmed_by_user() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &["skulk-target"],
+                &[("skulk-target", "/path/skulk-target")],
+                &["skulk-target"],
+            )),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        assert!(cmd_destroy(&ssh, "target", false, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -243,7 +284,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_destroy(&ssh, "partial", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "partial", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -259,7 +300,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_destroy(&ssh, "target", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -275,7 +316,7 @@ mod tests {
             Err(SkulkError::SshFailed("worktree remove failed".into())),
             Ok(String::new()),
         ]);
-        assert!(cmd_destroy(&ssh, "target", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -291,7 +332,7 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("branch delete failed".into())),
         ]);
-        assert!(cmd_destroy(&ssh, "target", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -307,7 +348,7 @@ mod tests {
             Err(SkulkError::SshFailed("worktree failed".into())),
             Err(SkulkError::SshFailed("branch failed".into())),
         ]);
-        assert!(cmd_destroy(&ssh, "target", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -317,7 +358,7 @@ mod tests {
             Ok(mock_inventory(&[], &[], &["skulk-orphan"])),
             Ok(String::new()),
         ]);
-        assert!(cmd_destroy(&ssh, "orphan", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "orphan", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -327,14 +368,25 @@ mod tests {
             Ok(mock_inventory(&[], &[], &["skulk-orphan"])),
             Err(SkulkError::SshFailed("branch delete failed".into())),
         ]);
-        assert!(cmd_destroy(&ssh, "orphan", true, &cfg).is_ok());
+        assert!(cmd_destroy(&ssh, "orphan", true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
     fn cmd_destroy_all_empty_inventory() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
-        assert!(cmd_destroy_all(&ssh, true, &cfg).is_ok());
+        assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
+    }
+
+    #[test]
+    fn cmd_destroy_all_aborted_by_user() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(mock_inventory(
+            &["skulk-alpha"],
+            &[("skulk-alpha", "/path/skulk-alpha")],
+            &["skulk-alpha"],
+        ))]);
+        assert!(cmd_destroy_all(&ssh, false, &cfg, &confirm_no).is_ok());
     }
 
     #[test]
@@ -356,7 +408,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_destroy_all(&ssh, true, &cfg).is_ok());
+        assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -372,7 +424,7 @@ mod tests {
             Err(SkulkError::SshFailed("worktree remove failed".into())),
             Err(SkulkError::SshFailed("branch delete failed".into())),
         ]);
-        assert!(cmd_destroy_all(&ssh, true, &cfg).is_ok());
+        assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
@@ -394,6 +446,6 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("branch delete failed".into())),
         ]);
-        assert!(cmd_destroy_all(&ssh, true, &cfg).is_ok());
+        assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
 }

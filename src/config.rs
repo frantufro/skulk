@@ -12,6 +12,7 @@ host = "your-server"
 session_prefix = "skulk-"
 base_path = "~/your-project"
 worktree_base = "~/your-project-worktrees"
+# default_branch = "main"
 "#;
 
 /// Runtime configuration loaded from `.skulk.toml`.
@@ -25,6 +26,32 @@ pub(crate) struct Config {
     pub session_prefix: String,
     pub base_path: String,
     pub worktree_base: String,
+    #[serde(default = "default_branch")]
+    pub default_branch: String,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
+}
+
+/// Validate that a config value contains only shell-safe characters.
+///
+/// Values are interpolated into shell commands without quoting, so they must not
+/// contain spaces, quotes, or other metacharacters.
+fn validate_shell_safe(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("'{field}' cannot be empty in {CONFIG_FILENAME}"));
+    }
+    for c in value.chars() {
+        if !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '/' | '.' | '-' | '_' | '~' | '+' | '@' | ':')
+        {
+            return Err(format!(
+                "'{field}' contains character '{c}' that is unsafe in shell commands. \
+                 Only alphanumeric characters and /._-~+@: are allowed."
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Walks from `start` up to the filesystem root looking for `.skulk.toml`.
@@ -55,17 +82,27 @@ fn find_config_file(start: &Path) -> Option<PathBuf> {
 pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
     let Some(path) = find_config_file(start) else {
         let generated = start.join(CONFIG_FILENAME);
-        let _ = std::fs::write(&generated, SAMPLE_CONFIG);
-        return Err(format!(
-            "No {CONFIG_FILENAME} found. Generated sample at {}.\n\
-             Edit it with your server and project settings, then re-run.",
-            generated.display()
-        ));
+        return match std::fs::write(&generated, SAMPLE_CONFIG) {
+            Ok(()) => Err(format!(
+                "No {CONFIG_FILENAME} found. Generated sample at {}.\n\
+                 Edit it with your server and project settings, then re-run.",
+                generated.display()
+            )),
+            Err(e) => Err(format!(
+                "No {CONFIG_FILENAME} found and could not generate sample at {}: {e}",
+                generated.display()
+            )),
+        };
     };
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let cfg: Config = toml::from_str(&content)
         .map_err(|e| format!("invalid config in {}: {e}", path.display()))?;
+    validate_shell_safe(&cfg.host, "host")?;
+    validate_shell_safe(&cfg.session_prefix, "session_prefix")?;
+    validate_shell_safe(&cfg.base_path, "base_path")?;
+    validate_shell_safe(&cfg.worktree_base, "worktree_base")?;
+    validate_shell_safe(&cfg.default_branch, "default_branch")?;
     Ok(cfg)
 }
 
@@ -79,6 +116,7 @@ mod tests {
             session_prefix = "bot-"
             base_path = "~/other-project"
             worktree_base = "~/other-agents"
+            default_branch = "develop"
         "#
     }
 
@@ -89,6 +127,19 @@ mod tests {
         assert_eq!(cfg.session_prefix, "bot-");
         assert_eq!(cfg.base_path, "~/other-project");
         assert_eq!(cfg.worktree_base, "~/other-agents");
+        assert_eq!(cfg.default_branch, "develop");
+    }
+
+    #[test]
+    fn config_default_branch_defaults_to_main() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.default_branch, "main");
     }
 
     #[test]
@@ -164,6 +215,69 @@ mod tests {
 
         let result = load_config(&dir);
         assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── validate_shell_safe tests ──────────────────────────────────────
+
+    #[test]
+    fn validate_shell_safe_accepts_typical_path() {
+        assert!(validate_shell_safe("~/my-project", "base_path").is_ok());
+    }
+
+    #[test]
+    fn validate_shell_safe_accepts_complex_path() {
+        assert!(validate_shell_safe("/home/user/projects/my_app.v2", "base_path").is_ok());
+    }
+
+    #[test]
+    fn validate_shell_safe_rejects_space() {
+        let result = validate_shell_safe("~/my project", "base_path");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("' '"));
+    }
+
+    #[test]
+    fn validate_shell_safe_rejects_single_quote() {
+        let result = validate_shell_safe("it's", "host");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'''"));
+    }
+
+    #[test]
+    fn validate_shell_safe_rejects_semicolon() {
+        let result = validate_shell_safe("foo;rm -rf /", "base_path");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("';'"));
+    }
+
+    #[test]
+    fn validate_shell_safe_rejects_empty() {
+        let result = validate_shell_safe("", "host");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn config_load_rejects_path_with_spaces() {
+        let dir = std::env::temp_dir().join("skulk_shell_safe_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let config_path = dir.join(CONFIG_FILENAME);
+        std::fs::write(
+            &config_path,
+            r#"
+                host = "server"
+                session_prefix = "skulk-"
+                base_path = "~/my project"
+                worktree_base = "~/agents"
+            "#,
+        )
+        .unwrap();
+
+        let result = load_config(&dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("base_path"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

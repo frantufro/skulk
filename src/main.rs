@@ -10,12 +10,16 @@ mod util;
 #[cfg(test)]
 mod testutil;
 
+use std::time::Duration;
+
 use clap::{Parser, Subcommand};
 
 use commands::{bootstrap, destroy, gc, interact, list, new, pull};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
+
+const SEND_VERIFY_DELAY: Duration = Duration::from_millis(500);
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -147,7 +151,13 @@ fn main() {
     io::main();
 }
 
-pub(crate) fn run(cli: Cli, ssh: &impl Ssh, cfg: &Config) -> Result<(), (String, SkulkError)> {
+pub(crate) fn run(
+    cli: Cli,
+    ssh: &impl Ssh,
+    cfg: &Config,
+    confirm: &dyn Fn(&str) -> bool,
+    send_verify_delay: Duration,
+) -> Result<(), (String, SkulkError)> {
     let cmd_name = match &cli.command {
         Commands::List => "list",
         Commands::Pull { .. } => "pull",
@@ -165,8 +175,8 @@ pub(crate) fn run(cli: Cli, ssh: &impl Ssh, cfg: &Config) -> Result<(), (String,
         Commands::List => list::cmd_list(ssh, cfg),
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
         Commands::New { name, prompt } => new::cmd_new(ssh, &name, prompt.as_deref(), cfg),
-        Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg),
-        Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg),
+        Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
+        Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Bootstrap { repo_url } => bootstrap::cmd_bootstrap(ssh, &repo_url, cfg),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
         Commands::Connect { name } => interact::cmd_connect(ssh, &name, cfg),
@@ -175,7 +185,9 @@ pub(crate) fn run(cli: Cli, ssh: &impl Ssh, cfg: &Config) -> Result<(), (String,
             follow,
             lines,
         } => interact::cmd_logs(ssh, &name, follow, lines, cfg),
-        Commands::Send { name, prompt } => interact::cmd_send(ssh, &name, &prompt, cfg),
+        Commands::Send { name, prompt } => {
+            interact::cmd_send(ssh, &name, &prompt, cfg, send_verify_delay)
+        }
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -186,6 +198,10 @@ mod tests {
     use super::*;
     use crate::testutil::{MockSsh, mock_inventory, mock_list_output, test_config};
 
+    fn confirm_yes(_: &str) -> bool {
+        true
+    }
+
     #[test]
     fn run_dispatches_list() {
         let cfg = test_config();
@@ -194,7 +210,7 @@ mod tests {
             no_color: true,
             command: Commands::List,
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -205,7 +221,7 @@ mod tests {
             no_color: true,
             command: Commands::Pull { force: false },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -224,7 +240,7 @@ mod tests {
                 prompt: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -247,7 +263,7 @@ mod tests {
                 force: true,
             },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -258,7 +274,7 @@ mod tests {
             no_color: true,
             command: Commands::DestroyAll { force: true },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -274,7 +290,7 @@ mod tests {
                 repo_url: "https://example.com/repo.git".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -289,7 +305,7 @@ mod tests {
             no_color: true,
             command: Commands::Gc { dry_run: true },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -302,7 +318,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -317,7 +333,7 @@ mod tests {
                 lines: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -335,7 +351,7 @@ mod tests {
                 prompt: "fix bug".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }
 
     #[test]
@@ -349,7 +365,7 @@ mod tests {
             no_color: true,
             command: Commands::List,
         };
-        let result = run(cli, &ssh, &cfg);
+        let result = run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO);
         assert!(result.is_err());
         let (cmd_name, _err) = result.unwrap_err();
         assert_eq!(cmd_name, "list");
