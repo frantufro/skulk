@@ -2,9 +2,18 @@
 name = "skulk"
 version = "0.1.0"
 edition = "2024"
+description = "Manage remote Claude Code agents over SSH with tmux and git worktrees"
+license = "MIT"
+repository = "https://github.com/frantufro/skulk"
+homepage = "https://github.com/frantufro/skulk"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
