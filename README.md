@@ -1,6 +1,6 @@
 # Skulk
 
-Run multiple Claude Code agents in parallel on a remote server. Each agent gets its own tmux session and git worktree — fully isolated, zero conflicts.
+Run multiple Claude Code agents in parallel on a remote server — or on your local machine. Each agent gets its own tmux session and git worktree — fully isolated, zero conflicts.
 
 ```
 $ skulk new auth-refactor "Refactor the auth middleware to use JWT"
@@ -25,9 +25,11 @@ Claude Code is great, but it works on one thing at a time. If you have a beefy d
 
 ## Requirements
 
-**Local machine:** OpenSSH client, Rust toolchain (to build Skulk)
+**Local machine:** OpenSSH client (not needed if running in localhost mode), Rust toolchain (to build Skulk)
 
 **Remote server:** SSH access with key-based auth. Skulk's `init` command will install everything else (tmux, git, Claude Code).
+
+**Localhost mode:** Set `host = "localhost"` in `.skulk.toml` to run commands directly via `sh -c` and skip SSH entirely. Useful when running Skulk on the same machine where agents will live (a dev box, a personal laptop, a server you're already SSH'd into).
 
 ## Install
 
@@ -71,7 +73,7 @@ default_branch = "main"
 
 | Field | Description |
 |-------|-------------|
-| `host` | SSH host (must be reachable via `ssh your-server`) |
+| `host` | SSH host (must be reachable via `ssh your-server`), or `localhost` / `127.0.0.1` / `::1` to run commands on the local machine without SSH |
 | `session_prefix` | Prefix for tmux sessions and git branches |
 | `base_path` | Path to the main git clone on the remote |
 | `worktree_base` | Directory where agent worktrees are created |
