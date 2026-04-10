@@ -97,6 +97,54 @@ impl Ssh for RealSsh {
     }
 }
 
+/// Local shell executor for localhost mode.
+///
+/// Runs commands directly via `sh -c` instead of SSH, used when
+/// `host = "localhost"` so agents can spawn new agents on the same machine.
+pub(crate) struct LocalShell;
+
+impl Ssh for LocalShell {
+    fn run(&self, cmd: &str) -> Result<String, SkulkError> {
+        let output = ProcessCommand::new("sh")
+            .args(["-c", cmd])
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    SkulkError::Diagnostic {
+                        message: "sh not found.".into(),
+                        suggestion: "Ensure /bin/sh is available.".into(),
+                    }
+                } else {
+                    SkulkError::SshExec(e.to_string())
+                }
+            })?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(SkulkError::SshFailed(stderr))
+        }
+    }
+
+    fn interactive(&self, cmd: &str) -> Result<std::process::ExitStatus, SkulkError> {
+        ProcessCommand::new("sh")
+            .args(["-c", cmd])
+            .env("TERM", "xterm-256color")
+            .status()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    SkulkError::Diagnostic {
+                        message: "sh not found.".into(),
+                        suggestion: "Ensure /bin/sh is available.".into(),
+                    }
+                } else {
+                    SkulkError::SshExec(e.to_string())
+                }
+            })
+    }
+}
+
 /// Follow agent output in real-time via poll loop.
 pub(crate) fn cmd_logs_follow(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     let cmd = logs_snapshot_deep_command(name, 200, cfg);
@@ -185,8 +233,11 @@ fn run_init() -> Result<(), SkulkError> {
     let config_path = cwd.join(config::CONFIG_FILENAME);
     let config_exists = config_path.is_file();
 
-    // SSH test closure
+    // SSH test closure (skip for localhost — no connectivity test needed)
     let test_ssh = |host: &str| -> Result<(), SkulkError> {
+        if config::is_localhost(host) {
+            return Ok(());
+        }
         let ssh = RealSsh {
             host: host.to_string(),
         };
@@ -206,10 +257,14 @@ fn run_init() -> Result<(), SkulkError> {
 
     // Remote setup if requested
     if answers.run_setup {
-        let ssh = RealSsh {
-            host: answers.host.clone(),
-        };
-        init::run_remote_setup(&ssh, &answers, color)?;
+        if config::is_localhost(&answers.host) {
+            init::run_remote_setup(&LocalShell, &answers, color)?;
+        } else {
+            let ssh = RealSsh {
+                host: answers.host.clone(),
+            };
+            init::run_remote_setup(&ssh, &answers, color)?;
+        }
     }
 
     // Success
@@ -251,11 +306,26 @@ pub(crate) fn main() {
         }
     };
 
-    let ssh = RealSsh {
-        host: cfg.host.clone(),
-    };
-    if let Err((cmd, e)) = run(cli, &ssh, &cfg, &confirm, crate::SEND_VERIFY_DELAY) {
+    run_with_runner(cli, &cfg);
+}
+
+fn dispatch(cli: Cli, ssh: &impl Ssh, cfg: &Config) {
+    if let Err((cmd, e)) = run(cli, ssh, cfg, &confirm, crate::SEND_VERIFY_DELAY) {
         eprintln!("skulk {cmd}: {e}");
         std::process::exit(1);
+    }
+}
+
+fn run_with_runner(cli: Cli, cfg: &Config) {
+    if config::is_localhost(&cfg.host) {
+        dispatch(cli, &LocalShell, cfg);
+    } else {
+        dispatch(
+            cli,
+            &RealSsh {
+                host: cfg.host.clone(),
+            },
+            cfg,
+        );
     }
 }

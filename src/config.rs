@@ -43,6 +43,14 @@ pub(crate) fn validate_shell_safe(value: &str, field: &str) -> Result<(), String
     Ok(())
 }
 
+/// Check whether a host value refers to the local machine.
+///
+/// When the host is localhost, skulk runs commands directly via `sh -c`
+/// instead of SSH, enabling agents to spawn new agents on the same machine.
+pub(crate) fn is_localhost(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
 /// Walks from `start` up to the filesystem root looking for `.skulk.toml`.
 fn find_config_file(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
@@ -197,6 +205,33 @@ mod tests {
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── is_localhost tests ─────────────────────────────────────────────
+
+    #[test]
+    fn is_localhost_returns_true_for_localhost() {
+        assert!(is_localhost("localhost"));
+    }
+
+    #[test]
+    fn is_localhost_returns_true_for_ipv4_loopback() {
+        assert!(is_localhost("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_localhost_returns_true_for_ipv6_loopback() {
+        assert!(is_localhost("::1"));
+    }
+
+    #[test]
+    fn is_localhost_returns_false_for_remote_host() {
+        assert!(!is_localhost("myserver.example.com"));
+    }
+
+    #[test]
+    fn is_localhost_returns_false_for_empty() {
+        assert!(!is_localhost(""));
     }
 
     // ── validate_shell_safe tests ──────────────────────────────────────

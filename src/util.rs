@@ -103,6 +103,16 @@ pub(crate) fn find_new_content_start(old_lines: &[String], new_lines: &[String])
     0
 }
 
+/// Format a command suggestion for the user, wrapping it in `ssh {host} '...'`
+/// for remote hosts or showing the bare command for localhost.
+pub(crate) fn format_remote_command(host: &str, cmd: &str) -> String {
+    if crate::config::is_localhost(host) {
+        cmd.to_string()
+    } else {
+        format!("ssh {host} '{cmd}'")
+    }
+}
+
 /// Result of delivering a prompt to a newly-created agent.
 pub(crate) enum PromptStatus {
     Delivered,
@@ -260,6 +270,32 @@ mod tests {
     fn confirm_eof_returns_false() {
         let mut input = std::io::Cursor::new(b"");
         assert!(!confirm_from_reader("Delete?", &mut input));
+    }
+
+    // ── format_remote_command tests ──────────────────────────────────────
+
+    #[test]
+    fn format_remote_command_wraps_with_ssh_for_remote_host() {
+        assert_eq!(
+            format_remote_command("myserver", "git status"),
+            "ssh myserver 'git status'"
+        );
+    }
+
+    #[test]
+    fn format_remote_command_returns_bare_command_for_localhost() {
+        assert_eq!(
+            format_remote_command("localhost", "git status"),
+            "git status"
+        );
+    }
+
+    #[test]
+    fn format_remote_command_returns_bare_command_for_ipv4_loopback() {
+        assert_eq!(
+            format_remote_command("127.0.0.1", "git status"),
+            "git status"
+        );
     }
 
     // ── find_new_content_start tests ────────────────────────────────────

@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
+use crate::util::format_remote_command;
 
 pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
@@ -12,7 +13,8 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
         Err(SkulkError::SshFailed(_)) => {
             return Err(SkulkError::Validation(format!(
                 "Base clone not found at {base_path} on {host}.\n\
-                 Set it up with: ssh {host} 'git clone <your-repo-url> {base_path}'"
+                 Set it up with: {}",
+                format_remote_command(host, &format!("git clone <your-repo-url> {base_path}"))
             )));
         }
         Err(e) => return Err(e), // SSH connectivity issue — propagate
@@ -50,7 +52,8 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
                 {
                     return Err(SkulkError::Validation(format!(
                         "Cannot find '{default_branch}' branch on origin.\n  \
-                         Check remote configuration: ssh {host} 'cd {base_path} && git remote -v'"
+                         Check remote configuration: {}",
+                        format_remote_command(host, &format!("cd {base_path} && git remote -v"))
                     )));
                 }
                 return Err(SkulkError::SshFailed(stderr.clone()));
