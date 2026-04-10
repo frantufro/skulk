@@ -7,6 +7,8 @@ pub(crate) const STARTUP_DELAY: u32 = 5;
 /// Check whether a host refers to the local machine.
 ///
 /// When true, commands run locally via `sh -c` instead of over SSH.
+/// Exact-match only: aliases like `localhost.localdomain`, `[::1]`, or
+/// other 127.0.0.0/8 addresses are not recognized. Extend if users ask.
 pub(crate) fn is_localhost(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }

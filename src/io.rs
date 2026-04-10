@@ -94,6 +94,7 @@ impl Ssh for RealSsh {
         let local = is_localhost(&self.host);
 
         let result = if local {
+            // No TERM override needed: the local terminfo matches $TERM by construction.
             ProcessCommand::new("sh").args(["-c", cmd]).status()
         } else {
             ProcessCommand::new("ssh")
