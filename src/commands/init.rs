@@ -282,6 +282,11 @@ fn detect_repo_info(
 // ── Config generation ──────────────────────────────────────────────────────
 
 /// Generate `.skulk.toml` content from wizard answers.
+///
+/// Safety: values are interpolated into TOML double-quoted strings.
+/// This is safe because `validate_shell_safe` rejects `"`, `\`, and
+/// control characters — the only characters that are special inside
+/// TOML double-quoted values.
 pub(crate) fn generate_config_toml(answers: &InitAnswers) -> String {
     format!(
         "host = \"{host}\"\n\
@@ -470,8 +475,8 @@ pub(crate) fn welcome_banner(color: bool) -> String {
 }
 
 /// Build the success message with next steps.
-pub(crate) fn success_message(answers: &InitAnswers, color: bool) -> String {
-    let cmd = format!("skulk new {}", example_agent_name(&answers.repo_name));
+pub(crate) fn success_message(color: bool) -> String {
+    let cmd = format!("skulk new {}", example_agent_name());
     if color {
         format!("\n\x1b[1m\u{1f389} Ready!\x1b[0m Create your first agent with:\n   {cmd}\n")
     } else {
@@ -480,7 +485,7 @@ pub(crate) fn success_message(answers: &InitAnswers, color: bool) -> String {
 }
 
 /// Generate an example agent name.
-fn example_agent_name(_repo_name: &str) -> &'static str {
+fn example_agent_name() -> &'static str {
     "my-task"
 }
 
@@ -879,6 +884,12 @@ mod tests {
     }
 
     #[test]
+    fn setup_install_unknown_tool_echoes_message() {
+        let cmd = setup_install_command("unknown-tool");
+        assert!(cmd.contains("Unknown tool"));
+    }
+
+    #[test]
     fn setup_clone_command_escapes_url() {
         let cmd = setup_clone_command("https://github.com/user/repo.git", "~/repo");
         assert!(cmd.contains("git clone 'https://github.com/user/repo.git'"));
@@ -953,6 +964,18 @@ mod tests {
     }
 
     #[test]
+    fn remote_setup_clone_failure_propagates() {
+        let ssh = MockSsh::new(vec![
+            Ok(String::new()), // apt-get check
+            Ok("tmux:installed\ngit:installed\nclaude:installed\nrepo:missing\nworktree-dir:missing"
+                .into()),
+            Err(SkulkError::SshFailed("clone failed".into())), // clone fails
+        ]);
+        let result = run_remote_setup(&ssh, &test_answers(), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn remote_setup_repo_already_cloned() {
         let ssh =
             MockSsh::new(vec![
@@ -979,15 +1002,13 @@ mod tests {
 
     #[test]
     fn success_message_includes_skulk_new() {
-        let answers = test_answers();
-        let msg = success_message(&answers, false);
+        let msg = success_message(false);
         assert!(msg.contains("skulk new"));
     }
 
     #[test]
     fn success_message_contains_party_when_color() {
-        let answers = test_answers();
-        let msg = success_message(&answers, true);
+        let msg = success_message(true);
         assert!(msg.contains('\u{1f389}')); // 🎉
     }
 }

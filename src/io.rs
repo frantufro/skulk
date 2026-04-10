@@ -213,7 +213,7 @@ fn run_init() -> Result<(), SkulkError> {
     }
 
     // Success
-    eprintln!("{}", init::success_message(&answers, color));
+    eprintln!("{}", init::success_message(color));
 
     Ok(())
 }
