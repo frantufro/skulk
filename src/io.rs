@@ -68,7 +68,14 @@ impl Ssh for RealSsh {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            Err(classify_ssh_error(&stderr, &self.host))
+            // classify_ssh_error looks for SSH-specific keywords (connection refused,
+            // permission denied, host key) that would produce misleading suggestions
+            // like "ssh localhost whoami" for local sh -c failures. Skip it for localhost.
+            if local {
+                Err(SkulkError::SshFailed(stderr.trim().to_string()))
+            } else {
+                Err(classify_ssh_error(&stderr, &self.host))
+            }
         }
     }
 
