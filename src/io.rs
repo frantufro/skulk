@@ -22,7 +22,7 @@ use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
 use crate::ssh::Ssh;
-use crate::util::{confirm_from_reader, find_new_content_start};
+use crate::util::{confirm_from_reader, find_new_content_start, is_localhost};
 use crate::{Cli, Commands, run};
 
 /// Read a yes/no confirmation from stdin.
@@ -37,26 +37,32 @@ pub(crate) struct RealSsh {
 
 impl Ssh for RealSsh {
     fn run(&self, cmd: &str) -> Result<String, SkulkError> {
-        let output = ProcessCommand::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                &self.host,
-                cmd,
-            ])
-            .output()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    SkulkError::Diagnostic {
-                        message: "ssh command not found.".into(),
-                        suggestion: "Install OpenSSH.".into(),
-                    }
-                } else {
-                    SkulkError::SshExec(e.to_string())
+        let local = is_localhost(&self.host);
+
+        let output = if local {
+            ProcessCommand::new("sh").args(["-c", cmd]).output()
+        } else {
+            ProcessCommand::new("ssh")
+                .args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=10",
+                    &self.host,
+                    cmd,
+                ])
+                .output()
+        }
+        .map_err(|e| {
+            if !local && e.kind() == std::io::ErrorKind::NotFound {
+                SkulkError::Diagnostic {
+                    message: "ssh command not found.".into(),
+                    suggestion: "Install OpenSSH.".into(),
                 }
-            })?;
+            } else {
+                SkulkError::SshExec(e.to_string())
+            }
+        })?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -66,34 +72,42 @@ impl Ssh for RealSsh {
         }
     }
 
-    /// Run an SSH command interactively, inheriting stdin/stdout/stderr.
+    /// Run a command interactively, inheriting stdin/stdout/stderr.
     ///
     /// Unlike `run()` which captures output, this function uses `Command::status()`
     /// for full terminal passthrough. Used by `connect` to attach to tmux sessions.
     ///
-    /// Differences from `run()`:
+    /// For remote hosts:
     /// - Uses `-t` flag (force pseudo-terminal allocation for tmux)
     /// - Does NOT use `-o BatchMode=yes` (incompatible with interactive terminal)
     /// - Does NOT use `-o ConnectTimeout=10` (user expects to wait)
-    /// - Returns `ExitStatus` instead of String (output goes directly to terminal)
+    ///
+    /// For localhost: runs the command directly via `sh -c`.
     fn interactive(&self, cmd: &str) -> Result<std::process::ExitStatus, SkulkError> {
-        ProcessCommand::new("ssh")
-            .args(["-t", &self.host, cmd])
-            // Force xterm-256color because the default TERM inherited from the local shell
-            // may not be installed on the remote (e.g., alacritty, ghostty), causing ncurses
-            // errors inside tmux. xterm-256color is universally available.
-            .env("TERM", "xterm-256color")
-            .status()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    SkulkError::Diagnostic {
-                        message: "ssh command not found.".into(),
-                        suggestion: "Install OpenSSH.".into(),
-                    }
-                } else {
-                    SkulkError::SshExec(e.to_string())
+        let local = is_localhost(&self.host);
+
+        let result = if local {
+            ProcessCommand::new("sh").args(["-c", cmd]).status()
+        } else {
+            ProcessCommand::new("ssh")
+                .args(["-t", &self.host, cmd])
+                // Force xterm-256color because the default TERM inherited from the local shell
+                // may not be installed on the remote (e.g., alacritty, ghostty), causing ncurses
+                // errors inside tmux. xterm-256color is universally available.
+                .env("TERM", "xterm-256color")
+                .status()
+        };
+
+        result.map_err(|e| {
+            if !local && e.kind() == std::io::ErrorKind::NotFound {
+                SkulkError::Diagnostic {
+                    message: "ssh command not found.".into(),
+                    suggestion: "Install OpenSSH.".into(),
                 }
-            })
+            } else {
+                SkulkError::SshExec(e.to_string())
+            }
+        })
     }
 }
 

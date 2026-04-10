@@ -4,6 +4,13 @@ use crate::error::SkulkError;
 
 pub(crate) const STARTUP_DELAY: u32 = 5;
 
+/// Check whether a host refers to the local machine.
+///
+/// When true, commands run locally via `sh -c` instead of over SSH.
+pub(crate) fn is_localhost(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 /// Validate an agent name: [a-z0-9-], 1-30 chars,
 /// no leading/trailing/consecutive hyphens.
 pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
@@ -113,6 +120,28 @@ pub(crate) enum PromptStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── is_localhost tests ───────────────────────────────────────────────
+
+    #[test]
+    fn is_localhost_name() {
+        assert!(is_localhost("localhost"));
+    }
+
+    #[test]
+    fn is_localhost_ipv4_loopback() {
+        assert!(is_localhost("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_localhost_ipv6_loopback() {
+        assert!(is_localhost("::1"));
+    }
+
+    #[test]
+    fn is_localhost_remote_host() {
+        assert!(!is_localhost("myserver.example.com"));
+    }
 
     // ── validate_name tests ─────────────────────────────────────────────
 
