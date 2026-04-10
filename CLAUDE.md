@@ -28,7 +28,7 @@ cargo check                                      # Prefer over cargo build durin
 - `src/inventory.rs`   — `AgentInventory`, single-roundtrip state gathering
 - `src/testutil.rs`    — `MockSsh`, `test_config()`, mock builders (test-only)
 - `src/commands/`      — One module per command group, each with co-located tests
-  - `list.rs`, `pull.rs`, `new.rs`, `destroy.rs`, `interact.rs`, `bootstrap.rs`, `gc.rs`
+  - `init.rs`, `list.rs`, `pull.rs`, `new.rs`, `destroy.rs`, `interact.rs`, `gc.rs`
 
 ## Error Handling
 

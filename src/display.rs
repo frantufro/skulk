@@ -4,12 +4,53 @@ use crate::config::Config;
 
 const GREEN: &str = "\x1b[32m";
 const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
 pub(crate) static COLOR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub(crate) fn use_color() -> bool {
     COLOR_ENABLED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn checkmark(color: bool) -> &'static str {
+    if color {
+        "\x1b[32m\u{2713}\x1b[0m"
+    } else {
+        "[ok]"
+    }
+}
+
+pub(crate) fn crossmark(color: bool) -> &'static str {
+    if color {
+        "\x1b[31m\u{2717}\x1b[0m"
+    } else {
+        "[FAIL]"
+    }
+}
+
+pub(crate) fn bold(text: &str, color: bool) -> String {
+    if color {
+        format!("{BOLD}{text}{RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
+pub(crate) fn dim(text: &str, color: bool) -> String {
+    if color {
+        format!("{DIM}{text}{RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
+pub(crate) fn green(text: &str, color: bool) -> String {
+    if color {
+        format!("{GREEN}{text}{RESET}")
+    } else {
+        text.to_string()
+    }
 }
 
 // ── Session types ───────────────────────────────────────────────────────────

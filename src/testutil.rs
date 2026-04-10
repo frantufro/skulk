@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
+use crate::commands::init::Prompter;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
@@ -67,6 +68,38 @@ pub(crate) fn mock_inventory(
     }
     out.push_str("__BRANCHES_END__\n");
     out
+}
+
+pub(crate) struct MockPrompter {
+    responses: VecDeque<String>,
+}
+
+impl MockPrompter {
+    pub fn new(responses: Vec<&str>) -> Self {
+        Self {
+            responses: responses.into_iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+impl Prompter for MockPrompter {
+    fn prompt(&mut self, _message: &str) -> Result<String, SkulkError> {
+        self.responses
+            .pop_front()
+            .ok_or_else(|| SkulkError::Validation("MockPrompter: no more responses".into()))
+    }
+
+    fn confirm(&mut self, _message: &str, default_yes: bool) -> Result<bool, SkulkError> {
+        let response = self
+            .responses
+            .pop_front()
+            .ok_or_else(|| SkulkError::Validation("MockPrompter: no more responses".into()))?;
+        let answer = response.trim().to_lowercase();
+        if answer.is_empty() {
+            return Ok(default_yes);
+        }
+        Ok(answer == "y" || answer == "yes")
+    }
 }
 
 /// Helper: build a mock list_command response with epoch, tmux sessions, and worktrees.

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{bootstrap, destroy, gc, interact, list, new, pull};
+use commands::{destroy, gc, interact, list, new, pull};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -90,15 +90,12 @@ pub(crate) enum Commands {
         force: bool,
     },
 
-    /// Set up the remote server from scratch
+    /// Set up skulk for this project
     ///
-    /// Installs tmux, git, and Claude Code on the remote server, then clones
-    /// the repo and creates the worktree directory. Safe to re-run (idempotent).
-    Bootstrap {
-        /// Git repo URL to clone on the remote server
-        #[arg(long)]
-        repo_url: String,
-    },
+    /// Interactive wizard that creates .skulk.toml and optionally sets up
+    /// the remote server (install tools, clone repo, create worktree dir).
+    /// Run this first in any new project.
+    Init,
 
     /// Clean up orphaned tmux sessions, worktrees, and branches
     ///
@@ -159,12 +156,12 @@ pub(crate) fn run(
     send_verify_delay: Duration,
 ) -> Result<(), (String, SkulkError)> {
     let cmd_name = match &cli.command {
+        Commands::Init => unreachable!("Init is handled before config loading"),
         Commands::List => "list",
         Commands::Pull { .. } => "pull",
         Commands::New { .. } => "new",
         Commands::Destroy { .. } => "destroy",
         Commands::DestroyAll { .. } => "destroy-all",
-        Commands::Bootstrap { .. } => "bootstrap",
         Commands::Gc { .. } => "gc",
         Commands::Connect { .. } => "connect",
         Commands::Logs { .. } => "logs",
@@ -172,12 +169,12 @@ pub(crate) fn run(
     };
 
     let result = match cli.command {
+        Commands::Init => unreachable!(),
         Commands::List => list::cmd_list(ssh, cfg),
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
         Commands::New { name, prompt } => new::cmd_new(ssh, &name, prompt.as_deref(), cfg),
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
-        Commands::Bootstrap { repo_url } => bootstrap::cmd_bootstrap(ssh, &repo_url, cfg),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
         Commands::Connect { name } => interact::cmd_connect(ssh, &name, cfg),
         Commands::Logs {
@@ -273,22 +270,6 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::DestroyAll { force: true },
-        };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
-    }
-
-    #[test]
-    fn run_dispatches_bootstrap() {
-        let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(
-            "tmux:installed\ngit:installed\nclaude:installed\nrepo:cloned\nworktree-dir:exists"
-                .into(),
-        )]);
-        let cli = Cli {
-            no_color: true,
-            command: Commands::Bootstrap {
-                repo_url: "https://example.com/repo.git".into(),
-            },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
     }

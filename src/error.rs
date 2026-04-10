@@ -15,6 +15,9 @@ pub(crate) enum SkulkError {
     /// Resource not found
     #[error("{0}")]
     NotFound(String),
+    /// User aborted an interactive operation
+    #[error("Aborted.")]
+    InitAborted,
 }
 
 pub(crate) fn classify_ssh_error(stderr: &str, host: &str) -> SkulkError {

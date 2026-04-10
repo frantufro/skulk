@@ -4,17 +4,6 @@ use serde::Deserialize;
 
 pub(crate) const CONFIG_FILENAME: &str = ".skulk.toml";
 
-/// Sample `.skulk.toml` written when no config file exists.
-const SAMPLE_CONFIG: &str = r#"# skulk CLI configuration
-# Edit these values for your project and server.
-
-host = "your-server"
-session_prefix = "skulk-"
-base_path = "~/your-project"
-worktree_base = "~/your-project-worktrees"
-# default_branch = "main"
-"#;
-
 /// Runtime configuration loaded from `.skulk.toml`.
 ///
 /// All fields are mandatory. If no config file is found in the current
@@ -38,7 +27,7 @@ fn default_branch() -> String {
 ///
 /// Values are interpolated into shell commands without quoting, so they must not
 /// contain spaces, quotes, or other metacharacters.
-fn validate_shell_safe(value: &str, field: &str) -> Result<(), String> {
+pub(crate) fn validate_shell_safe(value: &str, field: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("'{field}' cannot be empty in {CONFIG_FILENAME}"));
     }
@@ -81,18 +70,9 @@ fn find_config_file(start: &Path) -> Option<PathBuf> {
 /// - The config file has invalid TOML or missing fields
 pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
     let Some(path) = find_config_file(start) else {
-        let generated = start.join(CONFIG_FILENAME);
-        return match std::fs::write(&generated, SAMPLE_CONFIG) {
-            Ok(()) => Err(format!(
-                "No {CONFIG_FILENAME} found. Generated sample at {}.\n\
-                 Edit it with your server and project settings, then re-run.",
-                generated.display()
-            )),
-            Err(e) => Err(format!(
-                "No {CONFIG_FILENAME} found and could not generate sample at {}: {e}",
-                generated.display()
-            )),
-        };
+        return Err(format!(
+            "No {CONFIG_FILENAME} found. Run `skulk init` to set up this project."
+        ));
     };
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
@@ -162,18 +142,18 @@ mod tests {
     }
 
     #[test]
-    fn config_load_generates_sample_when_no_file() {
+    fn config_load_suggests_init_when_no_file() {
         let dir = std::env::temp_dir().join("skulk_nogenerate_test");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
         let result = load_config(&dir);
         assert!(result.is_err());
-
-        let generated = dir.join(CONFIG_FILENAME);
-        assert!(generated.exists(), "sample config should be generated");
-        let content = std::fs::read_to_string(&generated).unwrap();
-        assert!(content.contains("host"), "sample should contain host field");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("skulk init"),
+            "should suggest skulk init: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
