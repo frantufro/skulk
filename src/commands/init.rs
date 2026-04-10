@@ -570,6 +570,12 @@ mod tests {
         assert_eq!(parse_repo_name("just-a-name"), None);
     }
 
+    #[test]
+    fn parse_repo_name_colon_only_dot_git_returns_none() {
+        // "git@host:.git" → strip ".git" → "git@host:" → rsplit_once(':') yields empty name
+        assert_eq!(parse_repo_name("git@host:.git"), None);
+    }
+
     // ── detect_git_context ─────────────────────────────────────────────
 
     #[test]
@@ -810,7 +816,10 @@ mod tests {
             "myserver", // SSH host (never reached)
         ]);
         let result = run_wizard(&mut prompter, &bad_ctx, false, false, &mock_ssh_test_ok);
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(SkulkError::Validation(ref msg)) if msg.contains("repo_name")),
+            "expected Validation error mentioning repo_name, got {result:?}"
+        );
     }
 
     // ── setup commands ─────────────────────────────────────────────────
