@@ -27,7 +27,7 @@ Claude Code is great, but it works on one thing at a time. If you have a beefy d
 
 **Local machine:** OpenSSH client, Rust toolchain (to build Skulk)
 
-**Remote server:** SSH access with key-based auth. Skulk's `bootstrap` command will install everything else (tmux, git, Claude Code).
+**Remote server:** SSH access with key-based auth. Skulk's `init` command will install everything else (tmux, git, Claude Code).
 
 ## Install
 
@@ -38,7 +38,7 @@ cargo install --path .
 Or build from source:
 
 ```bash
-git clone https://github.com/yourusername/skulk.git
+git clone https://github.com/frantufro/skulk.git
 cd skulk
 cargo build --release
 # Binary is at target/release/skulk
@@ -46,15 +46,27 @@ cargo build --release
 
 ## Quick Start
 
-### 1. Configure
+### 1. Initialize
 
-Run `skulk` in your project directory. It will generate a `.skulk.toml` for you:
+Run `skulk init` in your project directory. The interactive wizard will:
+
+- Detect your git remote and default branch
+- Ask for your SSH host and test connectivity
+- Generate a `.skulk.toml` config file
+- Optionally set up the remote server (install tools, clone repo, create worktree directory)
+
+```bash
+skulk init
+```
+
+The generated config looks like:
 
 ```toml
 host = "your-server"
-session_prefix = "skulk-"
-base_path = "~/your-project"
-worktree_base = "~/your-project-worktrees"
+session_prefix = "my-project-"
+base_path = "~/my-project"
+worktree_base = "~/my-project-worktrees"
+default_branch = "main"
 ```
 
 | Field | Description |
@@ -63,21 +75,11 @@ worktree_base = "~/your-project-worktrees"
 | `session_prefix` | Prefix for tmux sessions and git branches |
 | `base_path` | Path to the main git clone on the remote |
 | `worktree_base` | Directory where agent worktrees are created |
+| `default_branch` | Branch that new worktrees are based on (default: `main`) |
 
 The config file is searched upward from your current directory, so you can place it at your project root.
 
-### 2. Bootstrap the remote server
-
-```bash
-skulk bootstrap --repo-url https://github.com/you/your-project.git
-```
-
-This is idempotent — safe to re-run. It will:
-- Install tmux, git, and Claude Code if missing
-- Clone your repo to `base_path`
-- Create the `worktree_base` directory
-
-### 3. Spin up agents
+### 2. Spin up agents
 
 ```bash
 # Create an agent and give it a task
@@ -87,7 +89,7 @@ skulk new fix-bug "Fix the null pointer exception in UserService.java"
 skulk new explore
 ```
 
-### 4. Monitor and interact
+### 3. Monitor and interact
 
 ```bash
 # See what's running
@@ -110,9 +112,12 @@ skulk connect fix-bug
 skulk send fix-bug "Actually, also add a test for the edge case"
 ```
 
-### 5. Clean up
+### 4. Pull changes and clean up
 
 ```bash
+# Update the base clone on the remote
+skulk pull
+
 # Destroy a specific agent (session + worktree + branch)
 skulk destroy fix-bug
 
@@ -130,15 +135,15 @@ skulk gc --dry-run
 
 | Command | Description |
 |---------|-------------|
+| `skulk init` | Interactive setup wizard — generates config and optionally provisions the remote server |
 | `skulk list` | List all running agents with status, uptime, and worktree path |
 | `skulk new <name> [prompt]` | Create a new agent with its own worktree; optionally send an initial prompt |
-| `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
-| `skulk destroy-all` | Destroy all agents at once |
 | `skulk connect <name>` | Attach to an agent's live tmux session |
 | `skulk logs <name>` | View an agent's terminal output |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent |
 | `skulk pull` | Update the base clone (`git pull --ff-only`) |
-| `skulk bootstrap --repo-url <url>` | Set up the remote server from scratch |
+| `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
+| `skulk destroy-all` | Destroy all agents at once |
 | `skulk gc` | Clean up orphaned sessions, worktrees, and branches |
 
 ## How It Works
@@ -146,6 +151,11 @@ skulk gc --dry-run
 ```
 Local                          Remote Server
 ─────                          ─────────────
+skulk init ──────SSH──►  Tests connectivity
+                         Installs tmux, git, claude (if missing)
+                         Clones repo to base_path
+                         Creates worktree_base directory
+
 skulk new auth ──SSH──►  git worktree add ~/worktrees/skulk-auth
                          tmux new-session -d -s skulk-auth
                          (starts claude in the worktree)
@@ -193,7 +203,7 @@ Skulk gives you actionable diagnostics instead of raw SSH errors:
 - **Host key verification failed** — accept the host key first
 - **Permission denied** — check your SSH key or config
 - **Agent not found** — the named agent doesn't exist; use `skulk list` to see what's running
-- **Base clone missing** — run `skulk bootstrap` or clone manually
+- **Base clone missing** — run `skulk init` to set up the remote server
 
 Destructive operations (`destroy`, `destroy-all`) require confirmation unless `--force` is passed. If agent creation fails partway through (e.g., tmux session can't start), the worktree is automatically rolled back.
 
@@ -219,9 +229,13 @@ src/
 ├── inventory.rs     Single-roundtrip remote state gathering
 ├── testutil.rs      MockSsh and test builders (test-only)
 └── commands/
-    ├── list.rs      bootstrap.rs    gc.rs
-    ├── pull.rs      destroy.rs      interact.rs
-    └── new.rs
+    ├── init.rs      Interactive setup wizard and remote provisioning
+    ├── list.rs      Agent listing and status display
+    ├── new.rs       Agent creation with worktree isolation
+    ├── pull.rs      Base clone updates
+    ├── destroy.rs   Agent teardown (single and bulk)
+    ├── interact.rs  Connect, logs, and send
+    └── gc.rs        Orphan detection and cleanup
 ```
 
 Everything is tested through an injectable `Ssh` trait with a `MockSsh` test double — no real SSH calls in the test suite.
@@ -232,4 +246,4 @@ Contributions are welcome. Please make sure `cargo fmt`, `cargo clippy -- -D war
 
 ## License
 
-MIT
+[MIT](LICENSE)
