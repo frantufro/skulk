@@ -18,6 +18,7 @@ use clap::Parser;
 use crate::commands::init::{self, Prompter};
 use crate::commands::interact::logs_snapshot_deep_command;
 use crate::config::{self, Config, load_config};
+use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
 use crate::ssh::Ssh;
@@ -201,7 +202,7 @@ fn run_init() -> Result<(), SkulkError> {
     std::fs::write(&config_path, toml_content).map_err(|e| {
         SkulkError::Validation(format!("Failed to write {}: {e}", config_path.display()))
     })?;
-    eprintln!("\n  Writing .skulk.toml... {}", init::checkmark_str(color));
+    eprintln!("\n  Writing .skulk.toml... {}", checkmark(color));
 
     // Remote setup if requested
     if answers.run_setup {

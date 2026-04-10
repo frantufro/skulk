@@ -50,7 +50,10 @@ pub(crate) fn parse_repo_name(url: &str) -> Option<String> {
     let url = url.strip_suffix('/').unwrap_or(url);
 
     // Try splitting by '/' first (HTTPS), then ':' (SSH)
-    let name = url.rsplit('/').next().or_else(|| url.rsplit(':').next())?;
+    let name = url
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .or_else(|| url.rsplit_once(':').map(|(_, name)| name))?;
 
     if name.is_empty() {
         None
@@ -119,7 +122,7 @@ pub(crate) fn run_wizard(
     // Step 3: SSH host (required) + connectivity test
     let host = prompt_and_test_ssh(prompter, color, test_ssh)?;
 
-    // Step 5: Session prefix
+    // Step 4: Session prefix
     let default_prefix = format!("{repo_name}-");
     let session_prefix = loop {
         let input = prompter.prompt(&format!(
@@ -139,7 +142,7 @@ pub(crate) fn run_wizard(
         break value;
     };
 
-    // Step 6: Default branch
+    // Step 5: Default branch
     let detected_branch = git_ctx.default_branch.as_deref().unwrap_or("main");
     let default_branch = loop {
         let input = prompter.prompt(&format!(
@@ -159,11 +162,11 @@ pub(crate) fn run_wizard(
         break value;
     };
 
-    // Step 7: Derive paths
+    // Step 6: Derive paths
     let base_path = format!("~/{repo_name}");
     let worktree_base = format!("~/{repo_name}-worktrees");
 
-    // Step 8: Show config summary
+    // Step 7: Show config summary
     eprintln!();
     eprintln!("  {}", bold("Config:", color));
     eprintln!("    host           = {host}");
@@ -172,7 +175,7 @@ pub(crate) fn run_wizard(
     eprintln!("    worktree_base  = {worktree_base}");
     eprintln!("    default_branch = {default_branch}");
 
-    // Step 9: Remote setup?
+    // Step 8: Remote setup?
     let run_setup = prompter.confirm(
         &format!(
             "\n{} Set up {host} now? {}",
@@ -262,9 +265,16 @@ fn detect_repo_info(
                 eprintln!("  Repo name cannot be empty.");
                 continue;
             }
+            if let Err(e) = validate_shell_safe(&input, "repo_name") {
+                eprintln!("  {e}");
+                continue;
+            }
             break input;
         }
     };
+
+    // Validate repo_name even when auto-detected (it flows into shell commands and TOML)
+    validate_shell_safe(&repo_name, "repo_name").map_err(SkulkError::Validation)?;
 
     Ok((repo_url, repo_name))
 }
@@ -425,7 +435,9 @@ pub(crate) fn run_remote_setup(
                 answers.base_path
             );
         }
-        _ => {}
+        other => {
+            eprintln!("  ? repo: unexpected status ({other})");
+        }
     }
 
     // Step 5: Create worktree dir if needed
@@ -438,18 +450,15 @@ pub(crate) fn run_remote_setup(
             ssh.run(&setup_create_worktree_dir_command(&answers.worktree_base))?;
             eprintln!("  {} worktree dir created", checkmark(color));
         }
-        _ => {}
+        other => {
+            eprintln!("  ? worktree dir: unexpected status ({other})");
+        }
     }
 
     Ok(())
 }
 
 // ── Display ────────────────────────────────────────────────────────────────
-
-/// Return a checkmark string (convenience for io.rs).
-pub(crate) fn checkmark_str(color: bool) -> &'static str {
-    checkmark(color)
-}
 
 /// Build the welcome banner.
 pub(crate) fn welcome_banner(color: bool) -> String {
@@ -548,6 +557,17 @@ mod tests {
     #[test]
     fn parse_repo_name_just_slash_returns_none() {
         assert_eq!(parse_repo_name("/"), None);
+    }
+
+    #[test]
+    fn parse_repo_name_ssh_no_path_separator() {
+        assert_eq!(parse_repo_name("git@host:repo.git"), Some("repo".into()));
+    }
+
+    #[test]
+    fn parse_repo_name_bare_name_returns_none() {
+        // No '/' or ':' means rsplit_once returns None for both
+        assert_eq!(parse_repo_name("just-a-name"), None);
     }
 
     // ── detect_git_context ─────────────────────────────────────────────
@@ -755,6 +775,42 @@ mod tests {
             &mock_ssh_test_fail,
         );
         assert!(matches!(result, Err(SkulkError::InitAborted)));
+    }
+
+    #[test]
+    fn wizard_rejects_unsafe_manual_repo_name() {
+        // Git context has URL but no parseable repo name
+        let ctx = GitContext {
+            remote_url: Some("not-a-url".into()),
+            default_branch: Some("main".into()),
+            repo_name: None,
+        };
+        let mut prompter = MockPrompter::new(vec![
+            "bad name",  // repo name with space (rejected)
+            "good-name", // repo name (accepted)
+            "myserver",  // SSH host
+            "",          // prefix default
+            "",          // branch default
+            "n",         // skip setup
+        ]);
+        let result = run_wizard(&mut prompter, &ctx, false, false, &mock_ssh_test_ok);
+        let answers = result.expect("wizard should succeed after retry");
+        assert_eq!(answers.repo_name, "good-name");
+    }
+
+    #[test]
+    fn wizard_validates_auto_detected_repo_name() {
+        // Git context with a repo_name that somehow contains unsafe chars
+        let bad_ctx = GitContext {
+            remote_url: Some("https://example.com/repo.git".into()),
+            default_branch: Some("main".into()),
+            repo_name: Some("bad name".into()),
+        };
+        let mut prompter = MockPrompter::new(vec![
+            "myserver", // SSH host (never reached)
+        ]);
+        let result = run_wizard(&mut prompter, &bad_ctx, false, false, &mock_ssh_test_ok);
+        assert!(result.is_err());
     }
 
     // ── setup commands ─────────────────────────────────────────────────
