@@ -10,5 +10,3 @@ Add `skulk ship <name>` — push the agent's branch and open a PR with a **Claud
 - Pick at implementation time
 
 Requires `gh` CLI on the remote; detect and error cleanly if missing.
-
-See also: `ship-task-integration` for the tasks-system side of this command.
