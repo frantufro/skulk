@@ -2,15 +2,14 @@
 status: READY
 ---
 
-Investigate and fix/work-around the `--remote-control` idle-death bug.
+Document the `--remote-control` idle-death limitation in the README.
 
-Claude Code `--remote-control` sessions die after ~20 min of inactivity, which undermines skulk's entire "spin up and come back later" workflow.
+After `remote-control-flag` lands, `--remote-control` is opt-in. When enabled, sessions die after ~20 min of inactivity ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)).
 
-Upstream: https://github.com/anthropics/claude-code/issues/32982
+**Deliverables**:
+- README note next to the `--remote-control` flag explaining the limitation and linking the upstream issue
+- Optional: keepalive-loop helper as part of `init.sh` examples (sends a no-op activity every 15 min when in remote-control mode)
 
-**Possible approaches**:
-- Keepalive loop that sends periodic no-op activity to the session
-- Alternate launch mode (not `--remote-control`)
-- Wait for upstream fix and document the limitation
+**No code workaround required** unless the keepalive helper is wanted — the limitation is acceptable for the opt-in mobile-app use case.
 
-Start with an investigation writeup; then propose a fix.
+**Depends on**: `remote-control-flag`.
