@@ -11,6 +11,12 @@ pub(crate) fn connect_command(name: &str, cfg: &Config) -> String {
     format!("tmux attach-session -t {session_prefix}{name}")
 }
 
+/// Build the SSH command to detach all clients from an agent's tmux session.
+pub(crate) fn disconnect_command(name: &str, cfg: &Config) -> String {
+    let session_prefix = &cfg.session_prefix;
+    format!("tmux detach-client -s {session_prefix}{name}")
+}
+
 /// Build the SSH command to capture the visible pane content of an agent's tmux session.
 ///
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
@@ -33,6 +39,20 @@ pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
     format!("tmux send-keys -t {session_prefix}{name} '{escaped}' C-m")
+}
+
+/// Detach all clients currently attached to an agent's tmux session.
+///
+/// Useful when an agent was attached from another terminal (or a stuck SSH
+/// session) and the local `Ctrl+B D` keybinding is unavailable. The agent
+/// keeps running -- only the attached clients are kicked off.
+pub(crate) fn cmd_disconnect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+    validate_name(name)?;
+    let session_prefix = &cfg.session_prefix;
+    ssh.run(&disconnect_command(name, cfg))
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    eprintln!("Detached all clients from {session_prefix}{name}.");
+    Ok(())
 }
 
 /// Attach to an agent's live tmux session via interactive SSH.
@@ -124,6 +144,49 @@ mod tests {
         let cfg = test_config();
         let cmd = connect_command("my-task", &cfg);
         assert_eq!(cmd, "tmux attach-session -t skulk-my-task");
+    }
+
+    #[test]
+    fn disconnect_command_generates_tmux_detach_client() {
+        let cfg = test_config();
+        let cmd = disconnect_command("my-task", &cfg);
+        assert_eq!(cmd, "tmux detach-client -s skulk-my-task");
+    }
+
+    #[test]
+    fn disconnect_command_uses_session_prefix() {
+        let cfg = test_config();
+        let cmd = disconnect_command("test", &cfg);
+        assert!(cmd.contains(&*cfg.session_prefix));
+    }
+
+    #[test]
+    fn cmd_disconnect_succeeds() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        assert!(cmd_disconnect(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_disconnect_agent_not_found() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find session: skulk-ghost".into(),
+        ))]);
+        let result = cmd_disconnect(&ssh, "ghost", &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_disconnect_rejects_invalid_name() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_disconnect(&ssh, "../bad", &cfg);
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
     #[test]

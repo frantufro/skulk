@@ -115,6 +115,15 @@ pub(crate) enum Commands {
         name: String,
     },
 
+    /// Detach all clients from an agent's tmux session
+    ///
+    /// Useful when an agent is attached from another terminal and you can't
+    /// reach the keyboard to detach with Ctrl+B D. The agent keeps running.
+    Disconnect {
+        /// Agent name to detach clients from
+        name: String,
+    },
+
     /// View an agent's terminal output
     ///
     /// Shows a snapshot of the agent's current terminal by default.
@@ -164,6 +173,7 @@ pub(crate) fn run(
         Commands::DestroyAll { .. } => "destroy-all",
         Commands::Gc { .. } => "gc",
         Commands::Connect { .. } => "connect",
+        Commands::Disconnect { .. } => "disconnect",
         Commands::Logs { .. } => "logs",
         Commands::Send { .. } => "send",
     };
@@ -177,6 +187,7 @@ pub(crate) fn run(
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
         Commands::Connect { name } => interact::cmd_connect(ssh, &name, cfg),
+        Commands::Disconnect { name } => interact::cmd_disconnect(ssh, &name, cfg),
         Commands::Logs {
             name,
             follow,
@@ -296,6 +307,19 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::Connect {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_disconnect() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Disconnect {
                 name: "test".into(),
             },
         };
