@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::config::Config;
 
 const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
@@ -59,6 +60,7 @@ pub(crate) fn green(text: &str, color: bool) -> String {
 pub(crate) enum SessionState {
     Attached,
     Running,
+    Stopped,
 }
 
 #[derive(Debug, Clone)]
@@ -146,17 +148,24 @@ pub(crate) fn format_sessions_table_with_color(
 
     for s in sessions {
         let display_name = s.name.strip_prefix(&*cfg.session_prefix).unwrap_or(&s.name);
+        let stopped = s.state == SessionState::Stopped;
         let status_raw = match s.state {
             SessionState::Attached => "attached",
             SessionState::Running => "running",
+            SessionState::Stopped => "stopped",
         };
         let padded = format!("{status_raw:<10}");
         let status_display = if color {
-            format!("{GREEN}{padded}{RESET}")
+            let color_code = if stopped { YELLOW } else { GREEN };
+            format!("{color_code}{padded}{RESET}")
         } else {
             padded
         };
-        let uptime = format_uptime(remote_now, s.created);
+        let uptime = if stopped {
+            "-".to_string()
+        } else {
+            format_uptime(remote_now, s.created)
+        };
         let wt = s.worktree.as_deref().unwrap_or("-");
         lines.push(format!(
             "{display_name:<20} {status_display} {uptime:<12} {wt}"
@@ -400,6 +409,45 @@ mod tests {
         let data_line = result.lines().nth(1).unwrap();
         assert!(data_line.starts_with("my-task"));
         assert!(!data_line.starts_with("skulk-"));
+    }
+
+    #[test]
+    fn format_sessions_table_stopped_status() {
+        let cfg = test_config();
+        let sessions = vec![Session {
+            name: "skulk-zombie".to_string(),
+            created: 0,
+            state: SessionState::Stopped,
+            worktree: Some("~/test-project-worktrees/skulk-zombie".into()),
+        }];
+        let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
+        assert!(
+            result.contains("stopped"),
+            "should show stopped status: {result}"
+        );
+    }
+
+    #[test]
+    fn format_sessions_table_stopped_shows_dash_for_uptime() {
+        let cfg = test_config();
+        let sessions = vec![Session {
+            name: "skulk-zombie".to_string(),
+            created: 0,
+            state: SessionState::Stopped,
+            worktree: Some("~/test-project-worktrees/skulk-zombie".into()),
+        }];
+        let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
+        let data_line = result.lines().nth(1).unwrap();
+        // Uptime column should show "-" not a computed duration
+        assert!(
+            data_line.contains("stopped"),
+            "should show stopped: {data_line}"
+        );
+        // The uptime field (third column) should be "-"
+        let parts: Vec<&str> = data_line.split_whitespace().collect();
+        // name, status, uptime, worktree...
+        assert_eq!(parts[1], "stopped");
+        assert_eq!(parts[2], "-");
     }
 
     #[test]

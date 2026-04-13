@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::display::{Session, format_sessions_table, parse_sessions};
+use crate::display::{Session, SessionState, format_sessions_table, parse_sessions};
 use crate::error::{SkulkError, is_tmux_no_server};
 use crate::inventory::get_worktree_map;
 use crate::ssh::Ssh;
@@ -60,6 +60,18 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
         session.worktree = worktree_map.get(&session.name).cloned();
     }
 
+    // Orphaned worktrees (no matching tmux session) appear as stopped agents
+    for (name, path) in &worktree_map {
+        if !sessions.iter().any(|s| &s.name == name) {
+            sessions.push(Session {
+                name: name.clone(),
+                created: 0,
+                state: SessionState::Stopped,
+                worktree: Some(path.clone()),
+            });
+        }
+    }
+
     (sessions, remote_now)
 }
 
@@ -73,6 +85,7 @@ pub(crate) fn cmd_list(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display::SessionState;
     use crate::testutil::{MockSsh, mock_list_output, test_config};
 
     #[test]
@@ -148,6 +161,39 @@ mod tests {
         let output = "__EPOCH__abc__EPOCH__\nskulk-test\t1700000000\t1700000100\t0";
         let epoch = parse_remote_epoch(output);
         assert!(epoch > 0);
+    }
+
+    #[test]
+    fn parse_list_output_shows_orphaned_worktree_as_stopped() {
+        let cfg = test_config();
+        // Worktree exists but no matching tmux session
+        let raw = mock_list_output(
+            1_700_000_000,
+            "no server running on /tmp/tmux-1000/default",
+            &[("skulk-zombie", "/home/user/agents/skulk-zombie")],
+        );
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "skulk-zombie");
+        assert_eq!(sessions[0].state, SessionState::Stopped);
+        assert_eq!(
+            sessions[0].worktree.as_deref(),
+            Some("/home/user/agents/skulk-zombie")
+        );
+    }
+
+    #[test]
+    fn parse_list_output_does_not_duplicate_matched_worktrees() {
+        let cfg = test_config();
+        // Session AND worktree both exist — should appear once as Running, not also as Stopped
+        let raw = mock_list_output(
+            1_700_000_000,
+            "skulk-test\t1700000000\t1700000100\t0",
+            &[("skulk-test", "/home/user/agents/skulk-test")],
+        );
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, SessionState::Running);
     }
 
     #[test]

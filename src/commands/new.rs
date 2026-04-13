@@ -93,9 +93,17 @@ pub(crate) fn cmd_new(
     // Step 2: Fetch inventory and check uniqueness
     let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
     let session_name = format!("{session_prefix}{name}");
-    if inv.sessions.contains(&session_name) || inv.worktrees.contains_key(&session_name) {
+    let has_session = inv.sessions.contains(&session_name);
+    let has_worktree = inv.worktrees.contains_key(&session_name);
+    if has_session {
         return Err(SkulkError::Validation(format!(
             "Agent '{name}' already exists."
+        )));
+    }
+    if has_worktree {
+        return Err(SkulkError::Validation(format!(
+            "Agent '{name}' has a leftover worktree but no running session.\n  \
+             Clean it up with: `skulk destroy {name}` or `skulk gc`"
         )));
     }
 
@@ -248,6 +256,31 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("already exists")),
+            other => panic!("expected Validation, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_new_orphaned_worktree_suggests_destroy() {
+        let cfg = test_config();
+        // No session, but worktree exists (zombie state)
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-zombie", "/path/skulk-zombie")],
+                &["skulk-zombie"],
+            )),
+        ]);
+        let result = cmd_new(&ssh, "zombie", None, &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::Validation(msg) => {
+                assert!(
+                    msg.contains("skulk destroy zombie"),
+                    "should suggest destroy: {msg}"
+                );
+            }
             other => panic!("expected Validation, got: {other}"),
         }
     }
