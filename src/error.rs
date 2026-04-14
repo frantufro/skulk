@@ -70,6 +70,8 @@ pub(crate) fn classify_agent_error(name: &str, err: SkulkError, host: &str) -> S
             if lower.contains("session not found")
                 || lower.contains("can't find session")
                 || lower.contains("can't find pane")
+                || lower.contains("unknown revision")
+                || lower.contains("not a valid object name")
             {
                 SkulkError::NotFound(format!(
                     "Agent '{name}' not found. Check running agents with `skulk list`."
@@ -254,6 +256,32 @@ mod tests {
             SkulkError::NotFound(msg) => {
                 assert!(msg.contains("bar"));
             }
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_unknown_revision_returns_not_found() {
+        let err = SkulkError::SshFailed(
+            "fatal: ambiguous argument 'main...skulk-foo': unknown revision or path not in the working tree"
+                .to_string(),
+        );
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::NotFound(msg) => {
+                assert!(msg.contains("foo"));
+                assert!(msg.contains("not found"));
+            }
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_not_a_valid_object_name_returns_not_found() {
+        let err = SkulkError::SshFailed("fatal: Not a valid object name skulk-foo".to_string());
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
             other => panic!("expected NotFound, got: {other}"),
         }
     }
