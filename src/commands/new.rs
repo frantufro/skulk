@@ -34,12 +34,18 @@ pub(crate) fn agent_create_tmux_command(name: &str, cfg: &Config) -> String {
 /// The sleep runs on the remote so it does not block the laptop CLI.
 /// Checks that the session is still alive after sleeping before attempting send-keys,
 /// so it fails cleanly if Claude Code exited during startup.
+///
+/// Splits the send into two `tmux send-keys` calls with a short gap: the first types
+/// the prompt, the second submits with Enter. Defeats Claude Code's paste-detection,
+/// which otherwise swallows the trailing Enter as a newline inside the input box.
 pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
     format!(
         "sleep {STARTUP_DELAY} && tmux has-session -t {session_prefix}{name} && \
-         tmux send-keys -t {session_prefix}{name} '{escaped}' C-m"
+         tmux send-keys -t {session_prefix}{name} '{escaped}' && \
+         sleep 0.1 && \
+         tmux send-keys -t {session_prefix}{name} Enter"
     )
 }
 
@@ -197,7 +203,26 @@ mod tests {
         assert!(cmd.contains("sleep 5"));
         assert!(cmd.contains("tmux send-keys -t skulk-my-task"));
         assert!(cmd.contains("'fix the bug'"));
-        assert!(cmd.contains("C-m"));
+        assert!(cmd.contains("Enter"));
+    }
+
+    #[test]
+    fn agent_send_prompt_command_splits_typing_and_submit() {
+        let cfg = test_config();
+        let cmd = agent_send_prompt_command("my-task", "fix the bug", &cfg);
+        let type_idx = cmd
+            .find("'fix the bug'")
+            .expect("prompt typing step missing");
+        let submit_sleep_idx = cmd[type_idx..]
+            .find("sleep 0.1")
+            .map(|i| i + type_idx)
+            .expect("submit delay missing");
+        let enter_idx = cmd[submit_sleep_idx..]
+            .find("Enter")
+            .map(|i| i + submit_sleep_idx)
+            .expect("submit step missing");
+        assert!(type_idx < submit_sleep_idx);
+        assert!(submit_sleep_idx < enter_idx);
     }
 
     #[test]
