@@ -43,10 +43,19 @@ pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -
 ///
 /// Unlike `agent_send_prompt_command()` (in new.rs) which includes a startup delay,
 /// this targets an already-running agent -- no delay needed.
+///
+/// Splits into two `tmux send-keys` calls with a short sleep in between: the first
+/// types the prompt text, the second submits with Enter. The gap defeats Claude
+/// Code's paste-detection, which otherwise swallows the trailing Enter as a
+/// newline inside the input box instead of submitting.
 pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
-    format!("tmux send-keys -t {session_prefix}{name} '{escaped}' C-m")
+    format!(
+        "tmux send-keys -t {session_prefix}{name} '{escaped}' && \
+         sleep 0.1 && \
+         tmux send-keys -t {session_prefix}{name} Enter"
+    )
 }
 
 /// Show `git diff` between the default branch and an agent's branch.
@@ -322,17 +331,24 @@ mod tests {
     }
 
     #[test]
-    fn send_command_generates_send_keys() {
+    fn send_command_types_prompt_then_submits() {
         let cfg = test_config();
         let cmd = send_command("my-task", "fix the bug", &cfg);
-        assert_eq!(cmd, "tmux send-keys -t skulk-my-task 'fix the bug' C-m");
+        assert!(cmd.contains("tmux send-keys -t skulk-my-task 'fix the bug'"));
+        assert!(cmd.contains("tmux send-keys -t skulk-my-task Enter"));
     }
 
     #[test]
-    fn send_command_excludes_sleep() {
+    fn send_command_splits_typing_and_submit_with_sleep() {
         let cfg = test_config();
         let cmd = send_command("my-task", "fix the bug", &cfg);
-        assert!(!cmd.contains("sleep"));
+        let type_idx = cmd
+            .find("'fix the bug'")
+            .expect("prompt typing step missing");
+        let sleep_idx = cmd.find("sleep").expect("submit delay missing");
+        let enter_idx = cmd.find("Enter").expect("submit step missing");
+        assert!(type_idx < sleep_idx, "sleep must come after typing prompt");
+        assert!(sleep_idx < enter_idx, "Enter must come after sleep");
     }
 
     #[test]
