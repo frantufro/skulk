@@ -158,6 +158,16 @@ pub(crate) enum Commands {
         /// The prompt text to send
         prompt: String,
     },
+
+    /// Show one-line commit log for an agent's branch
+    ///
+    /// Runs `git log <default_branch>..<session_prefix><name> --oneline` on the remote.
+    /// Named `git-log` (not `log`) to avoid collision with the `logs` command
+    /// which shows tmux pane output.
+    GitLog {
+        /// Agent name
+        name: String,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -186,6 +196,7 @@ pub(crate) fn run(
         Commands::Disconnect { .. } => "disconnect",
         Commands::Logs { .. } => "logs",
         Commands::Send { .. } => "send",
+        Commands::GitLog { .. } => "git-log",
     };
 
     let result = match cli.command {
@@ -207,6 +218,7 @@ pub(crate) fn run(
         Commands::Send { name, prompt } => {
             interact::cmd_send(ssh, &name, &prompt, cfg, send_verify_delay)
         }
+        Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -378,6 +390,19 @@ mod tests {
             command: Commands::Send {
                 name: "test".into(),
                 prompt: "fix bug".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_git_log() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("abc1234 a commit".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::GitLog {
+                name: "test".into(),
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());

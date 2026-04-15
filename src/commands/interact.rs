@@ -25,6 +25,14 @@ pub(crate) fn diff_command(name: &str, cfg: &Config) -> String {
     format!("cd {base_path} && git diff {default_branch}...{session_prefix}{name}")
 }
 
+/// Build the SSH command to show one-line commits on an agent's branch since the default branch.
+pub(crate) fn git_log_command(name: &str, cfg: &Config) -> String {
+    let base_path = &cfg.base_path;
+    let default_branch = &cfg.default_branch;
+    let session_prefix = &cfg.session_prefix;
+    format!("cd {base_path} && git log {default_branch}..{session_prefix}{name} --oneline")
+}
+
 /// Build the SSH command to capture the visible pane content of an agent's tmux session.
 ///
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
@@ -63,6 +71,16 @@ pub(crate) fn cmd_diff(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     validate_name(name)?;
     let output = ssh
         .run(&diff_command(name, cfg))
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    print!("{output}");
+    Ok(())
+}
+
+/// Show one-line commits on an agent's branch since the default branch.
+pub(crate) fn cmd_git_log(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+    validate_name(name)?;
+    let output = ssh
+        .run(&git_log_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     print!("{output}");
     Ok(())
@@ -469,6 +487,83 @@ mod tests {
             SkulkError::NotFound(msg) => assert!(msg.contains("missing")),
             other => panic!("expected NotFound, got: {other}"),
         }
+    }
+
+    #[test]
+    fn git_log_command_generates_git_log_oneline() {
+        let cfg = test_config();
+        let cmd = git_log_command("my-task", &cfg);
+        assert_eq!(
+            cmd,
+            "cd ~/test-project && git log main..skulk-my-task --oneline"
+        );
+    }
+
+    #[test]
+    fn git_log_command_uses_default_branch() {
+        let mut cfg = test_config();
+        cfg.default_branch = "develop".to_string();
+        let cmd = git_log_command("my-task", &cfg);
+        assert!(cmd.contains("develop..skulk-my-task"));
+    }
+
+    #[test]
+    fn git_log_command_uses_session_prefix() {
+        let cfg = test_config();
+        let cmd = git_log_command("feat", &cfg);
+        assert!(cmd.contains(&format!("{}feat", cfg.session_prefix)));
+    }
+
+    #[test]
+    fn git_log_command_uses_base_path() {
+        let cfg = test_config();
+        let cmd = git_log_command("feat", &cfg);
+        assert!(cmd.starts_with(&format!("cd {}", cfg.base_path)));
+    }
+
+    #[test]
+    fn git_log_command_includes_oneline_flag() {
+        let cfg = test_config();
+        let cmd = git_log_command("feat", &cfg);
+        assert!(cmd.contains("--oneline"));
+    }
+
+    #[test]
+    fn cmd_git_log_succeeds_and_prints_output() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(
+            "abc1234 first commit\ndef5678 second commit".into()
+        )]);
+        assert!(cmd_git_log(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_git_log_returns_empty_output_when_no_commits() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        assert!(cmd_git_log(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_git_log_agent_not_found() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "fatal: ambiguous argument 'main..skulk-nope': unknown revision or path not in the working tree".into(),
+        ))]);
+        let result = cmd_git_log(&ssh, "nope", &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_git_log_rejects_invalid_name() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_git_log(&ssh, "../bad", &cfg);
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
     #[test]
