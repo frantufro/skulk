@@ -115,6 +115,15 @@ pub(crate) enum Commands {
         name: String,
     },
 
+    /// Show git diff between the default branch and an agent's branch
+    ///
+    /// Runs `git diff <default_branch>...<session_prefix><name>` on the remote.
+    /// Useful for reviewing an agent's changes without attaching.
+    Diff {
+        /// Agent name
+        name: String,
+    },
+
     /// Detach all clients from an agent's tmux session
     ///
     /// Useful when an agent is attached from another terminal and you can't
@@ -173,6 +182,7 @@ pub(crate) fn run(
         Commands::DestroyAll { .. } => "destroy-all",
         Commands::Gc { .. } => "gc",
         Commands::Connect { .. } => "connect",
+        Commands::Diff { .. } => "diff",
         Commands::Disconnect { .. } => "disconnect",
         Commands::Logs { .. } => "logs",
         Commands::Send { .. } => "send",
@@ -187,6 +197,7 @@ pub(crate) fn run(
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
         Commands::Connect { name } => interact::cmd_connect(ssh, &name, cfg),
+        Commands::Diff { name } => interact::cmd_diff(ssh, &name, cfg),
         Commands::Disconnect { name } => interact::cmd_disconnect(ssh, &name, cfg),
         Commands::Logs {
             name,
@@ -307,6 +318,19 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::Connect {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_diff() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("diff output".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Diff {
                 name: "test".into(),
             },
         };
