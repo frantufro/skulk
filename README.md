@@ -144,6 +144,7 @@ skulk gc --dry-run
 | `skulk logs <name>` | View an agent's terminal output |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent |
 | `skulk pull` | Update the base clone (`git pull --ff-only`) |
+| `skulk archive <name>` | Kill an agent's tmux session but keep its worktree and branch |
 | `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
 | `skulk destroy-all` | Destroy all agents at once |
 | `skulk gc` | Clean up orphaned sessions, worktrees, and branches |

@@ -58,6 +58,25 @@ pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     )
 }
 
+/// Build the SSH command to archive an agent (kill the tmux session only).
+pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
+    let session_prefix = &cfg.session_prefix;
+    format!("tmux kill-session -t {session_prefix}{name}")
+}
+
+/// Archive an agent: kill its tmux session, keep worktree and branch intact.
+///
+/// Non-destructive alternative to `destroy`. Stops a running agent while
+/// preserving its work for later inspection or resumption.
+pub(crate) fn cmd_archive(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+    validate_name(name)?;
+    let session_prefix = &cfg.session_prefix;
+    ssh.run(&archive_command(name, cfg))
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    eprintln!("Archived {session_prefix}{name} (worktree and branch preserved).");
+    Ok(())
+}
+
 /// Show `git diff` between the default branch and an agent's branch.
 pub(crate) fn cmd_diff(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
@@ -469,6 +488,49 @@ mod tests {
             SkulkError::NotFound(msg) => assert!(msg.contains("missing")),
             other => panic!("expected NotFound, got: {other}"),
         }
+    }
+
+    #[test]
+    fn archive_command_generates_tmux_kill_session() {
+        let cfg = test_config();
+        let cmd = archive_command("my-task", &cfg);
+        assert_eq!(cmd, "tmux kill-session -t skulk-my-task");
+    }
+
+    #[test]
+    fn archive_command_uses_session_prefix() {
+        let cfg = test_config();
+        let cmd = archive_command("test", &cfg);
+        assert!(cmd.contains(&*cfg.session_prefix));
+    }
+
+    #[test]
+    fn cmd_archive_succeeds() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        assert!(cmd_archive(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_agent_not_found() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find session: skulk-ghost".into(),
+        ))]);
+        let result = cmd_archive(&ssh, "ghost", &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_archive_rejects_invalid_name() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_archive(&ssh, "../bad", &cfg);
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
     #[test]

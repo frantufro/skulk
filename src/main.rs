@@ -158,6 +158,15 @@ pub(crate) enum Commands {
         /// The prompt text to send
         prompt: String,
     },
+
+    /// Archive an agent (kill its tmux session, keep worktree and branch)
+    ///
+    /// Non-destructive alternative to `destroy`. Stops a running agent while
+    /// preserving its work for later inspection or resumption.
+    Archive {
+        /// Agent name to archive
+        name: String,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -186,6 +195,7 @@ pub(crate) fn run(
         Commands::Disconnect { .. } => "disconnect",
         Commands::Logs { .. } => "logs",
         Commands::Send { .. } => "send",
+        Commands::Archive { .. } => "archive",
     };
 
     let result = match cli.command {
@@ -207,6 +217,7 @@ pub(crate) fn run(
         Commands::Send { name, prompt } => {
             interact::cmd_send(ssh, &name, &prompt, cfg, send_verify_delay)
         }
+        Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -378,6 +389,19 @@ mod tests {
             command: Commands::Send {
                 name: "test".into(),
                 prompt: "fix bug".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_archive() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Archive {
+                name: "test".into(),
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
