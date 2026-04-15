@@ -10,6 +10,7 @@ mod util;
 #[cfg(test)]
 mod testutil;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -158,6 +159,19 @@ pub(crate) enum Commands {
         /// The prompt text to send
         prompt: String,
     },
+
+    /// Dump an agent's full tmux scrollback for review or archive
+    ///
+    /// Captures a deep snapshot (~100k lines, capped by tmux history-limit)
+    /// to stdout, or to a file via --output. Equivalent to `logs --lines 100000`
+    /// with a clearer name for the "archive this session" use case.
+    Transcript {
+        /// Agent name
+        name: String,
+        /// Write transcript to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -186,6 +200,7 @@ pub(crate) fn run(
         Commands::Disconnect { .. } => "disconnect",
         Commands::Logs { .. } => "logs",
         Commands::Send { .. } => "send",
+        Commands::Transcript { .. } => "transcript",
     };
 
     let result = match cli.command {
@@ -206,6 +221,9 @@ pub(crate) fn run(
         } => interact::cmd_logs(ssh, &name, follow, lines, cfg),
         Commands::Send { name, prompt } => {
             interact::cmd_send(ssh, &name, &prompt, cfg, send_verify_delay)
+        }
+        Commands::Transcript { name, output } => {
+            interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
         }
     };
 
@@ -378,6 +396,20 @@ mod tests {
             command: Commands::Send {
                 name: "test".into(),
                 prompt: "fix bug".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_transcript() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("full scrollback output".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Transcript {
+                name: "test".into(),
+                output: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());

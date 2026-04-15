@@ -1,9 +1,16 @@
+use std::path::Path;
 use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::ssh::Ssh;
 use crate::util::{shell_escape, validate_name};
+
+/// Default scrollback depth for `skulk transcript` — the full session archive.
+///
+/// Capped by tmux's `history-limit` option; values beyond the limit are silently
+/// clamped to whatever scrollback tmux actually retained.
+pub(crate) const TRANSCRIPT_LINES: u32 = 100_000;
 
 /// Build the SSH command to attach to an agent's live tmux session.
 pub(crate) fn connect_command(name: &str, cfg: &Config) -> String {
@@ -157,6 +164,34 @@ pub(crate) fn cmd_send(
         Err(_) => {
             eprintln!("Warning: Prompt sent, but post-send verification failed.");
         }
+    }
+    Ok(())
+}
+
+/// Dump the full tmux scrollback for an agent — the "archive this session" use case.
+///
+/// Reuses `logs_snapshot_deep_command` with `TRANSCRIPT_LINES` scrollback.
+/// Writes to `output` if provided, otherwise prints to stdout.
+pub(crate) fn cmd_transcript(
+    ssh: &impl Ssh,
+    name: &str,
+    output: Option<&Path>,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
+    validate_name(name)?;
+    let cmd = logs_snapshot_deep_command(name, TRANSCRIPT_LINES, cfg);
+    let content = ssh
+        .run(&cmd)
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, &content).map_err(|source| SkulkError::Io {
+                path: path.display().to_string(),
+                source,
+            })?;
+            eprintln!("Wrote transcript to {}.", path.display());
+        }
+        None => print!("{content}"),
     }
     Ok(())
 }
@@ -480,5 +515,62 @@ mod tests {
             Err(SkulkError::SshFailed("connection lost".into())),
         ]);
         assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn cmd_transcript_stdout_succeeds() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("full scrollback\nline 2\nline 3".into())]);
+        assert!(cmd_transcript(&ssh, "test", None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_transcript_writes_to_output_file() {
+        let cfg = test_config();
+        let content = "scrollback contents\nline two\n";
+        let ssh = MockSsh::new(vec![Ok(content.into())]);
+        let path =
+            std::env::temp_dir().join(format!("skulk-transcript-test-{}.txt", std::process::id()));
+        let result = cmd_transcript(&ssh, "test", Some(&path), &cfg);
+        assert!(result.is_ok());
+        let written = std::fs::read_to_string(&path).expect("output file should exist");
+        assert_eq!(written, content);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cmd_transcript_agent_not_found() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find session: skulk-nope".into(),
+        ))]);
+        let result = cmd_transcript(&ssh, "nope", None, &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_transcript_rejects_invalid_name() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_transcript(&ssh, "../bad", None, &cfg);
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
+    }
+
+    #[test]
+    fn cmd_transcript_io_error_when_output_path_unwritable() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("content".into())]);
+        let path = Path::new("/nonexistent-dir-xyz/transcript.txt");
+        let result = cmd_transcript(&ssh, "test", Some(path), &cfg);
+        match result {
+            Err(SkulkError::Io { path: p, .. }) => {
+                assert!(p.contains("transcript.txt"));
+            }
+            other => panic!("expected Io error, got: {other:?}"),
+        }
     }
 }

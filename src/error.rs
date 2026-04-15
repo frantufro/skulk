@@ -18,6 +18,13 @@ pub(crate) enum SkulkError {
     /// User aborted an interactive operation
     #[error("Aborted.")]
     InitAborted,
+    /// Local filesystem operation failed
+    #[error("Failed to write {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub(crate) fn classify_ssh_error(stderr: &str, host: &str) -> SkulkError {
