@@ -66,6 +66,10 @@ pub(crate) enum Commands {
         name: String,
         /// Initial prompt to send to the agent after startup
         prompt: Option<String>,
+        /// Launch Claude Code with --remote-control so the mobile app / web UI can attach.
+        /// Off by default — skulk's own commands drive the agent via tmux directly.
+        #[arg(long)]
+        remote_control: bool,
     },
 
     /// Destroy a specific agent
@@ -192,7 +196,11 @@ pub(crate) fn run(
         Commands::Init => unreachable!(),
         Commands::List => list::cmd_list(ssh, cfg),
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
-        Commands::New { name, prompt } => new::cmd_new(ssh, &name, prompt.as_deref(), cfg),
+        Commands::New {
+            name,
+            prompt,
+            remote_control,
+        } => new::cmd_new(ssh, &name, prompt.as_deref(), remote_control, cfg),
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
@@ -257,6 +265,27 @@ mod tests {
             command: Commands::New {
                 name: "test".into(),
                 prompt: None,
+                remote_control: false,
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_new_with_remote_control() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::New {
+                name: "test".into(),
+                prompt: None,
+                remote_control: true,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
