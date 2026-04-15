@@ -25,6 +25,13 @@ pub(crate) fn diff_command(name: &str, cfg: &Config) -> String {
     format!("cd {base_path} && git diff {default_branch}...{session_prefix}{name}")
 }
 
+/// Build the SSH command to push an agent's branch to `origin`.
+pub(crate) fn push_command(name: &str, cfg: &Config) -> String {
+    let base_path = &cfg.base_path;
+    let session_prefix = &cfg.session_prefix;
+    format!("cd {base_path} && git push -u origin {session_prefix}{name}")
+}
+
 /// Build the SSH command to capture the visible pane content of an agent's tmux session.
 ///
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
@@ -56,6 +63,20 @@ pub(crate) fn cmd_diff(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
         .run(&diff_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     print!("{output}");
+    Ok(())
+}
+
+/// Push an agent's branch to `origin` with upstream tracking.
+pub(crate) fn cmd_push(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+    validate_name(name)?;
+    let session_prefix = &cfg.session_prefix;
+    let output = ssh
+        .run(&push_command(name, cfg))
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    if !output.is_empty() {
+        println!("{output}");
+    }
+    eprintln!("Pushed {session_prefix}{name} to origin.");
     Ok(())
 }
 
@@ -226,6 +247,102 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
         let result = cmd_diff(&ssh, "../bad", &cfg);
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
+    }
+
+    #[test]
+    fn push_command_generates_git_push_with_upstream() {
+        let cfg = test_config();
+        let cmd = push_command("my-task", &cfg);
+        assert_eq!(cmd, "cd ~/test-project && git push -u origin skulk-my-task");
+    }
+
+    #[test]
+    fn push_command_uses_session_prefix() {
+        let cfg = test_config();
+        let cmd = push_command("feat", &cfg);
+        assert!(cmd.contains(&format!("{}feat", cfg.session_prefix)));
+    }
+
+    #[test]
+    fn push_command_uses_base_path() {
+        let cfg = test_config();
+        let cmd = push_command("feat", &cfg);
+        assert!(cmd.starts_with(&format!("cd {}", cfg.base_path)));
+    }
+
+    #[test]
+    fn push_command_sets_upstream() {
+        let cfg = test_config();
+        let cmd = push_command("feat", &cfg);
+        assert!(cmd.contains("-u origin"));
+    }
+
+    #[test]
+    fn cmd_push_succeeds() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        assert!(cmd_push(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_push_succeeds_with_output() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(
+            "branch skulk-test set up to track origin/skulk-test".into(),
+        )]);
+        assert!(cmd_push(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_push_branch_not_found() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "error: src refspec skulk-nope does not match any".into(),
+        ))]);
+        let result = cmd_push(&ssh, "nope", &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_push_no_origin_remote() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.".into(),
+        ))]);
+        let result = cmd_push(&ssh, "test", &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::Diagnostic {
+                message,
+                suggestion,
+            } => {
+                assert!(message.to_lowercase().contains("origin"));
+                assert!(!suggestion.is_empty());
+            }
+            other => panic!("expected Diagnostic, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_push_generic_failure_surfaces_ssh_error() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "error: failed to push some refs".into(),
+        ))]);
+        let result = cmd_push(&ssh, "test", &cfg);
+        assert!(matches!(result, Err(SkulkError::SshFailed(_))));
+    }
+
+    #[test]
+    fn cmd_push_rejects_invalid_name() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_push(&ssh, "../bad", &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
