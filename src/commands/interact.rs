@@ -17,12 +17,22 @@ pub(crate) fn disconnect_command(name: &str, cfg: &Config) -> String {
     format!("tmux detach-client -s {session_prefix}{name}")
 }
 
+/// Output mode for `skulk diff` — maps to `git diff` flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffMode {
+    /// Full unified diff (no extra flags).
+    Full,
+}
+
 /// Build the SSH command to diff an agent's branch against the default branch.
-pub(crate) fn diff_command(name: &str, cfg: &Config) -> String {
+pub(crate) fn diff_command(name: &str, mode: DiffMode, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let default_branch = &cfg.default_branch;
     let session_prefix = &cfg.session_prefix;
-    format!("cd {base_path} && git diff {default_branch}...{session_prefix}{name}")
+    let flag = match mode {
+        DiffMode::Full => "",
+    };
+    format!("cd {base_path} && git diff{flag} {default_branch}...{session_prefix}{name}")
 }
 
 /// Build the SSH command to capture the visible pane content of an agent's tmux session.
@@ -59,10 +69,15 @@ pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
 }
 
 /// Show `git diff` between the default branch and an agent's branch.
-pub(crate) fn cmd_diff(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+pub(crate) fn cmd_diff(
+    ssh: &impl Ssh,
+    name: &str,
+    mode: DiffMode,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
     validate_name(name)?;
     let output = ssh
-        .run(&diff_command(name, cfg))
+        .run(&diff_command(name, mode, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     print!("{output}");
     Ok(())
@@ -176,7 +191,7 @@ mod tests {
     #[test]
     fn diff_command_generates_git_diff() {
         let cfg = test_config();
-        let cmd = diff_command("my-task", &cfg);
+        let cmd = diff_command("my-task", DiffMode::Full, &cfg);
         assert_eq!(cmd, "cd ~/test-project && git diff main...skulk-my-task");
     }
 
@@ -184,21 +199,21 @@ mod tests {
     fn diff_command_uses_default_branch() {
         let mut cfg = test_config();
         cfg.default_branch = "develop".to_string();
-        let cmd = diff_command("my-task", &cfg);
+        let cmd = diff_command("my-task", DiffMode::Full, &cfg);
         assert!(cmd.contains("develop...skulk-my-task"));
     }
 
     #[test]
     fn diff_command_uses_session_prefix() {
         let cfg = test_config();
-        let cmd = diff_command("feat", &cfg);
+        let cmd = diff_command("feat", DiffMode::Full, &cfg);
         assert!(cmd.contains(&format!("{}feat", cfg.session_prefix)));
     }
 
     #[test]
     fn diff_command_uses_base_path() {
         let cfg = test_config();
-        let cmd = diff_command("feat", &cfg);
+        let cmd = diff_command("feat", DiffMode::Full, &cfg);
         assert!(cmd.starts_with(&format!("cd {}", cfg.base_path)));
     }
 
@@ -206,14 +221,14 @@ mod tests {
     fn cmd_diff_succeeds_and_prints_output() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("diff --git a/foo b/foo\n+hello".into())]);
-        assert!(cmd_diff(&ssh, "test", &cfg).is_ok());
+        assert!(cmd_diff(&ssh, "test", DiffMode::Full, &cfg).is_ok());
     }
 
     #[test]
     fn cmd_diff_returns_empty_output_when_no_changes() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(String::new())]);
-        assert!(cmd_diff(&ssh, "test", &cfg).is_ok());
+        assert!(cmd_diff(&ssh, "test", DiffMode::Full, &cfg).is_ok());
     }
 
     #[test]
@@ -222,7 +237,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "fatal: ambiguous argument 'main...skulk-nope': unknown revision or path not in the working tree".into(),
         ))]);
-        let result = cmd_diff(&ssh, "nope", &cfg);
+        let result = cmd_diff(&ssh, "nope", DiffMode::Full, &cfg);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
@@ -234,7 +249,7 @@ mod tests {
     fn cmd_diff_rejects_invalid_name() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
-        let result = cmd_diff(&ssh, "../bad", &cfg);
+        let result = cmd_diff(&ssh, "../bad", DiffMode::Full, &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 

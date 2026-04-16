@@ -197,7 +197,7 @@ pub(crate) fn run(
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
         Commands::Connect { name } => interact::cmd_connect(ssh, &name, cfg),
-        Commands::Diff { name } => interact::cmd_diff(ssh, &name, cfg),
+        Commands::Diff { name } => interact::cmd_diff(ssh, &name, interact::DiffMode::Full, cfg),
         Commands::Disconnect { name } => interact::cmd_disconnect(ssh, &name, cfg),
         Commands::Logs {
             name,
