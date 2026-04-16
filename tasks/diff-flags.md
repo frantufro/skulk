@@ -1,5 +1,5 @@
 ---
-status: READY
+status: DONE
 ---
 
 Add output-mode flags to `skulk diff <name>` — passthrough to `git diff`.

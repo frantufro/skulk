@@ -22,6 +22,10 @@ pub(crate) fn disconnect_command(name: &str, cfg: &Config) -> String {
 pub(crate) enum DiffMode {
     /// Full unified diff (no extra flags).
     Full,
+    /// `--stat` — summary of files changed, insertions, deletions.
+    Stat,
+    /// `--name-only` — just the list of changed file paths.
+    NameOnly,
 }
 
 /// Build the SSH command to diff an agent's branch against the default branch.
@@ -31,6 +35,8 @@ pub(crate) fn diff_command(name: &str, mode: DiffMode, cfg: &Config) -> String {
     let session_prefix = &cfg.session_prefix;
     let flag = match mode {
         DiffMode::Full => "",
+        DiffMode::Stat => " --stat",
+        DiffMode::NameOnly => " --name-only",
     };
     format!("cd {base_path} && git diff{flag} {default_branch}...{session_prefix}{name}")
 }
@@ -196,6 +202,26 @@ mod tests {
     }
 
     #[test]
+    fn diff_command_stat_appends_stat_flag() {
+        let cfg = test_config();
+        let cmd = diff_command("my-task", DiffMode::Stat, &cfg);
+        assert_eq!(
+            cmd,
+            "cd ~/test-project && git diff --stat main...skulk-my-task"
+        );
+    }
+
+    #[test]
+    fn diff_command_name_only_appends_name_only_flag() {
+        let cfg = test_config();
+        let cmd = diff_command("my-task", DiffMode::NameOnly, &cfg);
+        assert_eq!(
+            cmd,
+            "cd ~/test-project && git diff --name-only main...skulk-my-task"
+        );
+    }
+
+    #[test]
     fn diff_command_uses_default_branch() {
         let mut cfg = test_config();
         cfg.default_branch = "develop".to_string();
@@ -222,6 +248,20 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("diff --git a/foo b/foo\n+hello".into())]);
         assert!(cmd_diff(&ssh, "test", DiffMode::Full, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_diff_stat_succeeds() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(" foo.rs | 2 +-\n 1 file changed".into())]);
+        assert!(cmd_diff(&ssh, "test", DiffMode::Stat, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_diff_name_only_succeeds() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("src/foo.rs\nsrc/bar.rs\n".into())]);
+        assert!(cmd_diff(&ssh, "test", DiffMode::NameOnly, &cfg).is_ok());
     }
 
     #[test]
