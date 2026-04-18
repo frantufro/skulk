@@ -176,7 +176,8 @@ pub(crate) enum Commands {
     /// Archive an agent — kill its tmux session but keep worktree and branch intact
     ///
     /// Non-destructive alternative to `destroy`. Stops an agent that's done
-    /// (or off the rails) without losing its work. Pairs with `new` to resume.
+    /// (or off the rails) without losing its work. Review the branch with
+    /// `skulk diff` or inspect the worktree directly on the remote.
     Archive {
         /// Agent name to archive
         name: String,
