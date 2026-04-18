@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, gc, interact, list, new, pull};
+use commands::{destroy, gc, interact, list, new, pull, restart};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -189,6 +189,17 @@ pub(crate) enum Commands {
         name: String,
     },
 
+    /// Restart an agent in its existing worktree with a fresh Claude session
+    ///
+    /// Spins up a new tmux session running Claude in the agent's existing
+    /// worktree — useful after `skulk archive`, or when a session has crashed
+    /// or been killed. Claude starts with empty context; use `skulk send` or
+    /// `claude --continue` inside the session to resume prior work.
+    Restart {
+        /// Agent name to restart
+        name: String,
+    },
+
     /// Show `git log` of commits on an agent's branch not in the default branch
     ///
     /// Runs `git log <default_branch>..<session_prefix><name> --oneline` on the remote.
@@ -241,6 +252,7 @@ pub(crate) fn run(
         Commands::Send { .. } => "send",
         Commands::Push { .. } => "push",
         Commands::Archive { .. } => "archive",
+        Commands::Restart { .. } => "restart",
         Commands::GitLog { .. } => "git-log",
         Commands::Transcript { .. } => "transcript",
     };
@@ -281,6 +293,7 @@ pub(crate) fn run(
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
+        Commands::Restart { name } => restart::cmd_restart(ssh, &name, cfg),
         Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
         Commands::Transcript { name, output } => {
             interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
@@ -523,6 +536,26 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::Archive {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_restart() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-test", "/path/skulk-test")],
+                &["skulk-test"],
+            )),
+            Ok(String::new()),
+        ]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Restart {
                 name: "test".into(),
             },
         };
