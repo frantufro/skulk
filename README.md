@@ -29,7 +29,7 @@ Claude Code is great, but it works on one thing at a time. If you have a beefy d
 
 **Remote server:** SSH access with key-based auth. Skulk's `init` command will install everything else (tmux, git, Claude Code).
 
-**Localhost mode:** Set `host = "localhost"` in `.skulk.toml` to run commands directly via `sh -c` and skip SSH entirely. Useful when running Skulk on the same machine where agents will live (a dev box, a personal laptop, a server you're already SSH'd into).
+**Localhost mode:** Set `host = "localhost"` in `.skulk/config.toml` to run commands directly via `sh -c` and skip SSH entirely. Useful when running Skulk on the same machine where agents will live (a dev box, a personal laptop, a server you're already SSH'd into).
 
 ## Install
 
@@ -54,7 +54,7 @@ Run `skulk init` in your project directory. The interactive wizard will:
 
 - Detect your git remote and default branch
 - Ask for your SSH host and test connectivity
-- Generate a `.skulk.toml` config file
+- Generate a `.skulk/config.toml` file
 - Optionally set up the remote server (install tools, clone repo, create worktree directory)
 
 ```bash
@@ -233,7 +233,7 @@ src/
 ├── io.rs            System boundary (real SSH, stdin) — excluded from coverage
 ├── error.rs         SkulkError enum and SSH error classification
 ├── ssh.rs           Ssh trait (injectable for testing)
-├── config.rs        Config struct and .skulk.toml loading
+├── config.rs        Config struct and .skulk/config.toml loading
 ├── util.rs          Validation, shell escaping, shared helpers
 ├── display.rs       Session types, table formatting, GC summary
 ├── inventory.rs     Single-roundtrip remote state gathering

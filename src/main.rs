@@ -28,7 +28,7 @@ const SEND_VERIFY_DELAY: Duration = Duration::from_millis(500);
     name = "skulk",
     version,
     about = "Manage a fleet of AI coding agents on your own servers",
-    long_about = "Manage remote Claude Code agents running on a configured SSH server via tmux.\n\nAgents are isolated Claude Code instances, each with their own git worktree\nand tmux session. Create agents to work on tasks in parallel, monitor their\noutput, and send them new instructions.\n\nConfigure via .skulk.toml in your project directory."
+    long_about = "Manage remote Claude Code agents running on a configured SSH server via tmux.\n\nAgents are isolated Claude Code instances, each with their own git worktree\nand tmux session. Create agents to work on tasks in parallel, monitor their\noutput, and send them new instructions.\n\nConfigure via .skulk/config.toml in your project directory."
 )]
 pub(crate) struct Cli {
     /// Disable colored output
@@ -97,7 +97,7 @@ pub(crate) enum Commands {
 
     /// Set up skulk for this project
     ///
-    /// Interactive wizard that creates .skulk.toml and optionally sets up
+    /// Interactive wizard that creates .skulk/config.toml and optionally sets up
     /// the remote server (install tools, clone repo, create worktree dir).
     /// Run this first in any new project.
     Init,

@@ -21,6 +21,7 @@ target
 #.idea/
 
 # User-specific config
+.skulk/
 .skulk.toml
 
 # Claude Code — local-only files

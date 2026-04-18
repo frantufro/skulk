@@ -201,11 +201,12 @@ fn run_init() -> Result<(), SkulkError> {
     // Detect git context
     let git_ctx = init::detect_git_context(&run_local_command);
 
-    // Check if config exists
+    // Check if config exists (new layout or legacy file)
     let cwd = std::env::current_dir()
         .map_err(|e| SkulkError::Validation(format!("Cannot determine current directory: {e}")))?;
-    let config_path = cwd.join(config::CONFIG_FILENAME);
-    let config_exists = config_path.is_file();
+    let config_path = config::config_path_in(&cwd);
+    let legacy_path = config::legacy_config_path_in(&cwd);
+    let config_exists = config_path.is_file() || legacy_path.is_file();
 
     // SSH test closure
     let test_ssh = |host: &str| -> Result<(), SkulkError> {
@@ -219,12 +220,28 @@ fn run_init() -> Result<(), SkulkError> {
     let mut prompter = StdinPrompter;
     let answers = init::run_wizard(&mut prompter, &git_ctx, config_exists, color, &test_ssh)?;
 
-    // Write config
+    // Write config under .skulk/
     let toml_content = init::generate_config_toml(&answers);
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            SkulkError::Validation(format!("Failed to create {}: {e}", parent.display()))
+        })?;
+    }
     std::fs::write(&config_path, toml_content).map_err(|e| {
         SkulkError::Validation(format!("Failed to write {}: {e}", config_path.display()))
     })?;
-    eprintln!("\n  Writing .skulk.toml... {}", checkmark(color));
+    eprintln!(
+        "\n  Writing {}/{}... {}",
+        config::CONFIG_DIR,
+        config::CONFIG_FILENAME,
+        checkmark(color)
+    );
+    if legacy_path.is_file() {
+        eprintln!(
+            "  note: legacy {} still present. Remove it once you've verified the new config works.",
+            config::LEGACY_CONFIG_FILENAME
+        );
+    }
 
     // Remote setup if requested
     if answers.run_setup {

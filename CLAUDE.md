@@ -22,7 +22,7 @@ cargo check                                      # Prefer over cargo build durin
   - Excluded from coverage via `--ignore-filename-regex 'io\.rs$'`
 - `src/error.rs`       — `SkulkError` enum, SSH error classification
 - `src/ssh.rs`         — `Ssh` trait (injectable for testing)
-- `src/config.rs`      — `Config` struct, `.skulk.toml` loading
+- `src/config.rs`      — `Config` struct, `.skulk/config.toml` loading (with `.skulk.toml` legacy fallback)
 - `src/util.rs`        — Validation, shell escaping, shared helpers
 - `src/display.rs`     — Session types, table formatting, GC summary display
 - `src/inventory.rs`   — `AgentInventory`, single-roundtrip state gathering
@@ -58,7 +58,7 @@ Run `git branch --show-current` if unsure — that is your branch, use it.
 
 ## Configuration
 
-Runtime config from `.skulk.toml` (searched upward from cwd):
+Runtime config from `.skulk/config.toml` (searched upward from cwd; legacy `.skulk.toml` still loaded with a deprecation warning):
 
 ```toml
 host = "your-server"
