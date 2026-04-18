@@ -72,10 +72,24 @@ pub(crate) fn classify_agent_error(name: &str, err: SkulkError, host: &str) -> S
                 || lower.contains("can't find pane")
                 || lower.contains("unknown revision")
                 || lower.contains("not a valid object name")
+                || lower.contains("src refspec")
             {
                 SkulkError::NotFound(format!(
                     "Agent '{name}' not found. Check running agents with `skulk list`."
                 ))
+            } else if lower.contains("does not appear to be a git repository")
+                || lower.contains("no such remote")
+            {
+                // Note: "could not read from remote repository" is deliberately excluded —
+                // git prints it as the trailing message for *any* remote-access failure
+                // (timeouts, auth denials, etc.), not just missing-origin. Matching it
+                // here would mask the real SSH error.
+                SkulkError::Diagnostic {
+                    message: "Remote 'origin' is not configured on the base repository.".into(),
+                    suggestion: format!(
+                        "Configure origin on {host}: `git -C <base_path> remote add origin <url>`"
+                    ),
+                }
             } else {
                 classify_ssh_error(stderr, host)
             }
@@ -283,6 +297,93 @@ mod tests {
         match result {
             SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
             other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_src_refspec_returns_not_found() {
+        let err =
+            SkulkError::SshFailed("error: src refspec skulk-foo does not match any".to_string());
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_origin_missing_returns_diagnostic() {
+        let err = SkulkError::SshFailed(
+            "fatal: 'origin' does not appear to be a git repository".to_string(),
+        );
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::Diagnostic {
+                message,
+                suggestion,
+            } => {
+                assert!(message.to_lowercase().contains("origin"));
+                assert!(suggestion.contains("testhost"));
+            }
+            other => panic!("expected Diagnostic, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_no_such_remote_returns_diagnostic() {
+        let err = SkulkError::SshFailed("fatal: No such remote 'origin'".to_string());
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::Diagnostic { .. } => {}
+            other => panic!("expected Diagnostic, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_push_connection_timeout_not_misclassified() {
+        // Regression: when a push fails due to network timeout, git emits both
+        // "Connection timed out" (real cause) and "Could not read from remote
+        // repository" (trailing generic message). The latter must not trigger
+        // the origin-missing diagnostic — the timeout must surface instead.
+        let err = SkulkError::SshFailed(
+            "ssh: connect to host github.com port 22: Connection timed out\n\
+             fatal: Could not read from remote repository."
+                .to_string(),
+        );
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::Diagnostic { message, .. } => {
+                assert!(
+                    message.to_lowercase().contains("timed out"),
+                    "expected timeout diagnostic, got: {message}"
+                );
+                assert!(
+                    !message.to_lowercase().contains("origin"),
+                    "timeout must not be reported as origin-missing: {message}"
+                );
+            }
+            other => panic!("expected timeout Diagnostic, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_push_permission_denied_not_misclassified() {
+        // Regression: GitHub permission denial also prints "Could not read from
+        // remote repository." Must classify as auth failure, not origin-missing.
+        let err = SkulkError::SshFailed(
+            "git@github.com: Permission denied (publickey).\n\
+             fatal: Could not read from remote repository."
+                .to_string(),
+        );
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::Diagnostic { message, .. } => {
+                assert!(
+                    message.to_lowercase().contains("authentication"),
+                    "expected auth diagnostic, got: {message}"
+                );
+            }
+            other => panic!("expected auth Diagnostic, got: {other}"),
         }
     }
 
