@@ -4,6 +4,7 @@ pub(crate) mod init;
 pub(crate) mod interact;
 pub(crate) mod list;
 pub(crate) mod new;
+pub(crate) mod prompt_source;
 pub(crate) mod pull;
 pub(crate) mod restart;
 pub(crate) mod ship;
