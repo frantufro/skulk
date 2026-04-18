@@ -96,6 +96,8 @@ skulk new mobile-task --remote-control "Fix the login bug"
 
 By default Skulk launches Claude Code **without** `--remote-control`. Skulk's own commands (`connect`, `logs`, `send`, `disconnect`) talk to the agent through tmux directly and don't need it, and leaving it on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills long-running agents. Opt in with `--remote-control` when you want to drive an agent from your phone.
 
+> **Heads-up:** agents launched with `--remote-control` currently die after **~20 minutes of inactivity** due to the upstream bug above. This is acceptable for interactive mobile-app use (you're driving the agent), but don't use `--remote-control` for long autonomous tasks — omit the flag and drive with `skulk send` / `skulk connect` instead.
+
 ### 3. Monitor and interact
 
 ```bash
@@ -196,7 +198,7 @@ skulk new -bad-name-      # invalid (leading/trailing hyphens)
 | Flag | Scope | Description |
 |------|-------|-------------|
 | `--no-color` | Global | Disable colored output (also respects `NO_COLOR` env var) |
-| `--remote-control` | `new` | Launch Claude with `--remote-control` so the agent is accessible from the Claude Code mobile/web app (off by default — see Quick Start) |
+| `--remote-control` | `new` | Launch Claude with `--remote-control` so the agent is accessible from the Claude Code mobile/web app. Off by default because of an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 min of inactivity — see Quick Start |
 | `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
 | `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
 | `--follow`, `-f` | `logs` | Stream output in real time |
