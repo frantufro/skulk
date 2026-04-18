@@ -1,9 +1,73 @@
+use std::path::{Path, PathBuf};
+
 use crate::commands::wait::mark_busy_command;
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_INIT_SCRIPT};
 use crate::error::SkulkError;
 use crate::inventory::{inventory_command, parse_inventory};
 use crate::ssh::Ssh;
 use crate::util::{PromptStatus, STARTUP_DELAY, shell_escape, validate_model, validate_name};
+
+/// Resolve the local `.skulk/.env` path for the current project, if it exists.
+///
+/// Uses `cfg.root_dir` (the project directory containing `.skulk/`) to locate
+/// `<root_dir>/.skulk/.env`. Returns `None` if the config was built without a
+/// root dir or the env file isn't present on disk.
+pub(crate) fn resolve_local_env_file(cfg: &Config) -> Option<PathBuf> {
+    let root = cfg.root_dir.as_ref()?;
+    let candidate = root.join(".skulk").join(".env");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Build the in-tmux launch sequence: export SKULK_* vars, optionally source
+/// `.env`, optionally run the init hook, then start Claude Code.
+///
+/// The init hook is gated on file existence (`[ -f {init_script} ]`), so a
+/// project without `.skulk/init.sh` starts Claude directly. When the hook
+/// exists and exits non-zero, Claude does not start — the shell returns to a
+/// prompt inside the tmux session so the user can `skulk connect` and inspect.
+///
+/// `remote_control`, `model`, and `claude_args` are threaded onto the final
+/// `claude` invocation the same way `agent_create_tmux_command` used to build
+/// it before the init hook existed. See that function's docs for the caller's
+/// quoting responsibilities on `claude_args`.
+fn build_launch_sequence(
+    name: &str,
+    cfg: &Config,
+    remote_control: bool,
+    model: Option<&str>,
+    claude_args: Option<&str>,
+) -> String {
+    let session_prefix = &cfg.session_prefix;
+    let worktree_base = &cfg.worktree_base;
+    let session = format!("{session_prefix}{name}");
+    let worktree = format!("{worktree_base}/{session}");
+    let init_script = cfg.init_script.as_deref().unwrap_or(DEFAULT_INIT_SCRIPT);
+    let remote_control_flag = if remote_control {
+        format!(" --remote-control {session}")
+    } else {
+        String::new()
+    };
+    // model and claude_args are interpolated raw into the sequence. The whole
+    // sequence is then `shell_escape`d once by the caller
+    // (`agent_create_tmux_command`) for the outer `send-keys '...'` wrapping —
+    // pre-escaping here would double-escape single quotes.
+    let model_flag = match model {
+        Some(m) => format!(" --model {m}"),
+        None => String::new(),
+    };
+    let extra_args = match claude_args {
+        Some(args) if !args.is_empty() => format!(" {args}"),
+        _ => String::new(),
+    };
+    let claude_cmd = format!(
+        "claude --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}"
+    );
+    format!(
+        "export SKULK_AGENT_NAME={name} SKULK_SESSION={session} SKULK_BRANCH={session} SKULK_WORKTREE={worktree}; \
+         [ -f .env ] && set -a && . ./.env && set +a; \
+         if [ -f {init_script} ]; then bash {init_script} && {claude_cmd}; else {claude_cmd}; fi"
+    )
+}
 
 /// JSON for the worktree's `.claude/settings.local.json`.
 ///
@@ -44,8 +108,14 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
 /// Build the SSH command to create a tmux session and launch Claude Code for an agent.
 ///
 /// Creates the session with a login shell (not a direct command) so the session
-/// survives if Claude exits, then sends the claude command via send-keys.
-/// Using a login shell also ensures ~/.local/bin is in PATH.
+/// survives if Claude exits, then sends the launch sequence via send-keys.
+/// Using a login shell also ensures `~/.local/bin` is in PATH.
+///
+/// The launch sequence (see `build_launch_sequence`) exports `SKULK_*` vars,
+/// sources `<worktree>/.env` if present, runs the init hook if configured and
+/// present, and finally starts Claude. If the init hook exits non-zero, Claude
+/// does not start — the shell stays at a prompt so the user can investigate
+/// with `skulk connect`.
 ///
 /// When `remote_control` is true, Claude is launched with `--remote-control`
 /// so the agent is reachable from the Claude Code mobile/web app. Off by default
@@ -75,23 +145,11 @@ pub(crate) fn agent_create_tmux_command(
 ) -> String {
     let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
-    let remote_control_flag = if remote_control {
-        format!(" --remote-control {session_prefix}{name}")
-    } else {
-        String::new()
-    };
-    let model_flag = match model {
-        Some(m) => format!(" --model {}", shell_escape(m)),
-        None => String::new(),
-    };
-    let extra_args = match claude_args {
-        Some(args) if !args.is_empty() => format!(" {}", shell_escape(args)),
-        _ => String::new(),
-    };
+    let sequence = build_launch_sequence(name, cfg, remote_control, model, claude_args);
+    let escaped = shell_escape(&sequence);
     format!(
         "tmux new-session -d -s {session_prefix}{name} -c {worktree_base}/{session_prefix}{name} && \
-         tmux send-keys -t {session_prefix}{name} \
-         'claude --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}' C-m"
+         tmux send-keys -t {session_prefix}{name} '{escaped}' C-m"
     )
 }
 
@@ -151,11 +209,20 @@ pub(crate) fn agent_rollback_worktree_command(name: &str, cfg: &Config) -> Strin
 /// 2. Check base clone exists
 /// 3. Fetch inventory and check uniqueness
 /// 4. Create worktree
-/// 5. Create tmux session with Claude Code (with `--remote-control` if requested)
+/// 5. Upload local `.skulk/.env` to the worktree if present
+///    - On failure: warn user, continue (init.sh runs without sourced vars)
+/// 6. Create tmux session with Claude Code (with `--remote-control` if requested)
 ///    - On failure: rollback worktree
-/// 6. Send prompt if provided
+/// 7. Send prompt if provided
 ///    - On failure: warn user, keep agent alive
-/// 7. Print success output
+/// 8. Print success output
+//
+// Explicitly allow `too_many_arguments` / `too_many_lines`: `cmd_new` is the
+// top-level orchestrator for the `new` command, and each argument is a distinct
+// externally-supplied input required by one of the 8 steps above. Grouping
+// them into a struct or splitting the function would hide the linear sequence
+// that makes this function easy to follow.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn cmd_new(
     ssh: &impl Ssh,
     name: &str,
@@ -164,6 +231,7 @@ pub(crate) fn cmd_new(
     model: Option<&str>,
     claude_args: Option<&str>,
     cfg: &Config,
+    local_env_file: Option<&Path>,
 ) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
     let host = &cfg.host;
@@ -208,7 +276,19 @@ pub(crate) fn cmd_new(
     // Step 3: Create worktree
     ssh.run(&agent_create_worktree_command(name, cfg))?;
 
-    // Step 4: Create tmux session with Claude Code
+    // Step 4: Upload local .env to worktree if present.
+    // Non-fatal: if the copy fails, init.sh still runs but without the sourced vars.
+    if let Some(env_file) = local_env_file {
+        let remote_env = format!("{worktree_base}/{session_prefix}{name}/.env");
+        if let Err(e) = ssh.upload_file(env_file, &remote_env) {
+            eprintln!(
+                "Warning: failed to copy {} to agent worktree: {e}",
+                env_file.display()
+            );
+        }
+    }
+
+    // Step 5: Create tmux session with Claude Code
     if let Err(e) = ssh.run(&agent_create_tmux_command(
         name,
         cfg,
@@ -398,9 +478,16 @@ mod tests {
     fn agent_create_tmux_command_with_empty_claude_args_appends_nothing() {
         let cfg = test_config();
         let cmd = agent_create_tmux_command("my-task", &cfg, false, None, Some(""));
+        // Empty claude_args must not introduce a trailing space after the claude
+        // command. Both branches of the init-hook `if` emit the bare claude
+        // invocation followed by `;` (then-branch) or `; fi` (else-branch).
         assert!(
-            cmd.contains("'claude --dangerously-skip-permissions'"),
+            cmd.contains("claude --dangerously-skip-permissions;"),
             "empty claude_args should not introduce trailing space, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("claude --dangerously-skip-permissions ;"),
+            "empty claude_args produced a stray space before `;`: {cmd}"
         );
     }
 
@@ -548,7 +635,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, None).is_ok());
     }
 
     #[test]
@@ -561,7 +648,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg, None).is_ok());
     }
 
     #[test]
@@ -573,7 +660,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, true, None, None, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, true, None, None, &cfg, None).is_ok());
         // Fourth SSH call is the tmux-create command; verify the flag landed there.
         let tmux_call = &ssh.calls()[3];
         assert!(
@@ -591,7 +678,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, None).is_ok());
         let tmux_call = &ssh.calls()[3];
         assert!(
             !tmux_call.contains("--remote-control"),
@@ -608,7 +695,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, Some("opus"), None, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, false, Some("opus"), None, &cfg, None).is_ok());
         let tmux_call = &ssh.calls()[3];
         assert!(
             tmux_call.contains("--model opus"),
@@ -629,6 +716,7 @@ mod tests {
             Some("opus; rm -rf /"),
             None,
             &cfg,
+            None,
         );
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -659,7 +747,8 @@ mod tests {
                 false,
                 None,
                 Some("--allowed-tools Bash"),
-                &cfg
+                &cfg,
+                None,
             )
             .is_ok()
         );
@@ -681,7 +770,7 @@ mod tests {
                 &["skulk-dupe"],
             )),
         ]);
-        let result = cmd_new(&ssh, "dupe", None, false, None, None, &cfg);
+        let result = cmd_new(&ssh, "dupe", None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("already exists")),
@@ -701,7 +790,7 @@ mod tests {
                 &["skulk-zombie"],
             )),
         ]);
-        let result = cmd_new(&ssh, "zombie", None, false, None, None, &cfg);
+        let result = cmd_new(&ssh, "zombie", None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => {
@@ -722,7 +811,7 @@ mod tests {
     fn cmd_new_missing_base_clone_returns_error() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("Base clone not found")),
@@ -740,7 +829,7 @@ mod tests {
             Err(SkulkError::SshFailed("tmux failed".into())),
             Ok(String::new()),
         ]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
         assert!(result.is_err());
     }
 
@@ -754,7 +843,7 @@ mod tests {
             Err(SkulkError::SshFailed("tmux creation failed".into())),
             Err(SkulkError::SshFailed("rollback also failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::SshFailed(msg) => assert!(msg.contains("tmux creation failed")),
@@ -772,8 +861,182 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("send-keys failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg);
+        let result = cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg, None);
         assert!(result.is_ok());
+    }
+
+    // ── build_launch_sequence ──────────────────────────────────────────
+
+    #[test]
+    fn build_launch_sequence_exports_skulk_env_vars() {
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(seq.contains("SKULK_AGENT_NAME=my-task"));
+        assert!(seq.contains("SKULK_SESSION=skulk-my-task"));
+        assert!(seq.contains("SKULK_BRANCH=skulk-my-task"));
+        assert!(seq.contains("SKULK_WORKTREE=~/test-project-worktrees/skulk-my-task"));
+    }
+
+    #[test]
+    fn build_launch_sequence_sources_dotenv_conditionally() {
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains("[ -f .env ]"),
+            "expected conditional .env check: {seq}"
+        );
+        assert!(seq.contains(". ./.env"), "expected dotenv source: {seq}");
+    }
+
+    #[test]
+    fn build_launch_sequence_defaults_init_script_to_skulk_init_sh() {
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains("[ -f .skulk/init.sh ]"),
+            "expected default init script path: {seq}"
+        );
+        assert!(seq.contains("bash .skulk/init.sh"));
+    }
+
+    #[test]
+    fn build_launch_sequence_respects_configured_override() {
+        let mut cfg = test_config();
+        cfg.init_script = Some("scripts/setup-agent.sh".into());
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains("[ -f scripts/setup-agent.sh ]"),
+            "expected override init script path: {seq}"
+        );
+        assert!(seq.contains("bash scripts/setup-agent.sh"));
+        assert!(
+            !seq.contains(".skulk/init.sh"),
+            "default path should not appear when override set: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_init_hook_chained_with_claude_via_and() {
+        // Hard-fail guarantee: when init.sh exists and fails, claude must not start.
+        // We express that as `bash init.sh && claude`.
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        let hook_idx = seq
+            .find("bash .skulk/init.sh")
+            .expect("init hook invocation missing");
+        let and_idx = seq[hook_idx..]
+            .find("&&")
+            .map(|i| i + hook_idx)
+            .expect("hard-fail && missing after init.sh");
+        let claude_idx = seq[and_idx..]
+            .find("claude --dangerously-skip-permissions")
+            .map(|i| i + and_idx)
+            .expect("claude launch missing after &&");
+        assert!(hook_idx < and_idx);
+        assert!(and_idx < claude_idx);
+    }
+
+    #[test]
+    fn build_launch_sequence_runs_claude_when_init_hook_absent() {
+        // If the init file doesn't exist at runtime, claude still launches (else branch).
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains("else claude --dangerously-skip-permissions"),
+            "expected unconditional claude launch in else branch: {seq}"
+        );
+    }
+
+    // ── cmd_new .env upload behavior ───────────────────────────────────
+
+    #[test]
+    fn cmd_new_uploads_local_env_when_provided() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()), // worktree
+            Ok(String::new()), // tmux create + send-keys
+        ]);
+        let env_path = std::path::PathBuf::from("/tmp/some/.skulk/.env");
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, Some(&env_path)).is_ok());
+        let calls = ssh.calls();
+        // Order: base-clone check, inventory, worktree, UPLOAD, tmux
+        let upload_call = calls
+            .iter()
+            .find(|c| c.starts_with("UPLOAD "))
+            .expect("expected an UPLOAD call when local_env_file is provided");
+        assert!(upload_call.contains("/tmp/some/.skulk/.env"));
+        assert!(upload_call.contains("~/test-project-worktrees/skulk-test/.env"));
+    }
+
+    #[test]
+    fn cmd_new_skips_upload_when_no_local_env() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, None).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("UPLOAD ")),
+            "no upload expected when local_env_file is None: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_upload_failure_is_non_fatal() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()), // worktree
+            Ok(String::new()), // tmux create
+        ])
+        .with_upload_responses(vec![Err(SkulkError::SshFailed("scp blew up".into()))]);
+        let env_path = std::path::PathBuf::from("/tmp/.skulk/.env");
+        // Upload failure should warn but still succeed overall.
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, Some(&env_path)).is_ok());
+    }
+
+    #[test]
+    fn resolve_local_env_file_finds_existing_env() {
+        let dir = std::env::temp_dir().join("skulk_env_resolve_yes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".skulk")).unwrap();
+        std::fs::write(dir.join(".skulk").join(".env"), "FOO=bar\n").unwrap();
+
+        let mut cfg = test_config();
+        cfg.root_dir = Some(dir.clone());
+        let resolved = resolve_local_env_file(&cfg);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(dir.join(".skulk").join(".env").as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_env_file_returns_none_when_missing() {
+        let dir = std::env::temp_dir().join("skulk_env_resolve_no");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cfg = test_config();
+        cfg.root_dir = Some(dir.clone());
+        assert!(resolve_local_env_file(&cfg).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_env_file_returns_none_without_root_dir() {
+        let cfg = test_config();
+        assert!(resolve_local_env_file(&cfg).is_none());
     }
 
     #[test]
@@ -783,7 +1046,7 @@ mod tests {
             message: "Connection refused.".into(),
             suggestion: "SSH not running.".into(),
         })]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Diagnostic { message, .. } => assert!(message.contains("refused")),

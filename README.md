@@ -165,6 +165,29 @@ skulk gc --dry-run
 | `skulk destroy-all` | Destroy all agents at once |
 | `skulk gc` | Clean up orphaned sessions, worktrees, and branches |
 
+## Per-Agent Setup (Init Hook)
+
+Skulk runs an optional setup script inside each agent's tmux session before Claude starts — useful for `docker compose up`, migrations, dependency installs, mock services, etc.
+
+**Convention:** put the script at `.skulk/init.sh` in your repo. Override the path with `init_script = "scripts/setup-agent.sh"` in `.skulk.toml` if you prefer.
+
+**Project env file:** `.skulk/.env` lives locally (gitignored — `skulk init` adds the entry automatically) and almost always contains secrets. On `skulk new`, Skulk copies it to the agent's worktree at `<worktree>/.env` so dotenv-aware project tooling picks it up, and Skulk also `source`s it before running `init.sh` so the script sees the same vars (e.g. `$DATABASE_URL` for migrations).
+
+> ⚠️ **Security:** shipping `.skulk/.env` sends your local secrets to the remote server. Review what's in it before running `skulk new`, especially on shared hosts.
+
+**Env vars passed to `init.sh`:**
+
+| Variable | Example |
+|----------|---------|
+| `SKULK_AGENT_NAME` | `auth-refactor` |
+| `SKULK_SESSION` | `myproject-auth-refactor` |
+| `SKULK_BRANCH` | `myproject-auth-refactor` |
+| `SKULK_WORKTREE` | absolute path to the worktree |
+
+**Failure handling — hard fail:** if `init.sh` exits non-zero, Claude does not start. The tmux session stays open with the error visible — run `skulk connect <name>` to investigate. For per-step opt-outs, use the usual shell idiom: `risky_command || true`.
+
+`skulk init` writes `.skulk/init.sh.example` — rename it to `.skulk/init.sh` and customize to enable.
+
 ## How It Works
 
 ```
