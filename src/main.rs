@@ -172,6 +172,16 @@ pub(crate) enum Commands {
         /// Agent name
         name: String,
     },
+
+    /// Archive an agent — kill its tmux session but keep worktree and branch intact
+    ///
+    /// Non-destructive alternative to `destroy`. Stops an agent that's done
+    /// (or off the rails) without losing its work. Review the branch with
+    /// `skulk diff` or inspect the worktree directly on the remote.
+    Archive {
+        /// Agent name to archive
+        name: String,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -201,6 +211,7 @@ pub(crate) fn run(
         Commands::Logs { .. } => "logs",
         Commands::Send { .. } => "send",
         Commands::Push { .. } => "push",
+        Commands::Archive { .. } => "archive",
     };
 
     let result = match cli.command {
@@ -227,6 +238,7 @@ pub(crate) fn run(
             interact::cmd_send(ssh, &name, &prompt, cfg, send_verify_delay)
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
+        Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -411,6 +423,19 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::Push {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_archive() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Archive {
                 name: "test".into(),
             },
         };
