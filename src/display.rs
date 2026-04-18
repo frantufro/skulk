@@ -63,12 +63,48 @@ pub(crate) enum SessionState {
     Stopped,
 }
 
+/// Whether the agent's Claude Code instance is currently processing a turn.
+///
+/// Derived from the Stop-hook state file mtime vs. the tmux session activity
+/// timestamp (see [`derive_idle_state`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdleState {
+    /// Agent is actively processing (no stop marker, or activity newer than marker).
+    Working,
+    /// Agent has finished its last turn and is awaiting input.
+    Idle,
+    /// tmux session is gone; agent is not running.
+    Stopped,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Session {
     pub name: String,
     pub created: i64,
+    /// tmux `session_activity` epoch — last time any pane output changed.
+    pub activity: i64,
     pub state: SessionState,
+    pub idle: IdleState,
     pub worktree: Option<String>,
+}
+
+/// Idle state = Stopped if no tmux session, else compare state-file mtime to tmux activity.
+///
+/// The Stop hook fires just after Claude writes its last output, so when idle
+/// `state_mtime >= activity`. When Claude resumes, new output bumps `activity`
+/// above `state_mtime` until the next turn ends.
+pub(crate) fn derive_idle_state(
+    state: &SessionState,
+    activity: i64,
+    state_mtime: Option<i64>,
+) -> IdleState {
+    if *state == SessionState::Stopped {
+        return IdleState::Stopped;
+    }
+    match state_mtime {
+        Some(m) if m >= activity => IdleState::Idle,
+        _ => IdleState::Working,
+    }
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -82,6 +118,7 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
                 return None;
             }
             let created = parts[1].parse::<i64>().ok()?;
+            let activity = parts[2].parse::<i64>().ok()?;
             let state = if parts[3] == "0" {
                 SessionState::Running
             } else {
@@ -90,7 +127,9 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
             Some(Session {
                 name: parts[0].to_string(),
                 created,
+                activity,
                 state,
+                idle: IdleState::Working,
                 worktree: None,
             })
         })
@@ -136,13 +175,13 @@ pub(crate) fn format_sessions_table_with_color(
 
     if color {
         lines.push(format!(
-            "{BOLD}{:<20} {:<10} {:<12} {}{RESET}",
-            "NAME", "STATUS", "UPTIME", "WORKTREE"
+            "{BOLD}{:<20} {:<10} {:<9} {:<12} {}{RESET}",
+            "NAME", "STATUS", "IDLE", "UPTIME", "WORKTREE"
         ));
     } else {
         lines.push(format!(
-            "{:<20} {:<10} {:<12} {}",
-            "NAME", "STATUS", "UPTIME", "WORKTREE"
+            "{:<20} {:<10} {:<9} {:<12} {}",
+            "NAME", "STATUS", "IDLE", "UPTIME", "WORKTREE"
         ));
     }
 
@@ -154,12 +193,26 @@ pub(crate) fn format_sessions_table_with_color(
             SessionState::Running => "running",
             SessionState::Stopped => "stopped",
         };
-        let padded = format!("{status_raw:<10}");
+        let status_padded = format!("{status_raw:<10}");
         let status_display = if color {
             let color_code = if stopped { YELLOW } else { GREEN };
-            format!("{color_code}{padded}{RESET}")
+            format!("{color_code}{status_padded}{RESET}")
         } else {
-            padded
+            status_padded
+        };
+        let idle_raw = match s.idle {
+            IdleState::Working => "working",
+            IdleState::Idle => "idle",
+            IdleState::Stopped => "stopped",
+        };
+        let idle_padded = format!("{idle_raw:<9}");
+        let idle_display = if color {
+            match s.idle {
+                IdleState::Idle => format!("{GREEN}{BOLD}{idle_padded}{RESET}"),
+                IdleState::Working | IdleState::Stopped => format!("{DIM}{idle_padded}{RESET}"),
+            }
+        } else {
+            idle_padded
         };
         let uptime = if stopped {
             "-".to_string()
@@ -168,7 +221,7 @@ pub(crate) fn format_sessions_table_with_color(
         };
         let wt = s.worktree.as_deref().unwrap_or("-");
         lines.push(format!(
-            "{display_name:<20} {status_display} {uptime:<12} {wt}"
+            "{display_name:<20} {status_display} {idle_display} {uptime:<12} {wt}"
         ));
     }
 
@@ -248,6 +301,22 @@ mod tests {
     use super::*;
     use crate::testutil::test_config;
 
+    fn sess(name: &str, created: i64, state: SessionState, worktree: Option<&str>) -> Session {
+        let idle = if state == SessionState::Stopped {
+            IdleState::Stopped
+        } else {
+            IdleState::Working
+        };
+        Session {
+            name: name.to_string(),
+            created,
+            activity: created,
+            state,
+            idle,
+            worktree: worktree.map(ToString::to_string),
+        }
+    }
+
     // ── parse_sessions ──────────────────────────────────────────────────
 
     #[test]
@@ -257,7 +326,9 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "skulk-test");
         assert_eq!(sessions[0].created, 1700000000);
+        assert_eq!(sessions[0].activity, 1700000100);
         assert_eq!(sessions[0].state, SessionState::Running);
+        assert_eq!(sessions[0].idle, IdleState::Working);
         assert!(sessions[0].worktree.is_none());
     }
 
@@ -324,16 +395,12 @@ mod tests {
     #[test]
     fn format_sessions_table_has_header() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-test".to_string(),
-            created: 1000000,
-            state: SessionState::Running,
-            worktree: None,
-        }];
+        let sessions = vec![sess("skulk-test", 1000000, SessionState::Running, None)];
         let result = format_sessions_table(&sessions, 1000090, &cfg);
         let first_line = result.lines().next().unwrap();
         assert!(first_line.contains("NAME"));
         assert!(first_line.contains("STATUS"));
+        assert!(first_line.contains("IDLE"));
         assert!(first_line.contains("UPTIME"));
         assert!(first_line.contains("WORKTREE"));
         assert!(result.contains("test"));
@@ -343,12 +410,12 @@ mod tests {
     #[test]
     fn format_sessions_table_attached_status() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-attached".to_string(),
-            created: 1000000,
-            state: SessionState::Attached,
-            worktree: None,
-        }];
+        let sessions = vec![sess(
+            "skulk-attached",
+            1000000,
+            SessionState::Attached,
+            None,
+        )];
         let result = format_sessions_table(&sessions, 1000090, &cfg);
         assert!(result.contains("attached"));
     }
@@ -356,12 +423,7 @@ mod tests {
     #[test]
     fn format_sessions_table_detached_status() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-detached".to_string(),
-            created: 1000000,
-            state: SessionState::Running,
-            worktree: None,
-        }];
+        let sessions = vec![sess("skulk-detached", 1000000, SessionState::Running, None)];
         let result = format_sessions_table(&sessions, 1000090, &cfg);
         assert!(result.contains("running"));
     }
@@ -369,12 +431,7 @@ mod tests {
     #[test]
     fn format_sessions_table_worktree_placeholder() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-wt".to_string(),
-            created: 1000000,
-            state: SessionState::Running,
-            worktree: None,
-        }];
+        let sessions = vec![sess("skulk-wt", 1000000, SessionState::Running, None)];
         let result = format_sessions_table(&sessions, 1000090, &cfg);
         let data_lines: Vec<&str> = result.lines().skip(1).collect();
         assert!(!data_lines.is_empty());
@@ -386,12 +443,12 @@ mod tests {
     #[test]
     fn format_sessions_table_with_worktree_path() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-test".to_string(),
-            created: 1000000,
-            state: SessionState::Running,
-            worktree: Some("~/test-project-worktrees/skulk-test".into()),
-        }];
+        let sessions = vec![sess(
+            "skulk-test",
+            1000000,
+            SessionState::Running,
+            Some("~/test-project-worktrees/skulk-test"),
+        )];
         let result = format_sessions_table(&sessions, 1000090, &cfg);
         assert!(result.contains("~/test-project-worktrees/skulk-test"));
     }
@@ -399,12 +456,7 @@ mod tests {
     #[test]
     fn format_sessions_table_strips_agent_prefix_from_name() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-my-task".to_string(),
-            created: 1000000,
-            state: SessionState::Running,
-            worktree: None,
-        }];
+        let sessions = vec![sess("skulk-my-task", 1000000, SessionState::Running, None)];
         let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
         let data_line = result.lines().nth(1).unwrap();
         assert!(data_line.starts_with("my-task"));
@@ -414,12 +466,12 @@ mod tests {
     #[test]
     fn format_sessions_table_stopped_status() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-zombie".to_string(),
-            created: 0,
-            state: SessionState::Stopped,
-            worktree: Some("~/test-project-worktrees/skulk-zombie".into()),
-        }];
+        let sessions = vec![sess(
+            "skulk-zombie",
+            0,
+            SessionState::Stopped,
+            Some("~/test-project-worktrees/skulk-zombie"),
+        )];
         let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
         assert!(
             result.contains("stopped"),
@@ -430,35 +482,53 @@ mod tests {
     #[test]
     fn format_sessions_table_stopped_shows_dash_for_uptime() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-zombie".to_string(),
-            created: 0,
-            state: SessionState::Stopped,
-            worktree: Some("~/test-project-worktrees/skulk-zombie".into()),
-        }];
+        let sessions = vec![sess(
+            "skulk-zombie",
+            0,
+            SessionState::Stopped,
+            Some("~/test-project-worktrees/skulk-zombie"),
+        )];
         let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
         let data_line = result.lines().nth(1).unwrap();
-        // Uptime column should show "-" not a computed duration
         assert!(
             data_line.contains("stopped"),
             "should show stopped: {data_line}"
         );
-        // The uptime field (third column) should be "-"
         let parts: Vec<&str> = data_line.split_whitespace().collect();
-        // name, status, uptime, worktree...
+        // name, status, idle, uptime, worktree...
         assert_eq!(parts[1], "stopped");
-        assert_eq!(parts[2], "-");
+        assert_eq!(parts[2], "stopped");
+        assert_eq!(parts[3], "-");
+    }
+
+    #[test]
+    fn format_sessions_table_shows_idle_column_values() {
+        let cfg = test_config();
+        let mut working = sess("skulk-busy", 1000000, SessionState::Running, None);
+        working.idle = IdleState::Working;
+        let mut idle_agent = sess("skulk-done", 1000000, SessionState::Running, None);
+        idle_agent.idle = IdleState::Idle;
+        let result = format_sessions_table_with_color(&[working, idle_agent], 1000090, false, &cfg);
+        assert!(result.contains("working"));
+        assert!(result.contains("idle"));
+    }
+
+    #[test]
+    fn format_sessions_table_idle_highlighted_in_color() {
+        let cfg = test_config();
+        let mut s = sess("skulk-done", 1000000, SessionState::Running, None);
+        s.idle = IdleState::Idle;
+        let output = format_sessions_table_with_color(&[s], 1000090, true, &cfg);
+        // Idle value should appear in bold green; the raw word "idle" is present.
+        assert!(output.contains("idle"));
+        assert!(output.contains("\x1b[32m"));
+        assert!(output.contains("\x1b[1m"));
     }
 
     #[test]
     fn format_sessions_table_contains_color_when_enabled() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-test".to_string(),
-            created: 1700000000,
-            state: SessionState::Running,
-            worktree: None,
-        }];
+        let sessions = vec![sess("skulk-test", 1700000000, SessionState::Running, None)];
         let output = format_sessions_table_with_color(&sessions, 1700000200, true, &cfg);
         assert!(output.contains("\x1b[32m"));
         assert!(output.contains("\x1b[0m"));
@@ -468,14 +538,51 @@ mod tests {
     #[test]
     fn format_sessions_table_no_color_when_disabled() {
         let cfg = test_config();
-        let sessions = vec![Session {
-            name: "skulk-test".to_string(),
-            created: 1700000000,
-            state: SessionState::Running,
-            worktree: None,
-        }];
+        let sessions = vec![sess("skulk-test", 1700000000, SessionState::Running, None)];
         let output = format_sessions_table_with_color(&sessions, 1700000200, false, &cfg);
         assert!(!output.contains("\x1b["));
+    }
+
+    // ── derive_idle_state ───────────────────────────────────────────────
+
+    #[test]
+    fn derive_idle_state_stopped_when_session_gone() {
+        assert_eq!(
+            derive_idle_state(&SessionState::Stopped, 0, None),
+            IdleState::Stopped
+        );
+        assert_eq!(
+            derive_idle_state(&SessionState::Stopped, 1000, Some(2000)),
+            IdleState::Stopped
+        );
+    }
+
+    #[test]
+    fn derive_idle_state_working_without_state_file() {
+        assert_eq!(
+            derive_idle_state(&SessionState::Running, 1000, None),
+            IdleState::Working
+        );
+    }
+
+    #[test]
+    fn derive_idle_state_idle_when_mtime_ge_activity() {
+        assert_eq!(
+            derive_idle_state(&SessionState::Running, 1000, Some(1000)),
+            IdleState::Idle
+        );
+        assert_eq!(
+            derive_idle_state(&SessionState::Attached, 1000, Some(1005)),
+            IdleState::Idle
+        );
+    }
+
+    #[test]
+    fn derive_idle_state_working_when_activity_after_mtime() {
+        assert_eq!(
+            derive_idle_state(&SessionState::Running, 2000, Some(1000)),
+            IdleState::Working
+        );
     }
 
     // ── GcOrphans ───────────────────────────────────────────────────────
