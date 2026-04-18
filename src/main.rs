@@ -66,6 +66,11 @@ pub(crate) enum Commands {
         name: String,
         /// Initial prompt to send to the agent after startup
         prompt: Option<String>,
+        /// Launch Claude with --remote-control so the agent is reachable from the
+        /// Claude Code mobile/web app. Off by default because it triggers an upstream
+        /// idle-death bug; Skulk's own commands work via tmux directly.
+        #[arg(long)]
+        remote_control: bool,
     },
 
     /// Destroy a specific agent
@@ -192,7 +197,11 @@ pub(crate) fn run(
         Commands::Init => unreachable!(),
         Commands::List => list::cmd_list(ssh, cfg),
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
-        Commands::New { name, prompt } => new::cmd_new(ssh, &name, prompt.as_deref(), cfg),
+        Commands::New {
+            name,
+            prompt,
+            remote_control,
+        } => new::cmd_new(ssh, &name, prompt.as_deref(), remote_control, cfg),
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
@@ -257,6 +266,7 @@ mod tests {
             command: Commands::New {
                 name: "test".into(),
                 prompt: None,
+                remote_control: false,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
