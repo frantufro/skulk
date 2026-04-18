@@ -50,6 +50,12 @@ cargo check                                      # Prefer over cargo build durin
 - Behavioral: `feat: description` or `fix: description`
 - Every commit must leave all tests passing
 
+## Branch Discipline
+
+You are working in a git worktree with its own branch already checked out.
+**Always commit on the current branch.** Do NOT create new branches (e.g. `feat/X`).
+Run `git branch --show-current` if unsure — that is your branch, use it.
+
 ## Configuration
 
 Runtime config from `.skulk.toml` (searched upward from cwd):
