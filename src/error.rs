@@ -72,10 +72,21 @@ pub(crate) fn classify_agent_error(name: &str, err: SkulkError, host: &str) -> S
                 || lower.contains("can't find pane")
                 || lower.contains("unknown revision")
                 || lower.contains("not a valid object name")
+                || lower.contains("src refspec")
             {
                 SkulkError::NotFound(format!(
                     "Agent '{name}' not found. Check running agents with `skulk list`."
                 ))
+            } else if lower.contains("does not appear to be a git repository")
+                || lower.contains("could not read from remote repository")
+                || lower.contains("no such remote")
+            {
+                SkulkError::Diagnostic {
+                    message: "Remote 'origin' is not configured on the base repository.".into(),
+                    suggestion: format!(
+                        "Configure origin on {host}: `git -C <base_path> remote add origin <url>`"
+                    ),
+                }
             } else {
                 classify_ssh_error(stderr, host)
             }
@@ -283,6 +294,45 @@ mod tests {
         match result {
             SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
             other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_src_refspec_returns_not_found() {
+        let err =
+            SkulkError::SshFailed("error: src refspec skulk-foo does not match any".to_string());
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_origin_missing_returns_diagnostic() {
+        let err = SkulkError::SshFailed(
+            "fatal: 'origin' does not appear to be a git repository".to_string(),
+        );
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::Diagnostic {
+                message,
+                suggestion,
+            } => {
+                assert!(message.to_lowercase().contains("origin"));
+                assert!(suggestion.contains("testhost"));
+            }
+            other => panic!("expected Diagnostic, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn classify_agent_error_no_such_remote_returns_diagnostic() {
+        let err = SkulkError::SshFailed("fatal: No such remote 'origin'".to_string());
+        let result = classify_agent_error("foo", err, "testhost");
+        match result {
+            SkulkError::Diagnostic { .. } => {}
+            other => panic!("expected Diagnostic, got: {other}"),
         }
     }
 
