@@ -159,6 +159,7 @@ skulk gc --dry-run
 | `skulk connect <name>` | Attach to an agent's live tmux session |
 | `skulk logs <name>` | View an agent's terminal output |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent |
+| `skulk ship <name>` | Push the agent's branch and open a PR with a Claude-authored description (requires `gh` and `claude` on the remote) |
 | `skulk pull` | Update the base clone (`git pull --ff-only`) |
 | `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
 | `skulk destroy-all` | Destroy all agents at once |
