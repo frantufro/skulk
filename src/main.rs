@@ -182,6 +182,15 @@ pub(crate) enum Commands {
         /// Agent name to archive
         name: String,
     },
+
+    /// Show `git log` of commits on an agent's branch not in the default branch
+    ///
+    /// Runs `git log <default_branch>..<session_prefix><name> --oneline` on the remote.
+    /// Named `git-log` (not `log`) to avoid collision with `logs`, which shows tmux output.
+    GitLog {
+        /// Agent name
+        name: String,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -212,6 +221,7 @@ pub(crate) fn run(
         Commands::Send { .. } => "send",
         Commands::Push { .. } => "push",
         Commands::Archive { .. } => "archive",
+        Commands::GitLog { .. } => "git-log",
     };
 
     let result = match cli.command {
@@ -239,6 +249,7 @@ pub(crate) fn run(
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
+        Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -436,6 +447,19 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::Archive {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_git_log() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("abc1234 first commit".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::GitLog {
                 name: "test".into(),
             },
         };
