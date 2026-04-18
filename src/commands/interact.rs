@@ -186,6 +186,40 @@ pub(crate) fn cmd_archive(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
     Ok(())
 }
 
+/// Dump an agent's full tmux scrollback, to stdout or to a file.
+///
+/// Captures up to 100,000 lines of scrollback in a single SSH round-trip.
+/// When `output` is `Some`, writes the captured content to that path;
+/// otherwise prints to stdout.
+///
+/// # Errors
+///
+/// Returns `SkulkError::Validation` if the name is invalid or the output
+/// file cannot be written. Returns `SkulkError::NotFound` when the agent's
+/// tmux session does not exist. Propagates other SSH errors via
+/// [`classify_agent_error`].
+pub(crate) fn cmd_transcript(
+    ssh: &impl Ssh,
+    name: &str,
+    output: Option<&std::path::Path>,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
+    validate_name(name)?;
+    let content = ssh
+        .run(&logs_snapshot_deep_command(name, 100_000, cfg))
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    match output {
+        Some(path) => {
+            std::fs::write(path, &content).map_err(|e| {
+                SkulkError::Validation(format!("Failed to write {}: {e}", path.display()))
+            })?;
+            eprintln!("Wrote transcript to {}.", path.display());
+        }
+        None => print!("{content}"),
+    }
+    Ok(())
+}
+
 /// Send a prompt to a running agent with delivery verification.
 ///
 /// `verify_delay` controls how long to wait before checking pane content changed.
@@ -771,6 +805,57 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
         let result = cmd_git_log(&ssh, "../bad", &cfg);
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
+    }
+
+    #[test]
+    fn cmd_transcript_prints_to_stdout_when_no_output_path() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("scrollback line 1\nscrollback line 2".into())]);
+        assert!(cmd_transcript(&ssh, "test", None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_transcript_writes_to_file_when_output_path() {
+        let cfg = test_config();
+        let expected = "scrollback line 1\nscrollback line 2\n";
+        let ssh = MockSsh::new(vec![Ok(expected.into())]);
+        let path = std::env::temp_dir().join(format!(
+            "skulk-transcript-test-{}-{}.txt",
+            std::process::id(),
+            "writes-to-file"
+        ));
+        // Ensure no leftover from a previous run.
+        let _ = std::fs::remove_file(&path);
+
+        let result = cmd_transcript(&ssh, "test", Some(&path), &cfg);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let written = std::fs::read_to_string(&path).expect("transcript file should exist");
+        assert_eq!(written, expected);
+
+        std::fs::remove_file(&path).expect("cleanup failed");
+    }
+
+    #[test]
+    fn cmd_transcript_agent_not_found() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find session: skulk-ghost".into(),
+        ))]);
+        let result = cmd_transcript(&ssh, "ghost", None, &cfg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn cmd_transcript_rejects_invalid_name() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_transcript(&ssh, "../bad", None, &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 }
