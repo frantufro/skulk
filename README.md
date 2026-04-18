@@ -89,7 +89,12 @@ skulk new fix-bug "Fix the null pointer exception in UserService.java"
 
 # Create an agent without a prompt (starts Claude Code, you connect and interact manually)
 skulk new explore
+
+# Create an agent reachable from the Claude Code mobile/web app
+skulk new mobile-task --remote-control "Fix the login bug"
 ```
+
+By default Skulk launches Claude Code **without** `--remote-control`. Skulk's own commands (`connect`, `logs`, `send`, `disconnect`) talk to the agent through tmux directly and don't need it, and leaving it on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills long-running agents. Opt in with `--remote-control` when you want to drive an agent from your phone.
 
 ### 3. Monitor and interact
 
@@ -191,6 +196,7 @@ skulk new -bad-name-      # invalid (leading/trailing hyphens)
 | Flag | Scope | Description |
 |------|-------|-------------|
 | `--no-color` | Global | Disable colored output (also respects `NO_COLOR` env var) |
+| `--remote-control` | `new` | Launch Claude with `--remote-control` so the agent is accessible from the Claude Code mobile/web app (off by default — see Quick Start) |
 | `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
 | `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
 | `--follow`, `-f` | `logs` | Stream output in real time |

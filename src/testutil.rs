@@ -19,25 +19,34 @@ pub(crate) fn test_config() -> Config {
 
 pub(crate) struct MockSsh {
     pub responses: RefCell<VecDeque<Result<String, SkulkError>>>,
+    calls: RefCell<Vec<String>>,
 }
 
 impl MockSsh {
     pub fn new(responses: Vec<Result<String, SkulkError>>) -> Self {
         Self {
             responses: RefCell::new(responses.into()),
+            calls: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Returns the commands passed to `run` and `interactive`, in call order.
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
     }
 }
 
 impl Ssh for MockSsh {
-    fn run(&self, _cmd: &str) -> Result<String, SkulkError> {
+    fn run(&self, cmd: &str) -> Result<String, SkulkError> {
+        self.calls.borrow_mut().push(cmd.to_string());
         self.responses
             .borrow_mut()
             .pop_front()
             .expect("MockSsh: unexpected extra SSH call")
     }
 
-    fn interactive(&self, _cmd: &str) -> Result<std::process::ExitStatus, SkulkError> {
+    fn interactive(&self, cmd: &str) -> Result<std::process::ExitStatus, SkulkError> {
+        self.calls.borrow_mut().push(cmd.to_string());
         Ok(std::process::ExitStatus::default())
     }
 }
