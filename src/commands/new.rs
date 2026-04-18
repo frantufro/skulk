@@ -26,7 +26,20 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
 /// because it triggers an upstream idle-death bug
 /// (<https://github.com/anthropics/claude-code/issues/32982>); Skulk's own
 /// commands work through tmux directly and do not need it.
-pub(crate) fn agent_create_tmux_command(name: &str, cfg: &Config, remote_control: bool) -> String {
+///
+/// When `model` is provided, Claude is launched with `--model <name>` so the
+/// agent runs on a specific model (e.g. `opus`, `sonnet`, `claude-opus-4-7`).
+///
+/// When `claude_args` is provided, the raw string is appended to the Claude
+/// command line verbatim (after shell-escaping for the surrounding single
+/// quotes), allowing pass-through of arbitrary Claude Code flags.
+pub(crate) fn agent_create_tmux_command(
+    name: &str,
+    cfg: &Config,
+    remote_control: bool,
+    model: Option<&str>,
+    claude_args: Option<&str>,
+) -> String {
     let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
     let remote_control_flag = if remote_control {
@@ -34,10 +47,18 @@ pub(crate) fn agent_create_tmux_command(name: &str, cfg: &Config, remote_control
     } else {
         String::new()
     };
+    let model_flag = match model {
+        Some(m) => format!(" --model {}", shell_escape(m)),
+        None => String::new(),
+    };
+    let extra_args = match claude_args {
+        Some(args) if !args.is_empty() => format!(" {}", shell_escape(args)),
+        _ => String::new(),
+    };
     format!(
         "tmux new-session -d -s {session_prefix}{name} -c {worktree_base}/{session_prefix}{name} && \
          tmux send-keys -t {session_prefix}{name} \
-         'claude --dangerously-skip-permissions{remote_control_flag}' C-m"
+         'claude --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}' C-m"
     )
 }
 
@@ -87,6 +108,8 @@ pub(crate) fn cmd_new(
     name: &str,
     prompt: Option<&str>,
     remote_control: bool,
+    model: Option<&str>,
+    claude_args: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
@@ -130,7 +153,13 @@ pub(crate) fn cmd_new(
     ssh.run(&agent_create_worktree_command(name, cfg))?;
 
     // Step 4: Create tmux session with Claude Code
-    if let Err(e) = ssh.run(&agent_create_tmux_command(name, cfg, remote_control)) {
+    if let Err(e) = ssh.run(&agent_create_tmux_command(
+        name,
+        cfg,
+        remote_control,
+        model,
+        claude_args,
+    )) {
         // Attempt rollback (best-effort)
         if ssh
             .run(&agent_rollback_worktree_command(name, cfg))
@@ -169,17 +198,23 @@ pub(crate) fn cmd_new(
         PromptStatus::NotSent => "  Prompt: none (idle, waiting for input)".to_string(),
     };
 
-    let mode_line = if remote_control {
+    let permissions_line = if remote_control {
         "  Mode: remote-control (skip-permissions)"
     } else {
         "  Mode: skip-permissions"
     };
 
+    let model_line = model.map(|m| format!("\n  Model: {m}")).unwrap_or_default();
+    let extra_args_line = claude_args
+        .filter(|s| !s.is_empty())
+        .map(|a| format!("\n  Extra Claude args: {a}"))
+        .unwrap_or_default();
+
     println!(
         "Agent '{name}' created.\n\
          \x20 Branch: {session_prefix}{name}\n\
          \x20 Worktree: {worktree_base}/{session_prefix}{name}\n\
-         {mode_line}\n\
+         {permissions_line}{model_line}{extra_args_line}\n\
          {prompt_line}\n\
          \n\
          Next steps:\n\
@@ -209,7 +244,7 @@ mod tests {
     #[test]
     fn agent_create_tmux_command_with_remote_control_includes_flag() {
         let cfg = test_config();
-        let cmd = agent_create_tmux_command("my-task", &cfg, true);
+        let cmd = agent_create_tmux_command("my-task", &cfg, true, None, None);
         assert!(cmd.contains("tmux new-session -d -s skulk-my-task"));
         assert!(cmd.contains("--dangerously-skip-permissions"));
         assert!(cmd.contains("--remote-control skulk-my-task"));
@@ -218,13 +253,81 @@ mod tests {
     #[test]
     fn agent_create_tmux_command_without_remote_control_omits_flag() {
         let cfg = test_config();
-        let cmd = agent_create_tmux_command("my-task", &cfg, false);
+        let cmd = agent_create_tmux_command("my-task", &cfg, false, None, None);
         assert!(cmd.contains("tmux new-session -d -s skulk-my-task"));
         assert!(cmd.contains("--dangerously-skip-permissions"));
         assert!(
             !cmd.contains("--remote-control"),
             "flag should be absent when remote_control=false, got: {cmd}"
         );
+    }
+
+    #[test]
+    fn agent_create_tmux_command_with_model_includes_model_flag() {
+        let cfg = test_config();
+        let cmd = agent_create_tmux_command("my-task", &cfg, false, Some("opus"), None);
+        assert!(
+            cmd.contains("--model opus"),
+            "should include --model flag, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_tmux_command_without_model_omits_model_flag() {
+        let cfg = test_config();
+        let cmd = agent_create_tmux_command("my-task", &cfg, false, None, None);
+        assert!(
+            !cmd.contains("--model"),
+            "should omit --model flag when model is None, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_tmux_command_with_claude_args_appends_verbatim() {
+        let cfg = test_config();
+        let cmd =
+            agent_create_tmux_command("my-task", &cfg, false, None, Some("--allowed-tools Bash"));
+        assert!(
+            cmd.contains("--allowed-tools Bash"),
+            "should append claude_args, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_tmux_command_with_empty_claude_args_appends_nothing() {
+        let cfg = test_config();
+        let cmd = agent_create_tmux_command("my-task", &cfg, false, None, Some(""));
+        assert!(
+            cmd.contains("'claude --dangerously-skip-permissions'"),
+            "empty claude_args should not introduce trailing space, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_tmux_command_claude_args_escapes_single_quotes() {
+        let cfg = test_config();
+        let cmd = agent_create_tmux_command(
+            "my-task",
+            &cfg,
+            false,
+            None,
+            Some("--system-prompt 'be nice'"),
+        );
+        // Single quotes in claude_args must be escaped for the surrounding single-quoted send-keys string.
+        assert!(
+            cmd.contains("--system-prompt '\\''be nice'\\''"),
+            "single quotes in claude_args should be POSIX-escaped, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_tmux_command_model_and_claude_args_combine() {
+        let cfg = test_config();
+        let cmd =
+            agent_create_tmux_command("my-task", &cfg, true, Some("sonnet"), Some("--verbose"));
+        assert!(cmd.contains("--remote-control skulk-my-task"));
+        assert!(cmd.contains("--model sonnet"));
+        assert!(cmd.contains("--verbose"));
     }
 
     #[test]
@@ -281,7 +384,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg).is_ok());
     }
 
     #[test]
@@ -294,7 +397,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", Some("fix the bug"), false, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg).is_ok());
     }
 
     #[test]
@@ -306,7 +409,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, true, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, true, None, None, &cfg).is_ok());
         // Fourth SSH call is the tmux-create command; verify the flag landed there.
         let tmux_call = &ssh.calls()[3];
         assert!(
@@ -324,11 +427,56 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, &cfg).is_ok());
+        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg).is_ok());
         let tmux_call = &ssh.calls()[3];
         assert!(
             !tmux_call.contains("--remote-control"),
             "tmux launch command should omit --remote-control when flag is false, got: {tmux_call}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_with_model_flag_passes_flag_through() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        assert!(cmd_new(&ssh, "test", None, false, Some("opus"), None, &cfg).is_ok());
+        let tmux_call = &ssh.calls()[3];
+        assert!(
+            tmux_call.contains("--model opus"),
+            "tmux launch command should include --model opus, got: {tmux_call}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_with_claude_args_passes_args_through() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        assert!(
+            cmd_new(
+                &ssh,
+                "test",
+                None,
+                false,
+                None,
+                Some("--allowed-tools Bash"),
+                &cfg
+            )
+            .is_ok()
+        );
+        let tmux_call = &ssh.calls()[3];
+        assert!(
+            tmux_call.contains("--allowed-tools Bash"),
+            "tmux launch command should include extra claude_args, got: {tmux_call}"
         );
     }
 
@@ -343,7 +491,7 @@ mod tests {
                 &["skulk-dupe"],
             )),
         ]);
-        let result = cmd_new(&ssh, "dupe", None, false, &cfg);
+        let result = cmd_new(&ssh, "dupe", None, false, None, None, &cfg);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("already exists")),
@@ -363,7 +511,7 @@ mod tests {
                 &["skulk-zombie"],
             )),
         ]);
-        let result = cmd_new(&ssh, "zombie", None, false, &cfg);
+        let result = cmd_new(&ssh, "zombie", None, false, None, None, &cfg);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => {
@@ -384,7 +532,7 @@ mod tests {
     fn cmd_new_missing_base_clone_returns_error() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
-        let result = cmd_new(&ssh, "test", None, false, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("Base clone not found")),
@@ -402,7 +550,7 @@ mod tests {
             Err(SkulkError::SshFailed("tmux failed".into())),
             Ok(String::new()),
         ]);
-        let result = cmd_new(&ssh, "test", None, false, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
         assert!(result.is_err());
     }
 
@@ -416,7 +564,7 @@ mod tests {
             Err(SkulkError::SshFailed("tmux creation failed".into())),
             Err(SkulkError::SshFailed("rollback also failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", None, false, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::SshFailed(msg) => assert!(msg.contains("tmux creation failed")),
@@ -434,7 +582,7 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("send-keys failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", Some("fix the bug"), false, &cfg);
+        let result = cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg);
         assert!(result.is_ok());
     }
 
@@ -445,7 +593,7 @@ mod tests {
             message: "Connection refused.".into(),
             suggestion: "SSH not running.".into(),
         })]);
-        let result = cmd_new(&ssh, "test", None, false, &cfg);
+        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Diagnostic { message, .. } => assert!(message.contains("refused")),

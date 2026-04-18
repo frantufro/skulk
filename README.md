@@ -92,6 +92,12 @@ skulk new explore
 
 # Create an agent reachable from the Claude Code mobile/web app
 skulk new mobile-task --remote-control "Fix the login bug"
+
+# Spin up an agent on a specific model
+skulk new big-refactor --model opus "Untangle the auth middleware"
+
+# Pass arbitrary extra flags through to Claude Code
+skulk new scoped --claude-args "--allowed-tools Bash(gh pr:*)" "Triage open PRs"
 ```
 
 By default Skulk launches Claude Code **without** `--remote-control`. Skulk's own commands (`connect`, `logs`, `send`, `disconnect`) talk to the agent through tmux directly and don't need it, and leaving it on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills long-running agents. Opt in with `--remote-control` when you want to drive an agent from your phone.
@@ -199,6 +205,8 @@ skulk new -bad-name-      # invalid (leading/trailing hyphens)
 |------|-------|-------------|
 | `--no-color` | Global | Disable colored output (also respects `NO_COLOR` env var) |
 | `--remote-control` | `new` | Launch Claude with `--remote-control` so the agent is accessible from the Claude Code mobile/web app. Off by default because of an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 min of inactivity — see Quick Start |
+| `--model <NAME>` | `new` | Pass `--model <name>` through to Claude Code (e.g. `opus`, `sonnet`, `claude-opus-4-7`) |
+| `--claude-args <ARGS>` | `new` | Extra flags appended verbatim to the Claude Code launch command (e.g. `--claude-args "--allowed-tools Bash(gh pr:*)"`) |
 | `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
 | `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
 | `--follow`, `-f` | `logs` | Stream output in real time |

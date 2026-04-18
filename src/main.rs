@@ -71,6 +71,14 @@ pub(crate) enum Commands {
         /// idle-death bug; Skulk's own commands work via tmux directly.
         #[arg(long)]
         remote_control: bool,
+        /// Model name passed through to Claude Code as `--model <name>`
+        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`).
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
+        /// Arbitrary extra flags appended verbatim to the Claude Code launch command
+        /// (e.g. `"--allowed-tools Bash(gh pr:*)"`). Escaped for safe transit through tmux.
+        #[arg(long, value_name = "ARGS")]
+        claude_args: Option<String>,
     },
 
     /// Destroy a specific agent
@@ -265,7 +273,17 @@ pub(crate) fn run(
             name,
             prompt,
             remote_control,
-        } => new::cmd_new(ssh, &name, prompt.as_deref(), remote_control, cfg),
+            model,
+            claude_args,
+        } => new::cmd_new(
+            ssh,
+            &name,
+            prompt.as_deref(),
+            remote_control,
+            model.as_deref(),
+            claude_args.as_deref(),
+            cfg,
+        ),
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
@@ -349,6 +367,8 @@ mod tests {
                 name: "test".into(),
                 prompt: None,
                 remote_control: false,
+                model: None,
+                claude_args: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
