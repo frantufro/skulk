@@ -127,6 +127,12 @@ pub(crate) enum Commands {
     Diff {
         /// Agent name
         name: String,
+        /// Show only a summary of changed files, insertions, and deletions
+        #[arg(long, conflicts_with = "name_only")]
+        stat: bool,
+        /// Show only the paths of changed files
+        #[arg(long)]
+        name_only: bool,
     },
 
     /// Detach all clients from an agent's tmux session
@@ -252,7 +258,18 @@ pub(crate) fn run(
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
         Commands::Connect { name } => interact::cmd_connect(ssh, &name, cfg),
-        Commands::Diff { name } => interact::cmd_diff(ssh, &name, cfg),
+        Commands::Diff {
+            name,
+            stat,
+            name_only,
+        } => {
+            let format = match (stat, name_only) {
+                (true, _) => interact::DiffFormat::Stat,
+                (_, true) => interact::DiffFormat::NameOnly,
+                _ => interact::DiffFormat::Default,
+            };
+            interact::cmd_diff(ssh, &name, format, cfg)
+        }
         Commands::Disconnect { name } => interact::cmd_disconnect(ssh, &name, cfg),
         Commands::Logs {
             name,
@@ -394,9 +411,50 @@ mod tests {
             no_color: true,
             command: Commands::Diff {
                 name: "test".into(),
+                stat: false,
+                name_only: false,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_diff_stat() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(" foo.rs | 2 +-".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Diff {
+                name: "test".into(),
+                stat: true,
+                name_only: false,
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_diff_name_only() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("foo.rs".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Diff {
+                name: "test".into(),
+                stat: false,
+                name_only: true,
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn diff_flags_stat_and_name_only_are_mutually_exclusive() {
+        let result = Cli::try_parse_from(["skulk", "diff", "test", "--stat", "--name-only"]);
+        assert!(
+            result.is_err(),
+            "expected clap conflict error when both --stat and --name-only are passed"
+        );
     }
 
     #[test]
