@@ -1,8 +1,11 @@
 ---
-status: READY
+status: BLOCKED
+blocked_on: all subcommands (push, archive, git-log, transcript, diff-flags, remote-control-flag, ship, wait, restart, new-flags, new-prompt-sources, init-hook, skulk-directory)
 ---
 
 Build a Claude Code plugin (or skill bundle) that teaches Claude how to use skulk.
+
+**Note**: Depends on the full command surface being stable. Run this last, once the rest of the roadmap has landed, to avoid documenting aspirational commands that change shape before they ship.
 
 **Use case**: a user in their main Claude Code session can say "spin up an agent to look into the auth bug" and Claude knows the right skulk commands to run, the conventions (worktrees, branch naming, .skulk/init.sh, etc.), and how to monitor/ship the result.
 

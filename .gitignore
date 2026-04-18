@@ -22,3 +22,7 @@ target
 
 # User-specific config
 .skulk.toml
+
+# Claude Code — local-only files
+.claude/settings.local.json
+.claude/worktrees/
