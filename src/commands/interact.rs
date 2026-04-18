@@ -186,11 +186,18 @@ pub(crate) fn cmd_archive(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
     Ok(())
 }
 
+/// Maximum scrollback lines captured by `skulk transcript`.
+///
+/// tmux caps the request at its configured `history-limit` (default 2000),
+/// so asking for a large number just means "give me everything you have".
+/// 100k is well above any realistic per-pane history-limit.
+pub(crate) const TRANSCRIPT_MAX_LINES: u32 = 100_000;
+
 /// Dump an agent's full tmux scrollback, to stdout or to a file.
 ///
-/// Captures up to 100,000 lines of scrollback in a single SSH round-trip.
-/// When `output` is `Some`, writes the captured content to that path;
-/// otherwise prints to stdout.
+/// Captures up to [`TRANSCRIPT_MAX_LINES`] lines of scrollback in a single
+/// SSH round-trip. When `output` is `Some`, writes the captured content to
+/// that path; otherwise prints to stdout.
 ///
 /// # Errors
 ///
@@ -206,7 +213,7 @@ pub(crate) fn cmd_transcript(
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
     let content = ssh
-        .run(&logs_snapshot_deep_command(name, 100_000, cfg))
+        .run(&logs_snapshot_deep_command(name, TRANSCRIPT_MAX_LINES, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     match output {
         Some(path) => {
@@ -820,21 +827,36 @@ mod tests {
         let cfg = test_config();
         let expected = "scrollback line 1\nscrollback line 2\n";
         let ssh = MockSsh::new(vec![Ok(expected.into())]);
-        let path = std::env::temp_dir().join(format!(
-            "skulk-transcript-test-{}-{}.txt",
-            std::process::id(),
-            "writes-to-file"
-        ));
+        let path =
+            std::env::temp_dir().join(format!("skulk-transcript-test-{}.txt", std::process::id()));
         // Ensure no leftover from a previous run.
         let _ = std::fs::remove_file(&path);
 
         let result = cmd_transcript(&ssh, "test", Some(&path), &cfg);
+
+        // Read-then-delete-then-assert so cleanup runs even if the file
+        // contents don't match expectations.
+        let written = std::fs::read_to_string(&path);
+        let _ = std::fs::remove_file(&path);
+
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(written.expect("transcript file should exist"), expected);
+    }
 
-        let written = std::fs::read_to_string(&path).expect("transcript file should exist");
-        assert_eq!(written, expected);
-
-        std::fs::remove_file(&path).expect("cleanup failed");
+    #[test]
+    fn cmd_transcript_returns_validation_error_when_write_fails() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("scrollback content".into())]);
+        // Non-existent directory makes fs::write fail.
+        let path =
+            std::path::PathBuf::from("/nonexistent-skulk-dir-that-should-not-exist/transcript.txt");
+        let result = cmd_transcript(&ssh, "test", Some(&path), &cfg);
+        match result {
+            Err(SkulkError::Validation(msg)) => {
+                assert!(msg.contains("Failed to write"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Validation error, got: {other:?}"),
+        }
     }
 
     #[test]

@@ -194,9 +194,10 @@ pub(crate) enum Commands {
 
     /// Dump an agent's full tmux scrollback for archive or review
     ///
-    /// Captures up to 100,000 lines of scrollback. Prints to stdout by default,
-    /// or writes to a file with --output. Use this when you want the complete
-    /// session history, not just recent activity (see `skulk logs` for that).
+    /// Captures all available scrollback (bounded by tmux's history-limit).
+    /// Prints to stdout by default, or writes to a file with --output. Use
+    /// this when you want the complete session history, not just recent
+    /// activity (see `skulk logs` for that).
     Transcript {
         /// Agent name
         name: String,
