@@ -191,6 +191,20 @@ pub(crate) enum Commands {
         /// Agent name
         name: String,
     },
+
+    /// Dump an agent's full tmux scrollback for archive or review
+    ///
+    /// Captures all available scrollback (bounded by tmux's history-limit).
+    /// Prints to stdout by default, or writes to a file with --output. Use
+    /// this when you want the complete session history, not just recent
+    /// activity (see `skulk logs` for that).
+    Transcript {
+        /// Agent name
+        name: String,
+        /// Write transcript to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -222,6 +236,7 @@ pub(crate) fn run(
         Commands::Push { .. } => "push",
         Commands::Archive { .. } => "archive",
         Commands::GitLog { .. } => "git-log",
+        Commands::Transcript { .. } => "transcript",
     };
 
     let result = match cli.command {
@@ -250,6 +265,9 @@ pub(crate) fn run(
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
         Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
+        Commands::Transcript { name, output } => {
+            interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
+        }
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -461,6 +479,20 @@ mod tests {
             no_color: true,
             command: Commands::GitLog {
                 name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_transcript() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("full scrollback output".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Transcript {
+                name: "test".into(),
+                output: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
