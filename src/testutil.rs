@@ -136,7 +136,20 @@ impl Prompter for MockPrompter {
 }
 
 /// Helper: build a mock list_command response with epoch, tmux sessions, and worktrees.
+/// The state section is emitted empty; use [`mock_list_output_with_state`] to
+/// populate Stop-hook state files for idle-column tests.
 pub(crate) fn mock_list_output(epoch: i64, tmux_lines: &str, worktrees: &[(&str, &str)]) -> String {
+    mock_list_output_with_state(epoch, tmux_lines, worktrees, &[])
+}
+
+/// Helper: like [`mock_list_output`] but also injects Stop-hook state entries
+/// as `(session_name, mtime_epoch)` pairs.
+pub(crate) fn mock_list_output_with_state(
+    epoch: i64,
+    tmux_lines: &str,
+    worktrees: &[(&str, &str)],
+    state: &[(&str, i64)],
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("__EPOCH__{epoch}__EPOCH__\n"));
     out.push_str("__TMUX_START__\n");
@@ -152,5 +165,10 @@ pub(crate) fn mock_list_output(epoch: i64, tmux_lines: &str, worktrees: &[(&str,
         ));
     }
     out.push_str("__WORKTREES_END__\n");
+    out.push_str("__STATE_START__\n");
+    for (name, mtime) in state {
+        out.push_str(&format!("{name} {mtime}\n"));
+    }
+    out.push_str("__STATE_END__\n");
     out
 }
