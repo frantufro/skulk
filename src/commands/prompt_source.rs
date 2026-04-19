@@ -150,7 +150,8 @@ pub(crate) fn wrap_file_prompt(branch: &str, contents: &str) -> String {
 /// Wrap a parsed GitHub issue into the task prompt sent to the agent.
 pub(crate) fn wrap_github_prompt(issue_id: &str, branch: &str, issue: &GhIssue) -> String {
     let mut out = String::new();
-    // Writes into a String never fail; ignore the Result.
+    // Writes into a String are infallible; drop the Result rather than unwrap
+    // (CLAUDE.md bans .unwrap()/.expect() in production code).
     let _ = write!(
         out,
         "You've been assigned GitHub issue #{issue_id}. The full issue and all comments are below. Read them carefully, then ask me clarifying questions one at a time before you start implementing.\n\n"

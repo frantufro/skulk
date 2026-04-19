@@ -331,7 +331,7 @@ pub(crate) fn cmd_new(
         return Err(e);
     }
 
-    // Step 5: Send prompt if provided
+    // Step 6: Send prompt if provided
     let prompt_status = if let Some(prompt_text) = prompt.as_deref() {
         if ssh
             .run(&agent_send_prompt_command(name, prompt_text, cfg))
@@ -348,7 +348,7 @@ pub(crate) fn cmd_new(
         PromptStatus::NotSent
     };
 
-    // Step 6: Print success output
+    // Step 7: Print success output
     let prompt_line = match prompt_status {
         PromptStatus::Delivered => format!("  Prompt: delivered (after {STARTUP_DELAY}s delay)"),
         PromptStatus::Failed => {
