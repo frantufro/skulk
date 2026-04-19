@@ -150,24 +150,27 @@ pub(crate) fn wrap_file_prompt(branch: &str, contents: &str) -> String {
 /// Wrap a parsed GitHub issue into the task prompt sent to the agent.
 pub(crate) fn wrap_github_prompt(issue_id: &str, branch: &str, issue: &GhIssue) -> String {
     let mut out = String::new();
-    // Writes into a String never fail; ignore the Result.
-    let _ = write!(
+    // Writes into a String are infallible — unwrap documents that intent.
+    write!(
         out,
         "You've been assigned GitHub issue #{issue_id}. The full issue and all comments are below. Read them carefully, then ask me clarifying questions one at a time before you start implementing.\n\n"
-    );
-    let _ = write!(
+    )
+    .unwrap();
+    write!(
         out,
         "You're working in a dedicated git worktree on branch `{branch}` — feel free to commit freely. You have `gh` available if you need to interact with the issue further.\n\n"
-    );
-    let _ = writeln!(out, "--- Issue #{issue_id}: {} ---", issue.title);
+    )
+    .unwrap();
+    writeln!(out, "--- Issue #{issue_id}: {} ---", issue.title).unwrap();
     out.push_str(&issue.body);
-    let _ = write!(out, "\n\n--- Comments ({}) ---\n", issue.comments.len());
+    write!(out, "\n\n--- Comments ({}) ---\n", issue.comments.len()).unwrap();
     for c in &issue.comments {
-        let _ = write!(
+        write!(
             out,
             "{} ({}):\n{}\n\n",
             c.author.login, c.created_at, c.body
-        );
+        )
+        .unwrap();
     }
     // Trim trailing whitespace so callers don't get a stray blank line.
     while out.ends_with('\n') {
