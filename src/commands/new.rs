@@ -62,9 +62,13 @@ fn build_launch_sequence(
     let claude_cmd = format!(
         "claude --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}"
     );
+    // Grouping `{ set -a; . ./.env; set +a; }` (not `&&`-chained) guarantees
+    // `set +a` runs even if `.env` has a syntax error and sourcing fails —
+    // otherwise the shell would stay in auto-export mode and leak locals
+    // defined by init.sh or claude into the environment.
     format!(
         "export SKULK_AGENT_NAME={name} SKULK_SESSION={session} SKULK_BRANCH={session} SKULK_WORKTREE={worktree}; \
-         [ -f .env ] && set -a && . ./.env && set +a; \
+         [ -f .env ] && {{ set -a; . ./.env; set +a; }}; \
          if [ -f {init_script} ]; then bash {init_script} && {claude_cmd}; else {claude_cmd}; fi"
     )
 }
@@ -648,7 +652,19 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                "test",
+                Some("fix the bug"),
+                false,
+                None,
+                None,
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -861,7 +877,16 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("send-keys failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", Some("fix the bug"), false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            "test",
+            Some("fix the bug"),
+            false,
+            None,
+            None,
+            &cfg,
+            None,
+        );
         assert!(result.is_ok());
     }
 
@@ -886,6 +911,24 @@ mod tests {
             "expected conditional .env check: {seq}"
         );
         assert!(seq.contains(". ./.env"), "expected dotenv source: {seq}");
+    }
+
+    #[test]
+    fn build_launch_sequence_dotenv_uses_grouping_to_guarantee_set_plus_a() {
+        // Regression: the old `set -a && . ./.env && set +a` chain would skip
+        // `set +a` if sourcing `.env` failed (syntax error in user's file),
+        // leaving the shell in auto-export mode. Grouping with `{ ...; }`
+        // ensures `set +a` runs regardless of `.env` sourcing outcome.
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains("{ set -a; . ./.env; set +a; }"),
+            "expected grouped dotenv source so set +a always runs: {seq}"
+        );
+        assert!(
+            !seq.contains("set -a && . ./.env && set +a"),
+            "old &&-chain would skip set +a on source failure: {seq}"
+        );
     }
 
     #[test]
