@@ -23,7 +23,7 @@ use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
 use crate::ssh::Ssh;
-use crate::util::{confirm_from_reader, find_new_content_start, is_localhost};
+use crate::util::{confirm_from_reader, find_new_content_start, is_localhost, shell_escape};
 use crate::{Cli, Commands, run};
 
 /// Read a yes/no confirmation from stdin.
@@ -123,10 +123,14 @@ impl Ssh for RealSsh {
         let local = is_localhost(&self.host);
 
         let output = if local {
-            ProcessCommand::new("cp")
-                .arg(local_path)
-                .arg(remote_path)
-                .output()
+            // Route through `sh -c` so `~` in remote_path expands the same way
+            // it does for every other localhost operation (all other commands
+            // run via `sh -c`, which expands tildes; bare `cp` does not).
+            // remote_path is validated shell-safe at config load time; local_path
+            // is wrapped in single quotes via `shell_escape` to tolerate spaces.
+            let local_str = local_path.to_string_lossy();
+            let cmd = format!("cp '{}' {}", shell_escape(&local_str), remote_path);
+            ProcessCommand::new("sh").args(["-c", &cmd]).output()
         } else {
             let dest = format!("{}:{}", self.host, remote_path);
             ProcessCommand::new("scp")
