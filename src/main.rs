@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, gc, interact, list, new, prompt_source, pull, restart, ship, wait};
+use commands::{destroy, gc, interact, list, new, pull, restart, ship, wait};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -365,32 +365,12 @@ pub(crate) fn run(
             model,
             claude_args,
         } => {
-            let prompt = match (github.as_deref(), from.as_deref()) {
-                (None, None) => None,
-                (Some(id), None) => {
-                    let branch = format!("{}{name}", cfg.session_prefix);
-                    match prompt_source::load_github_prompt(ssh, id, &branch, cfg) {
-                        Ok(p) => Some(p),
-                        Err(e) => return Err(("new".to_string(), e)),
-                    }
-                }
-                (None, Some(path)) => {
-                    let branch = format!("{}{name}", cfg.session_prefix);
-                    match prompt_source::load_file_prompt(path, &branch) {
-                        Ok(p) => Some(p),
-                        Err(e) => return Err(("new".to_string(), e)),
-                    }
-                }
-                (Some(_), Some(_)) => {
-                    // clap `conflicts_with` enforces this is unreachable via CLI parsing.
-                    unreachable!("--github and --from are mutually exclusive")
-                }
-            };
             let env_file = new::resolve_local_env_file(cfg);
             new::cmd_new(
                 ssh,
                 &name,
-                prompt.as_deref(),
+                github.as_deref(),
+                from.as_deref(),
                 remote_control,
                 model.as_deref(),
                 claude_args.as_deref(),

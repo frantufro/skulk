@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::commands::prompt_source;
 use crate::commands::wait::mark_busy_command;
 use crate::config::{Config, DEFAULT_INIT_SCRIPT};
 use crate::error::SkulkError;
@@ -209,28 +210,30 @@ pub(crate) fn agent_rollback_worktree_command(name: &str, cfg: &Config) -> Strin
 /// Create a new agent with worktree isolation and optional initial prompt.
 ///
 /// Orchestration sequence:
-/// 1. Validate name
-/// 2. Check base clone exists
-/// 3. Fetch inventory and check uniqueness
-/// 4. Create worktree
-/// 5. Upload local `.skulk/.env` to the worktree if present
+/// 1. Resolve the initial prompt from --github or --from (mutually exclusive)
+/// 2. Validate name
+/// 3. Check base clone exists
+/// 4. Fetch inventory and check uniqueness
+/// 5. Create worktree
+/// 6. Upload local `.skulk/.env` to the worktree if present
 ///    - On failure: warn user, continue (init.sh runs without sourced vars)
-/// 6. Create tmux session with Claude Code (with `--remote-control` if requested)
+/// 7. Create tmux session with Claude Code (with `--remote-control` if requested)
 ///    - On failure: rollback worktree
-/// 7. Send prompt if provided
+/// 8. Send prompt if provided
 ///    - On failure: warn user, keep agent alive
-/// 8. Print success output
+/// 9. Print success output
 //
 // Explicitly allow `too_many_arguments` / `too_many_lines`: `cmd_new` is the
 // top-level orchestrator for the `new` command, and each argument is a distinct
-// externally-supplied input required by one of the 8 steps above. Grouping
+// externally-supplied input required by one of the steps above. Grouping
 // them into a struct or splitting the function would hide the linear sequence
 // that makes this function easy to follow.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn cmd_new(
     ssh: &impl Ssh,
     name: &str,
-    prompt: Option<&str>,
+    github: Option<&str>,
+    from: Option<&Path>,
     remote_control: bool,
     model: Option<&str>,
     claude_args: Option<&str>,
@@ -242,7 +245,23 @@ pub(crate) fn cmd_new(
     let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
 
-    // Step 0: Validate name and (if provided) model
+    // Step 1: Resolve initial prompt (if any). clap `conflicts_with` on the CLI
+    // enforces that both --github and --from can't be set; the unreachable arm
+    // is a defensive guard for non-CLI callers.
+    let prompt: Option<String> = match (github, from) {
+        (None, None) => None,
+        (Some(id), None) => {
+            let branch = format!("{session_prefix}{name}");
+            Some(prompt_source::load_github_prompt(ssh, id, &branch, cfg)?)
+        }
+        (None, Some(path)) => {
+            let branch = format!("{session_prefix}{name}");
+            Some(prompt_source::load_file_prompt(path, &branch)?)
+        }
+        (Some(_), Some(_)) => unreachable!("--github and --from are mutually exclusive"),
+    };
+
+    // Step 2: Validate name and (if provided) model
     validate_name(name)?;
     if let Some(m) = model {
         validate_model(m)?;
@@ -313,7 +332,7 @@ pub(crate) fn cmd_new(
     }
 
     // Step 5: Send prompt if provided
-    let prompt_status = if let Some(prompt_text) = prompt {
+    let prompt_status = if let Some(prompt_text) = prompt.as_deref() {
         if ssh
             .run(&agent_send_prompt_command(name, prompt_text, cfg))
             .is_ok()
@@ -639,7 +658,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, None).is_ok());
+        assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
     }
 
     #[test]
@@ -652,19 +671,21 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(
-            cmd_new(
-                &ssh,
-                "test",
-                Some("fix the bug"),
-                false,
-                None,
-                None,
-                &cfg,
-                None
-            )
-            .is_ok()
+        let prompt_file = std::env::temp_dir().join("skulk_cmd_new_succeeds_with_prompt.txt");
+        std::fs::write(&prompt_file, "fix the bug").unwrap();
+        let result = cmd_new(
+            &ssh,
+            "test",
+            None,
+            Some(&prompt_file),
+            false,
+            None,
+            None,
+            &cfg,
+            None,
         );
+        let _ = std::fs::remove_file(&prompt_file);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -676,7 +697,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, true, None, None, &cfg, None).is_ok());
+        assert!(cmd_new(&ssh, "test", None, None, true, None, None, &cfg, None).is_ok());
         // Fourth SSH call is the tmux-create command; verify the flag landed there.
         let tmux_call = &ssh.calls()[3];
         assert!(
@@ -694,7 +715,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, None).is_ok());
+        assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
         let tmux_call = &ssh.calls()[3];
         assert!(
             !tmux_call.contains("--remote-control"),
@@ -711,7 +732,20 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, Some("opus"), None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                "test",
+                None,
+                None,
+                false,
+                Some("opus"),
+                None,
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         let tmux_call = &ssh.calls()[3];
         assert!(
             tmux_call.contains("--model opus"),
@@ -727,6 +761,7 @@ mod tests {
         let result = cmd_new(
             &ssh,
             "test",
+            None,
             None,
             false,
             Some("opus; rm -rf /"),
@@ -760,6 +795,7 @@ mod tests {
                 &ssh,
                 "test",
                 None,
+                None,
                 false,
                 None,
                 Some("--allowed-tools Bash"),
@@ -786,7 +822,7 @@ mod tests {
                 &["skulk-dupe"],
             )),
         ]);
-        let result = cmd_new(&ssh, "dupe", None, false, None, None, &cfg, None);
+        let result = cmd_new(&ssh, "dupe", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("already exists")),
@@ -806,7 +842,7 @@ mod tests {
                 &["skulk-zombie"],
             )),
         ]);
-        let result = cmd_new(&ssh, "zombie", None, false, None, None, &cfg, None);
+        let result = cmd_new(&ssh, "zombie", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => {
@@ -827,7 +863,7 @@ mod tests {
     fn cmd_new_missing_base_clone_returns_error() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
+        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => assert!(msg.contains("Base clone not found")),
@@ -845,7 +881,7 @@ mod tests {
             Err(SkulkError::SshFailed("tmux failed".into())),
             Ok(String::new()),
         ]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
+        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
     }
 
@@ -859,7 +895,7 @@ mod tests {
             Err(SkulkError::SshFailed("tmux creation failed".into())),
             Err(SkulkError::SshFailed("rollback also failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
+        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::SshFailed(msg) => assert!(msg.contains("tmux creation failed")),
@@ -877,16 +913,20 @@ mod tests {
             Ok(String::new()),
             Err(SkulkError::SshFailed("send-keys failed".into())),
         ]);
+        let prompt_file = std::env::temp_dir().join("skulk_cmd_new_prompt_delivery_fails.txt");
+        std::fs::write(&prompt_file, "fix the bug").unwrap();
         let result = cmd_new(
             &ssh,
             "test",
-            Some("fix the bug"),
+            None,
+            Some(&prompt_file),
             false,
             None,
             None,
             &cfg,
             None,
         );
+        let _ = std::fs::remove_file(&prompt_file);
         assert!(result.is_ok());
     }
 
@@ -1002,7 +1042,20 @@ mod tests {
             Ok(String::new()), // tmux create + send-keys
         ]);
         let env_path = std::path::PathBuf::from("/tmp/some/.skulk/.env");
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, Some(&env_path)).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                "test",
+                None,
+                None,
+                false,
+                None,
+                None,
+                &cfg,
+                Some(&env_path)
+            )
+            .is_ok()
+        );
         let calls = ssh.calls();
         // Order: base-clone check, inventory, worktree, UPLOAD, tmux
         let upload_call = calls
@@ -1022,7 +1075,7 @@ mod tests {
             Ok(String::new()),
             Ok(String::new()),
         ]);
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, None).is_ok());
+        assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
         let calls = ssh.calls();
         assert!(
             !calls.iter().any(|c| c.starts_with("UPLOAD ")),
@@ -1042,7 +1095,20 @@ mod tests {
         .with_upload_responses(vec![Err(SkulkError::SshFailed("scp blew up".into()))]);
         let env_path = std::path::PathBuf::from("/tmp/.skulk/.env");
         // Upload failure should warn but still succeed overall.
-        assert!(cmd_new(&ssh, "test", None, false, None, None, &cfg, Some(&env_path)).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                "test",
+                None,
+                None,
+                false,
+                None,
+                None,
+                &cfg,
+                Some(&env_path)
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1089,7 +1155,7 @@ mod tests {
             message: "Connection refused.".into(),
             suggestion: "SSH not running.".into(),
         })]);
-        let result = cmd_new(&ssh, "test", None, false, None, None, &cfg, None);
+        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Diagnostic { message, .. } => assert!(message.contains("refused")),
