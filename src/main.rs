@@ -19,8 +19,32 @@ use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
 
-const SEND_VERIFY_DELAY: Duration = Duration::from_millis(500);
-const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Tunable timing parameters threaded through `run()`.
+///
+/// Kept as a struct so adding a new timing doesn't touch every call site.
+/// Tests construct `Timings::zero()` to skip real sleeps; production uses
+/// `Timings::production()`.
+pub(crate) struct Timings {
+    pub send_verify_delay: Duration,
+    pub wait_poll_interval: Duration,
+}
+
+impl Timings {
+    pub fn production() -> Self {
+        Self {
+            send_verify_delay: Duration::from_millis(500),
+            wait_poll_interval: Duration::from_millis(500),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn zero() -> Self {
+        Self {
+            send_verify_delay: Duration::ZERO,
+            wait_poll_interval: Duration::ZERO,
+        }
+    }
+}
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -286,8 +310,7 @@ pub(crate) fn run(
     ssh: &impl Ssh,
     cfg: &Config,
     confirm: &dyn Fn(&str) -> bool,
-    send_verify_delay: Duration,
-    wait_poll_interval: Duration,
+    timings: &Timings,
 ) -> Result<(), (String, SkulkError)> {
     let cmd_name = match &cli.command {
         Commands::Init => unreachable!("Init is handled before config loading"),
@@ -377,7 +400,7 @@ pub(crate) fn run(
             lines,
         } => interact::cmd_logs(ssh, &name, follow, lines, cfg),
         Commands::Send { name, prompt } => {
-            interact::cmd_send(ssh, &name, &prompt, cfg, send_verify_delay)
+            interact::cmd_send(ssh, &name, &prompt, cfg, timings.send_verify_delay)
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
@@ -389,11 +412,17 @@ pub(crate) fn run(
         }
         Commands::Wait { name, all } => {
             if all {
-                wait::cmd_wait_all(ssh, cfg, wait_poll_interval)
+                wait::cmd_wait_all(ssh, cfg, timings.wait_poll_interval)
             } else {
-                // clap's `required_unless_present = "all"` guarantees `name` is Some here.
-                let name = name.expect("clap should enforce name when --all is absent");
-                wait::cmd_wait(ssh, &name, cfg, wait_poll_interval)
+                // clap's `required_unless_present = "all"` makes `None` unreachable,
+                // but we return a validation error rather than panic to keep the
+                // contract type-safe instead of trusting clap's runtime invariant.
+                match name {
+                    Some(n) => wait::cmd_wait(ssh, &n, cfg, timings.wait_poll_interval),
+                    None => Err(SkulkError::Validation(
+                        "must specify an agent name or --all".into(),
+                    )),
+                }
             }
         }
     };
@@ -418,17 +447,7 @@ mod tests {
             no_color: true,
             command: Commands::List,
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -439,17 +458,7 @@ mod tests {
             no_color: true,
             command: Commands::Pull { force: false },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -472,17 +481,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -505,17 +504,7 @@ mod tests {
                 force: true,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -526,17 +515,7 @@ mod tests {
             no_color: true,
             command: Commands::DestroyAll { force: true },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -551,17 +530,7 @@ mod tests {
             no_color: true,
             command: Commands::Gc { dry_run: true },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -574,17 +543,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -599,17 +558,7 @@ mod tests {
                 name_only: false,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -624,17 +573,7 @@ mod tests {
                 name_only: false,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -649,17 +588,7 @@ mod tests {
                 name_only: true,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -834,17 +763,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -859,17 +778,7 @@ mod tests {
                 lines: None,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -887,17 +796,7 @@ mod tests {
                 prompt: "fix bug".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -910,17 +809,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -933,17 +822,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -986,17 +865,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1037,17 +906,7 @@ mod tests {
                 output: None,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1061,17 +920,7 @@ mod tests {
                 all: false,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1085,17 +934,7 @@ mod tests {
                 all: true,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1139,14 +978,7 @@ mod tests {
             no_color: true,
             command: Commands::List,
         };
-        let result = run(
-            cli,
-            &ssh,
-            &cfg,
-            &confirm_yes,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
         assert!(result.is_err());
         let (cmd_name, _err) = result.unwrap_err();
         assert_eq!(cmd_name, "list");

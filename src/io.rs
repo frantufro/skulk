@@ -296,14 +296,7 @@ pub(crate) fn main() {
     let ssh = RealSsh {
         host: cfg.host.clone(),
     };
-    if let Err((cmd, e)) = run(
-        cli,
-        &ssh,
-        &cfg,
-        &confirm,
-        crate::SEND_VERIFY_DELAY,
-        crate::WAIT_POLL_INTERVAL,
-    ) {
+    if let Err((cmd, e)) = run(cli, &ssh, &cfg, &confirm, &crate::Timings::production()) {
         eprintln!("skulk {cmd}: {e}");
         std::process::exit(1);
     }
