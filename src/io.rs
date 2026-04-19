@@ -68,7 +68,7 @@ impl Ssh for RealSsh {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             // classify_ssh_error looks for SSH-specific keywords (connection refused,
             // permission denied, host key) that would produce misleading suggestions
             // like "ssh localhost whoami" for local sh -c failures. Skip it for localhost.
