@@ -304,8 +304,20 @@ fn run_init() -> Result<(), SkulkError> {
     }
 
     // Add .skulk/.env to local .gitignore so secrets don't get committed.
+    // Distinguish "file doesn't exist" (treat as empty) from other read errors
+    // (surface to the user) — otherwise a perm-denied read would silently be
+    // treated as empty and the subsequent write could clobber the real file.
     let gitignore_path = cwd.join(".gitignore");
-    let existing = std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(SkulkError::Validation(format!(
+                "Failed to read {}: {e}",
+                gitignore_path.display()
+            )));
+        }
+    };
     if let Some(updated) = init::ensure_gitignore_entry(&existing) {
         std::fs::write(&gitignore_path, updated).map_err(|e| {
             SkulkError::Validation(format!(
