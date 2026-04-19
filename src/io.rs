@@ -10,6 +10,7 @@
 //!
 //! Coverage tooling excludes `io.rs` files via `--ignore-filename-regex 'io\.rs$'`.
 
+use std::path::Path;
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::Ordering;
 
@@ -22,7 +23,7 @@ use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
 use crate::ssh::Ssh;
-use crate::util::{confirm_from_reader, find_new_content_start, is_localhost};
+use crate::util::{confirm_from_reader, find_new_content_start, is_localhost, shell_escape};
 use crate::{Cli, Commands, run};
 
 /// Read a yes/no confirmation from stdin.
@@ -116,6 +117,49 @@ impl Ssh for RealSsh {
                 SkulkError::SshExec(e.to_string())
             }
         })
+    }
+
+    fn upload_file(&self, local_path: &Path, remote_path: &str) -> Result<(), SkulkError> {
+        let local = is_localhost(&self.host);
+
+        let output = if local {
+            // Route through `sh -c` so `~` in remote_path expands the same way
+            // it does for every other localhost operation (all other commands
+            // run via `sh -c`, which expands tildes; bare `cp` does not).
+            // remote_path is validated shell-safe at config load time; local_path
+            // is wrapped in single quotes via `shell_escape` to tolerate spaces.
+            let local_str = local_path.to_string_lossy();
+            let cmd = format!("cp '{}' {}", shell_escape(&local_str), remote_path);
+            ProcessCommand::new("sh").args(["-c", &cmd]).output()
+        } else {
+            let dest = format!("{}:{}", self.host, remote_path);
+            ProcessCommand::new("scp")
+                .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+                .arg(local_path)
+                .arg(&dest)
+                .output()
+        }
+        .map_err(|e| {
+            if !local && e.kind() == std::io::ErrorKind::NotFound {
+                SkulkError::Diagnostic {
+                    message: "scp command not found.".into(),
+                    suggestion: "Install OpenSSH.".into(),
+                }
+            } else {
+                SkulkError::SshExec(e.to_string())
+            }
+        })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if local {
+                Err(SkulkError::SshFailed(stderr))
+            } else {
+                Err(classify_ssh_error(&stderr, &self.host))
+            }
+        }
     }
 }
 
@@ -244,6 +288,48 @@ fn run_init() -> Result<(), SkulkError> {
                 config::LEGACY_CONFIG_FILENAME
             ),
         }
+    }
+
+    // Write .skulk/init.sh.example so users have a template to rename.
+    let skulk_dir = cwd.join(".skulk");
+    std::fs::create_dir_all(&skulk_dir).map_err(|e| {
+        SkulkError::Validation(format!("Failed to create {}: {e}", skulk_dir.display()))
+    })?;
+    let example_path = skulk_dir.join("init.sh.example");
+    if !example_path.exists() {
+        std::fs::write(&example_path, init::init_script_example_content()).map_err(|e| {
+            SkulkError::Validation(format!("Failed to write {}: {e}", example_path.display()))
+        })?;
+        eprintln!("  Writing .skulk/init.sh.example... {}", checkmark(color));
+    }
+
+    // Add .skulk/.env to local .gitignore so secrets don't get committed.
+    // Distinguish "file doesn't exist" (treat as empty) from other read errors
+    // (surface to the user) — otherwise a perm-denied read would silently be
+    // treated as empty and the subsequent write could clobber the real file.
+    let gitignore_path = cwd.join(".gitignore");
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(SkulkError::Validation(format!(
+                "Failed to read {}: {e}",
+                gitignore_path.display()
+            )));
+        }
+    };
+    if let Some(updated) = init::ensure_gitignore_entry(&existing) {
+        std::fs::write(&gitignore_path, updated).map_err(|e| {
+            SkulkError::Validation(format!(
+                "Failed to update {}: {e}",
+                gitignore_path.display()
+            ))
+        })?;
+        eprintln!(
+            "  Updating .gitignore ({}) ... {}",
+            init::GITIGNORE_ENV_ENTRY,
+            checkmark(color)
+        );
     }
 
     // Remote setup if requested

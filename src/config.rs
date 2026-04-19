@@ -19,11 +19,25 @@ pub(crate) struct Config {
     pub worktree_base: String,
     #[serde(default = "default_branch")]
     pub default_branch: String,
+    /// Path (relative to the worktree) to a setup script run before Claude launches.
+    /// Defaults to `.skulk/init.sh` when absent. Both paths are optional — the
+    /// agent just starts Claude directly if the script isn't present on disk.
+    #[serde(default)]
+    pub init_script: Option<String>,
+    /// Directory the config file was loaded from. Populated after parsing so the
+    /// rest of the code can resolve sibling paths like `.skulk/.env`. Not a TOML
+    /// field.
+    #[serde(skip)]
+    pub root_dir: Option<PathBuf>,
 }
 
 fn default_branch() -> String {
     "main".to_string()
 }
+
+/// Default path (relative to the worktree) for the init hook script when the
+/// user hasn't overridden `init_script` in the config.
+pub(crate) const DEFAULT_INIT_SCRIPT: &str = ".skulk/init.sh";
 
 /// Validate that a config value contains only shell-safe characters.
 ///
@@ -114,13 +128,30 @@ pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
     }
     let content = std::fs::read_to_string(&found.path)
         .map_err(|e| format!("failed to read {}: {e}", found.path.display()))?;
-    let cfg: Config = toml::from_str(&content)
+    let mut cfg: Config = toml::from_str(&content)
         .map_err(|e| format!("invalid config in {}: {e}", found.path.display()))?;
     validate_shell_safe(&cfg.host, "host")?;
     validate_shell_safe(&cfg.session_prefix, "session_prefix")?;
     validate_shell_safe(&cfg.base_path, "base_path")?;
     validate_shell_safe(&cfg.worktree_base, "worktree_base")?;
     validate_shell_safe(&cfg.default_branch, "default_branch")?;
+    if let Some(ref script) = cfg.init_script {
+        validate_shell_safe(script, "init_script")?;
+    }
+    // root_dir is the project directory (where `.skulk/` or legacy `.skulk.toml` lives),
+    // not the config file's parent. For the new layout the config sits one level deeper
+    // (`project/.skulk/config.toml`), so walk up twice; for legacy (`project/.skulk.toml`)
+    // walk up once. This keeps `<root_dir>/.skulk/.env` pointing at the same file
+    // regardless of which layout the project uses.
+    cfg.root_dir = if found.legacy {
+        found.path.parent().map(Path::to_path_buf)
+    } else {
+        found
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    };
     Ok(cfg)
 }
 
@@ -146,6 +177,86 @@ mod tests {
         assert_eq!(cfg.base_path, "~/other-project");
         assert_eq!(cfg.worktree_base, "~/other-agents");
         assert_eq!(cfg.default_branch, "develop");
+    }
+
+    #[test]
+    fn config_init_script_optional_absent_parses_as_none() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.init_script.is_none());
+    }
+
+    #[test]
+    fn config_init_script_parses_when_set() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            init_script = "scripts/setup.sh"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.init_script.as_deref(), Some("scripts/setup.sh"));
+    }
+
+    #[test]
+    fn config_load_populates_root_dir_to_project_dir() {
+        // root_dir must point at the project (the parent of `.skulk/`),
+        // not at `.skulk/` itself, so that `<root_dir>/.skulk/.env`
+        // resolves to the correct file regardless of config layout.
+        let dir = std::env::temp_dir().join("skulk_root_dir_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(config_path_in(&dir), full_toml()).unwrap();
+
+        let cfg = load_config(&dir).unwrap();
+        assert_eq!(cfg.root_dir.as_deref(), Some(dir.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_load_populates_root_dir_from_legacy_file() {
+        // Legacy `.skulk.toml` sits directly at the project root, so root_dir
+        // should be the parent of the config file itself.
+        let dir = std::env::temp_dir().join("skulk_root_dir_legacy_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(legacy_config_path_in(&dir), full_toml()).unwrap();
+
+        let cfg = load_config(&dir).unwrap();
+        assert_eq!(cfg.root_dir.as_deref(), Some(dir.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_load_rejects_unsafe_init_script() {
+        let dir = std::env::temp_dir().join("skulk_init_script_unsafe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(
+            config_path_in(&dir),
+            r#"
+                host = "x"
+                session_prefix = "a-"
+                base_path = "~/p"
+                worktree_base = "~/w"
+                init_script = "foo; rm -rf /"
+            "#,
+        )
+        .unwrap();
+
+        let result = load_config(&dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("init_script"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

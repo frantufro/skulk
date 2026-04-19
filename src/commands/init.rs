@@ -302,6 +302,66 @@ pub(crate) fn generate_config_toml(answers: &InitAnswers) -> String {
     )
 }
 
+// ── Init hook scaffolding ──────────────────────────────────────────────────
+
+/// Contents of `.skulk/init.sh.example` — a runnable template the user can
+/// rename to `.skulk/init.sh` and customize.
+///
+/// Documents the env vars, working directory, and hard-fail behavior so a
+/// first-time reader can adapt it without reading the Skulk docs.
+pub(crate) fn init_script_example_content() -> &'static str {
+    "#!/usr/bin/env bash\n\
+     # Example skulk agent init script.\n\
+     # Rename to .skulk/init.sh (or configure init_script in config.toml) to enable.\n\
+     #\n\
+     # Runs inside the agent's tmux session before Claude Code starts.\n\
+     # Working directory: the agent's worktree.\n\
+     #\n\
+     # Env vars available:\n\
+     #   SKULK_AGENT_NAME   e.g. auth-refactor\n\
+     #   SKULK_SESSION      tmux session name, e.g. myproject-auth-refactor\n\
+     #   SKULK_BRANCH       git branch (same as SKULK_SESSION)\n\
+     #   SKULK_WORKTREE     absolute path to the worktree\n\
+     # Plus anything sourced from .skulk/.env (if present).\n\
+     #\n\
+     # Hard-fail: if this script exits non-zero, Claude does not start.\n\
+     # For optional steps, use `command || true` to skip on failure.\n\
+     \n\
+     set -e\n\
+     \n\
+     echo \"Setting up $SKULK_AGENT_NAME in $SKULK_WORKTREE...\"\n\
+     \n\
+     # Examples — uncomment and adapt as needed:\n\
+     # npm install\n\
+     # cargo fetch\n\
+     # bundle install\n\
+     # docker compose up -d db redis\n\
+     # [ -n \"$DATABASE_URL\" ] && bundle exec rake db:migrate || true\n\
+     \n\
+     echo \"Ready.\"\n"
+}
+
+/// The `.gitignore` entry skulk adds to keep local `.skulk/.env` secrets
+/// out of version control.
+pub(crate) const GITIGNORE_ENV_ENTRY: &str = ".skulk/.env";
+
+/// Produce an updated `.gitignore` with `.skulk/.env` appended.
+///
+/// Returns `None` if the entry already appears on its own line (whitespace
+/// trimmed, so `  .skulk/.env  ` also counts as present). A trailing newline
+/// is added before the new entry if the existing file doesn't end in one.
+pub(crate) fn ensure_gitignore_entry(existing: &str) -> Option<String> {
+    let already_has = existing
+        .lines()
+        .any(|line| line.trim() == GITIGNORE_ENV_ENTRY);
+    if already_has {
+        return None;
+    }
+    let needs_newline = !existing.is_empty() && !existing.ends_with('\n');
+    let separator = if needs_newline { "\n" } else { "" };
+    Some(format!("{existing}{separator}{GITIGNORE_ENV_ENTRY}\n"))
+}
+
 // ── Remote setup ───────────────────────────────────────────────────────────
 
 /// Build the SSH command to check if apt-get is available.
@@ -1040,5 +1100,56 @@ mod tests {
     fn success_message_contains_party_when_color() {
         let msg = success_message(true);
         assert!(msg.contains('\u{1f389}')); // 🎉
+    }
+
+    // ── init hook scaffolding ──────────────────────────────────────────
+
+    #[test]
+    fn init_script_example_has_shebang_and_env_vars() {
+        let content = init_script_example_content();
+        assert!(content.starts_with("#!/usr/bin/env bash"));
+        assert!(content.contains("SKULK_AGENT_NAME"));
+        assert!(content.contains("SKULK_SESSION"));
+        assert!(content.contains("SKULK_BRANCH"));
+        assert!(content.contains("SKULK_WORKTREE"));
+    }
+
+    #[test]
+    fn init_script_example_documents_hard_fail() {
+        let content = init_script_example_content();
+        assert!(content.to_lowercase().contains("hard-fail"));
+        assert!(content.contains("|| true"));
+    }
+
+    #[test]
+    fn ensure_gitignore_entry_appends_to_empty_file() {
+        let updated = ensure_gitignore_entry("").expect("empty file should need update");
+        assert_eq!(updated, ".skulk/.env\n");
+    }
+
+    #[test]
+    fn ensure_gitignore_entry_appends_with_leading_newline_when_missing() {
+        let existing = "target/\nnode_modules";
+        let updated = ensure_gitignore_entry(existing).expect("should need update");
+        assert_eq!(updated, "target/\nnode_modules\n.skulk/.env\n");
+    }
+
+    #[test]
+    fn ensure_gitignore_entry_no_double_newline_when_trailing_newline_present() {
+        let existing = "target/\nnode_modules\n";
+        let updated = ensure_gitignore_entry(existing).expect("should need update");
+        assert_eq!(updated, "target/\nnode_modules\n.skulk/.env\n");
+    }
+
+    #[test]
+    fn ensure_gitignore_entry_returns_none_when_already_present() {
+        let existing = "target/\n.skulk/.env\nnode_modules\n";
+        assert!(ensure_gitignore_entry(existing).is_none());
+    }
+
+    #[test]
+    fn ensure_gitignore_entry_returns_none_when_present_with_whitespace() {
+        let existing = "target/\n  .skulk/.env  \n";
+        assert!(ensure_gitignore_entry(existing).is_none());
     }
 }

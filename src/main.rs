@@ -308,6 +308,11 @@ fn main() {
     io::main();
 }
 
+// Explicitly allow `too_many_lines`: `run` is the central CLI dispatcher and
+// each subcommand is a small, self-contained arm. Splitting it into helpers
+// per command would spread a straightforward match across the module without
+// reducing complexity.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run(
     cli: Cli,
     ssh: &impl Ssh,
@@ -370,6 +375,7 @@ pub(crate) fn run(
                     unreachable!("--github and --from are mutually exclusive")
                 }
             };
+            let env_file = new::resolve_local_env_file(cfg);
             new::cmd_new(
                 ssh,
                 &name,
@@ -378,6 +384,7 @@ pub(crate) fn run(
                 model.as_deref(),
                 claude_args.as_deref(),
                 cfg,
+                env_file.as_deref(),
             )
         }
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),

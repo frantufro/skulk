@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::path::Path;
 
 use crate::commands::init::Prompter;
 use crate::config::Config;
@@ -14,11 +15,14 @@ pub(crate) fn test_config() -> Config {
         base_path: "~/test-project".to_string(),
         worktree_base: "~/test-project-worktrees".to_string(),
         default_branch: "main".to_string(),
+        init_script: None,
+        root_dir: None,
     }
 }
 
 pub(crate) struct MockSsh {
     pub responses: RefCell<VecDeque<Result<String, SkulkError>>>,
+    pub upload_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
     calls: RefCell<Vec<String>>,
 }
 
@@ -26,11 +30,21 @@ impl MockSsh {
     pub fn new(responses: Vec<Result<String, SkulkError>>) -> Self {
         Self {
             responses: RefCell::new(responses.into()),
+            upload_responses: RefCell::new(VecDeque::new()),
             calls: RefCell::new(Vec::new()),
         }
     }
 
-    /// Returns the commands passed to `run` and `interactive`, in call order.
+    /// Queue responses for `upload_file` calls. If the queue is empty when
+    /// `upload_file` is called, the mock returns `Ok(())`.
+    pub fn with_upload_responses(mut self, responses: Vec<Result<(), SkulkError>>) -> Self {
+        self.upload_responses = RefCell::new(responses.into());
+        self
+    }
+
+    /// Returns the commands passed to `run`, `interactive`, and `upload_file`,
+    /// in call order. `upload_file` calls are recorded as
+    /// `UPLOAD <local>:<remote>` strings so tests can assert ordering.
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
@@ -48,6 +62,16 @@ impl Ssh for MockSsh {
     fn interactive(&self, cmd: &str) -> Result<std::process::ExitStatus, SkulkError> {
         self.calls.borrow_mut().push(cmd.to_string());
         Ok(std::process::ExitStatus::default())
+    }
+
+    fn upload_file(&self, local_path: &Path, remote_path: &str) -> Result<(), SkulkError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("UPLOAD {}:{remote_path}", local_path.display()));
+        self.upload_responses
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(()))
     }
 }
 
