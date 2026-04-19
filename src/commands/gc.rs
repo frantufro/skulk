@@ -4,9 +4,9 @@ use crate::commands::destroy::{
     agent_destroy_branch_command, agent_destroy_session_command, agent_destroy_worktree_command,
 };
 use crate::config::Config;
-use crate::display::{GcOrphans, format_gc_summary};
+use crate::display::format_gc_summary;
 use crate::error::SkulkError;
-use crate::inventory::{AgentInventory, fetch_inventory};
+use crate::inventory::{AgentInventory, GcOrphans, fetch_inventory};
 use crate::ssh::Ssh;
 
 /// Analyze an `AgentInventory` and find orphaned resources.
