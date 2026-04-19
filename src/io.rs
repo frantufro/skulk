@@ -24,13 +24,14 @@ use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
 use crate::ssh::Ssh;
 use crate::util::{confirm_from_reader, shell_escape};
+use crate::{Cli, Commands, run};
 
 /// Check whether a host refers to the local machine.
 ///
 /// When true, commands run locally via `sh -c` instead of over SSH.
 /// Exact-match only: aliases like `localhost.localdomain`, `[::1]`, or
 /// other 127.0.0.0/8 addresses are not recognized. Extend if users ask.
-pub(crate) fn is_localhost(host: &str) -> bool {
+fn is_localhost(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
@@ -41,31 +42,26 @@ pub(crate) fn is_localhost(host: &str) -> bool {
 /// Returns 0 if no overlap (show all), or `new_lines.len()` if nothing changed.
 ///
 /// Complexity is O(n^2 * m) but bounded by the follow buffer size (200 lines).
-pub(crate) fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
+fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
     if old_lines.is_empty() {
         return 0;
     }
 
-    // Try progressively shorter suffixes of old_lines
     for start in 0..old_lines.len() {
         let suffix = &old_lines[start..];
         let suffix_len = suffix.len();
 
-        // Check if this suffix appears as a contiguous block in new_lines
         if suffix_len <= new_lines.len() {
             for new_start in 0..=new_lines.len() - suffix_len {
                 if new_lines[new_start..new_start + suffix_len] == *suffix {
-                    // Found match -- new content starts after the match
                     return new_start + suffix_len;
                 }
             }
         }
     }
 
-    // No overlap found -- all content is new
     0
 }
-use crate::{Cli, Commands, run};
 
 /// Read a yes/no confirmation from stdin.
 pub(crate) fn confirm(prompt: &str) -> bool {
