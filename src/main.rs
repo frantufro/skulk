@@ -71,6 +71,18 @@ pub(crate) enum Commands {
         /// idle-death bug; Skulk's own commands work via tmux directly.
         #[arg(long)]
         remote_control: bool,
+        /// Model name passed through to Claude Code as `--model <name>`
+        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`). Restricted to
+        /// `[A-Za-z0-9._-]` — shell metacharacters are rejected.
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
+        /// Extra flags appended to the Claude Code launch command. The string is
+        /// typed into the remote shell by tmux, so shell metacharacters (`$`,
+        /// backticks, `;`, `(`, `)`, globs, whitespace) are re-evaluated by that
+        /// shell. Pre-quote any value that must reach Claude literally, e.g.
+        /// `--claude-args "--allowed-tools 'Bash(gh pr:*)'"`.
+        #[arg(long, value_name = "ARGS")]
+        claude_args: Option<String>,
     },
 
     /// Destroy a specific agent
@@ -265,7 +277,17 @@ pub(crate) fn run(
             name,
             prompt,
             remote_control,
-        } => new::cmd_new(ssh, &name, prompt.as_deref(), remote_control, cfg),
+            model,
+            claude_args,
+        } => new::cmd_new(
+            ssh,
+            &name,
+            prompt.as_deref(),
+            remote_control,
+            model.as_deref(),
+            claude_args.as_deref(),
+            cfg,
+        ),
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
@@ -349,6 +371,8 @@ mod tests {
                 name: "test".into(),
                 prompt: None,
                 remote_control: false,
+                model: None,
+                claude_args: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());

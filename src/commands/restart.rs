@@ -33,7 +33,7 @@ pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
         )));
     }
 
-    ssh.run(&agent_create_tmux_command(name, cfg, false))
+    ssh.run(&agent_create_tmux_command(name, cfg, false, None, None))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
 
     println!(

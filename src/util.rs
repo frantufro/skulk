@@ -13,6 +13,31 @@ pub(crate) fn is_localhost(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+/// Validate a Claude model identifier: `[A-Za-z0-9._-]`, 1-64 chars.
+///
+/// Matches the shape of real Claude model IDs (`opus`, `sonnet`,
+/// `claude-opus-4-7`, etc.) while rejecting shell metacharacters. This matters
+/// because the model string is typed into the remote tmux shell by `send-keys`,
+/// which would otherwise re-evaluate characters like `;`, `$`, or backticks.
+pub(crate) fn validate_model(model: &str) -> Result<(), SkulkError> {
+    if model.is_empty() {
+        return Err(SkulkError::Validation("Model name cannot be empty.".into()));
+    }
+    if model.len() > 64 {
+        return Err(SkulkError::Validation(
+            "Model name must be 64 characters or fewer.".into(),
+        ));
+    }
+    for c in model.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+            return Err(SkulkError::Validation(format!(
+                "Invalid character '{c}' in model name. Only letters, digits, hyphens, underscores, and dots allowed."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate an agent name: [a-z0-9-], 1-30 chars,
 /// no leading/trailing/consecutive hyphens.
 pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
@@ -259,6 +284,66 @@ mod tests {
     #[test]
     fn shell_escape_dollar_unchanged() {
         assert_eq!(shell_escape("$HOME/path"), "$HOME/path");
+    }
+
+    // ── validate_model tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_model_valid_short_alias() {
+        assert!(validate_model("opus").is_ok());
+        assert!(validate_model("sonnet").is_ok());
+    }
+
+    #[test]
+    fn validate_model_valid_full_id() {
+        assert!(validate_model("claude-opus-4-7").is_ok());
+        assert!(validate_model("claude-sonnet-4-6").is_ok());
+    }
+
+    #[test]
+    fn validate_model_valid_with_underscore_and_dot() {
+        assert!(validate_model("claude_4.7").is_ok());
+    }
+
+    #[test]
+    fn validate_model_empty() {
+        let result = validate_model("");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn validate_model_too_long() {
+        let m = "a".repeat(65);
+        let result = validate_model(&m);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("64 characters"));
+    }
+
+    #[test]
+    fn validate_model_rejects_semicolon() {
+        let result = validate_model("opus; rm -rf /");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("Invalid character"));
+    }
+
+    #[test]
+    fn validate_model_rejects_whitespace() {
+        assert!(validate_model("opus sonnet").is_err());
+    }
+
+    #[test]
+    fn validate_model_rejects_single_quote() {
+        assert!(validate_model("it's").is_err());
+    }
+
+    #[test]
+    fn validate_model_rejects_command_substitution() {
+        assert!(validate_model("$(whoami)").is_err());
+        assert!(validate_model("`id`").is_err());
     }
 
     // ── confirm tests ───────────────────────────────────────────────────
