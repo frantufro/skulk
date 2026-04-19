@@ -11,7 +11,7 @@ use crate::util::{PromptStatus, STARTUP_DELAY, shell_escape, validate_model, val
 /// `skulk wait` polls that file to detect when the agent finishes its turn.
 ///
 /// The JSON uses only double quotes, so it can safely be wrapped in single
-/// quotes when passed through a shell `echo` (see [`agent_create_worktree_command`]).
+/// quotes when passed through a shell `printf` (see [`agent_create_worktree_command`]).
 pub(crate) fn hooks_settings_json(session_name: &str) -> String {
     format!(
         r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"mkdir -p ~/.skulk/state && printf idle > ~/.skulk/state/{session_name}"}}]}}],"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/{session_name}"}}]}}]}}}}"#
@@ -36,7 +36,7 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
         "mkdir -p {worktree_base} && cd {base_path} && \
          git worktree add -b {session_prefix}{name} {worktree_base}/{session_prefix}{name} {default_branch} && \
          mkdir -p {worktree_base}/{session_prefix}{name}/.claude && \
-         echo '{hooks_json}' > {worktree_base}/{session_prefix}{name}/.claude/settings.local.json"
+         printf '%s' '{hooks_json}' > {worktree_base}/{session_prefix}{name}/.claude/settings.local.json"
     )
 }
 
