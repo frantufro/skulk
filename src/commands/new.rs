@@ -389,7 +389,10 @@ pub(crate) fn cmd_new(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_inventory, test_config};
+    use crate::testutil::{
+        MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
+        ssh_ok, test_config,
+    };
 
     #[test]
     fn agent_create_worktree_command_generates_correct_shell() {
@@ -655,9 +658,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
     }
@@ -667,10 +670,10 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_succeeds_with_prompt.txt");
         std::fs::write(&prompt_file, "fix the bug").unwrap();
@@ -694,9 +697,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_new(&ssh, "test", None, None, true, None, None, &cfg, None).is_ok());
         // Fourth SSH call is the tmux-create command; verify the flag landed there.
@@ -712,9 +715,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
         let tmux_call = &ssh.calls()[3];
@@ -729,9 +732,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(
             cmd_new(
@@ -770,11 +773,9 @@ mod tests {
             &cfg,
             None,
         );
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => assert!(msg.contains("Invalid character")),
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Invalid character"));
+        });
         assert!(
             ssh.calls().is_empty(),
             "validation must short-circuit before any SSH call, got: {:?}",
@@ -787,9 +788,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(
             cmd_new(
@@ -817,18 +818,12 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(
-                &["skulk-dupe"],
-                &[("skulk-dupe", "/path/skulk-dupe")],
-                &["skulk-dupe"],
-            )),
+            Ok(mock_inventory_single_agent("skulk-dupe")),
         ]);
         let result = cmd_new(&ssh, "dupe", None, None, false, None, None, &cfg, None);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => assert!(msg.contains("already exists")),
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("already exists"));
+        });
     }
 
     #[test]
@@ -844,20 +839,16 @@ mod tests {
             )),
         ]);
         let result = cmd_new(&ssh, "zombie", None, None, false, None, None, &cfg, None);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => {
-                assert!(
-                    msg.contains("skulk restart zombie"),
-                    "should suggest restart: {msg}"
-                );
-                assert!(
-                    msg.contains("skulk destroy zombie"),
-                    "should suggest destroy: {msg}"
-                );
-            }
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(
+                msg.contains("skulk restart zombie"),
+                "should suggest restart: {msg}"
+            );
+            assert!(
+                msg.contains("skulk destroy zombie"),
+                "should suggest destroy: {msg}"
+            );
+        });
     }
 
     #[test]
@@ -865,11 +856,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
         let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => assert!(msg.contains("Base clone not found")),
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Base clone not found"));
+        });
     }
 
     #[test]
@@ -877,10 +866,10 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
             Err(SkulkError::SshFailed("tmux failed".into())),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
         assert!(result.is_err());
@@ -891,17 +880,15 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
             Err(SkulkError::SshFailed("tmux creation failed".into())),
             Err(SkulkError::SshFailed("rollback also failed".into())),
         ]);
         let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::SshFailed(msg) => assert!(msg.contains("tmux creation failed")),
-            other => panic!("expected SshFailed, got: {other}"),
-        }
+        assert_err!(result, SkulkError::SshFailed(msg) => {
+            assert!(msg.contains("tmux creation failed"));
+        });
     }
 
     #[test]
@@ -909,9 +896,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
             Err(SkulkError::SshFailed("send-keys failed".into())),
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_prompt_delivery_fails.txt");
@@ -1038,9 +1025,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()), // worktree
-            Ok(String::new()), // tmux create + send-keys
+            Ok(mock_empty_inventory()),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create + send-keys
         ]);
         let env_path = std::path::PathBuf::from("/tmp/some/.skulk/.env");
         assert!(
@@ -1072,9 +1059,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
         let calls = ssh.calls();
@@ -1089,9 +1076,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()), // worktree
-            Ok(String::new()), // tmux create
+            Ok(mock_empty_inventory()),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
         ])
         .with_upload_responses(vec![Err(SkulkError::SshFailed("scp blew up".into()))]);
         let env_path = std::path::PathBuf::from("/tmp/.skulk/.env");
@@ -1157,10 +1144,8 @@ mod tests {
             suggestion: "SSH not running.".into(),
         })]);
         let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Diagnostic { message, .. } => assert!(message.contains("refused")),
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("refused"));
+        });
     }
 }

@@ -411,7 +411,10 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_inventory, mock_list_output, test_config};
+    use crate::testutil::{
+        MockSsh, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
+        mock_list_output, ssh_ok, test_config,
+    };
 
     fn confirm_yes(_: &str) -> bool {
         true
@@ -444,9 +447,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         let cli = Cli {
             no_color: true,
@@ -466,14 +469,10 @@ mod tests {
     fn run_dispatches_destroy_force() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         let cli = Cli {
             no_color: true,
@@ -488,7 +487,7 @@ mod tests {
     #[test]
     fn run_dispatches_destroy_all_force() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         let cli = Cli {
             no_color: true,
             command: Commands::DestroyAll { force: true },
@@ -499,11 +498,7 @@ mod tests {
     #[test]
     fn run_dispatches_gc() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(
-            &["skulk-healthy"],
-            &[("skulk-healthy", "/path/skulk-healthy")],
-            &["skulk-healthy"],
-        ))]);
+        let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-healthy"))]);
         let cli = Cli {
             no_color: true,
             command: Commands::Gc { dry_run: true },
@@ -514,7 +509,7 @@ mod tests {
     #[test]
     fn run_dispatches_connect() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
             command: Commands::Connect {
@@ -635,10 +630,10 @@ mod tests {
             Ok("SKULK_GH_OK".into()),
             Ok(r#"{"title":"T","body":"B","comments":[]}"#.into()),
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         let cli = Cli {
             no_color: true,
@@ -664,10 +659,10 @@ mod tests {
 
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
-            Ok(mock_inventory(&[], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         let cli = Cli {
             no_color: true,
@@ -710,7 +705,7 @@ mod tests {
     #[test]
     fn run_dispatches_disconnect() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
             command: Commands::Disconnect {
@@ -738,11 +733,7 @@ mod tests {
     #[test]
     fn run_dispatches_send() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![
-            Ok("old pane".into()),
-            Ok(String::new()),
-            Ok("new pane".into()),
-        ]);
+        let ssh = MockSsh::new(vec![Ok("old pane".into()), ssh_ok(), Ok("new pane".into())]);
         let cli = Cli {
             no_color: true,
             command: Commands::Send {
@@ -756,7 +747,7 @@ mod tests {
     #[test]
     fn run_dispatches_push() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
             command: Commands::Push {
@@ -769,7 +760,7 @@ mod tests {
     #[test]
     fn run_dispatches_archive() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
             command: Commands::Archive {
@@ -788,7 +779,7 @@ mod tests {
                 &[("skulk-test", "/path/skulk-test")],
                 &["skulk-test"],
             )),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         let cli = Cli {
             no_color: true,
@@ -816,8 +807,8 @@ mod tests {
     fn run_dispatches_ship() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()),                          // precheck
-            Ok(String::new()),                          // push
+            ssh_ok(),                                   // precheck
+            ssh_ok(),                                   // push
             Ok("https://github.com/x/y/pull/1".into()), // gh pr create
         ]);
         let cli = Cli {
@@ -846,7 +837,7 @@ mod tests {
     #[test]
     fn run_dispatches_wait_single() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new()), Ok("idle".into())]);
+        let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle".into())]);
         let cli = Cli {
             no_color: true,
             command: Commands::Wait {
@@ -861,7 +852,7 @@ mod tests {
     #[test]
     fn run_dispatches_wait_all() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(crate::testutil::mock_inventory(&[], &[], &[]))]);
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         let cli = Cli {
             no_color: true,
             command: Commands::Wait {

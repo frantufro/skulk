@@ -57,7 +57,10 @@ pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_inventory, test_config};
+    use crate::testutil::{
+        MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
+        ssh_ok, test_config,
+    };
 
     #[test]
     fn cmd_restart_succeeds_for_archived_agent() {
@@ -68,7 +71,7 @@ mod tests {
                 &[("skulk-task", "/path/skulk-task")],
                 &["skulk-task"],
             )),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
     }
@@ -85,7 +88,7 @@ mod tests {
                 &[("skulk-task", "/path/skulk-task")],
                 &[],
             )),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
     }
@@ -101,35 +104,23 @@ mod tests {
     #[test]
     fn cmd_restart_errors_when_session_already_running() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(
-            &["skulk-task"],
-            &[("skulk-task", "/path/skulk-task")],
-            &["skulk-task"],
-        ))]);
+        let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-task"))]);
         let result = cmd_restart(&ssh, "task", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => {
-                assert!(msg.contains("already running"));
-                assert!(msg.contains("skulk connect"));
-            }
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("already running"));
+            assert!(msg.contains("skulk connect"));
+        });
     }
 
     #[test]
     fn cmd_restart_errors_when_no_worktree_exists() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         let result = cmd_restart(&ssh, "ghost", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => {
-                assert!(msg.contains("ghost"));
-                assert!(msg.contains("skulk new"));
-            }
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+            assert!(msg.contains("skulk new"));
+        });
     }
 
     #[test]
@@ -150,7 +141,7 @@ mod tests {
                 &[("skulk-task", "/path/skulk-task")],
                 &["skulk-task"],
             )),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
         let tmux_call = &ssh.calls()[1];
@@ -168,7 +159,7 @@ mod tests {
                 &[("skulk-task", "/path/skulk-task")],
                 &["skulk-task"],
             )),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
         let tmux_call = &ssh.calls()[1];
@@ -220,11 +211,8 @@ mod tests {
             Err(SkulkError::SshFailed("Connection timed out".into())),
         ]);
         let result = cmd_restart(&ssh, "task", &cfg);
-        match result.unwrap_err() {
-            SkulkError::Diagnostic { message, .. } => {
-                assert!(message.to_lowercase().contains("timed out"));
-            }
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.to_lowercase().contains("timed out"));
+        });
     }
 }

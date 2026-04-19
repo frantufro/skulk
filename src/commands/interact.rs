@@ -312,7 +312,7 @@ pub(crate) fn cmd_send(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, test_config};
+    use crate::testutil::{MockSsh, assert_err, ssh_ok, test_config};
 
     #[test]
     fn connect_command_generates_tmux_attach() {
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn cmd_diff_returns_empty_output_when_no_changes() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_diff(&ssh, "test", DiffFormat::Default, &cfg).is_ok());
     }
 
@@ -413,11 +413,9 @@ mod tests {
             "fatal: ambiguous argument 'main...skulk-nope': unknown revision or path not in the working tree".into(),
         ))]);
         let result = cmd_diff(&ssh, "nope", DiffFormat::Default, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("nope"));
+        });
     }
 
     #[test]
@@ -459,7 +457,7 @@ mod tests {
     #[test]
     fn cmd_push_succeeds() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_push(&ssh, "test", &cfg).is_ok());
     }
 
@@ -497,11 +495,9 @@ mod tests {
             "error: src refspec skulk-nope does not match any".into(),
         ))]);
         let result = cmd_push(&ssh, "nope", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("nope"));
+        });
     }
 
     #[test]
@@ -511,17 +507,10 @@ mod tests {
             "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.".into(),
         ))]);
         let result = cmd_push(&ssh, "test", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.to_lowercase().contains("origin"));
-                assert!(!suggestion.is_empty());
-            }
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.to_lowercase().contains("origin"));
+            assert!(!suggestion.is_empty());
+        });
     }
 
     #[test]
@@ -541,7 +530,7 @@ mod tests {
     #[test]
     fn cmd_disconnect_succeeds() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_disconnect(&ssh, "test", &cfg).is_ok());
     }
 
@@ -552,11 +541,9 @@ mod tests {
             "can't find session: skulk-ghost".into(),
         ))]);
         let result = cmd_disconnect(&ssh, "ghost", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+        });
     }
 
     #[test]
@@ -661,7 +648,7 @@ mod tests {
     #[test]
     fn cmd_connect_succeeds() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_connect(&ssh, "test", &cfg).is_ok());
     }
 
@@ -672,11 +659,9 @@ mod tests {
             "can't find session: skulk-ghost".into(),
         ))]);
         let result = cmd_connect(&ssh, "ghost", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+        });
     }
 
     #[test]
@@ -700,11 +685,9 @@ mod tests {
             "can't find session: skulk-nope".into(),
         ))]);
         let result = cmd_logs(&ssh, "nope", false, None, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("nope"));
+        });
     }
 
     #[test]
@@ -714,11 +697,9 @@ mod tests {
             "can't find pane: skulk-missing".into(),
         ))]);
         let result = cmd_logs(&ssh, "missing", false, None, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("missing")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("missing"));
+        });
     }
 
     #[test]
@@ -726,7 +707,7 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("old pane content".into()),
-            Ok(String::new()),
+            ssh_ok(),
             Ok("new pane content".into()),
         ]);
         assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
@@ -737,7 +718,7 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("same pane content".into()),
-            Ok(String::new()),
+            ssh_ok(),
             Ok("same pane content".into()),
         ]);
         assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
@@ -750,11 +731,9 @@ mod tests {
             "can't find session: skulk-gone".into(),
         ))]);
         let result = cmd_send(&ssh, "gone", "hello", &cfg, Duration::ZERO);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("gone")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("gone"));
+        });
     }
 
     #[test]
@@ -764,11 +743,9 @@ mod tests {
             "can't find pane: skulk-missing".into(),
         ))]);
         let result = cmd_send(&ssh, "missing", "hello", &cfg, Duration::ZERO);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("missing")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("missing"));
+        });
     }
 
     #[test]
@@ -776,7 +753,7 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("old pane content".into()),
-            Ok(String::new()),
+            ssh_ok(),
             Err(SkulkError::SshFailed("connection lost".into())),
         ]);
         assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
@@ -808,7 +785,7 @@ mod tests {
     #[test]
     fn cmd_archive_succeeds() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_archive(&ssh, "test", &cfg).is_ok());
     }
 
@@ -819,11 +796,9 @@ mod tests {
             "can't find session: skulk-ghost".into(),
         ))]);
         let result = cmd_archive(&ssh, "ghost", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+        });
     }
 
     #[test]
@@ -891,7 +866,7 @@ mod tests {
     #[test]
     fn cmd_git_log_returns_empty_output_when_no_commits() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new())]);
+        let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_git_log(&ssh, "test", &cfg).is_ok());
     }
 
@@ -902,11 +877,9 @@ mod tests {
             "fatal: ambiguous argument 'main..skulk-nope': unknown revision or path not in the working tree".into(),
         ))]);
         let result = cmd_git_log(&ssh, "nope", &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("nope")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("nope"));
+        });
     }
 
     #[test]
@@ -953,12 +926,9 @@ mod tests {
         let path =
             std::path::PathBuf::from("/nonexistent-skulk-dir-that-should-not-exist/transcript.txt");
         let result = cmd_transcript(&ssh, "test", Some(&path), &cfg);
-        match result {
-            Err(SkulkError::Validation(msg)) => {
-                assert!(msg.contains("Failed to write"), "unexpected message: {msg}");
-            }
-            other => panic!("expected Validation error, got: {other:?}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Failed to write"), "unexpected message: {msg}");
+        });
     }
 
     #[test]
@@ -968,11 +938,9 @@ mod tests {
             "can't find session: skulk-ghost".into(),
         ))]);
         let result = cmd_transcript(&ssh, "ghost", None, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+        });
     }
 
     #[test]

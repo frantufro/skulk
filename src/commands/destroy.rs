@@ -194,7 +194,10 @@ pub(crate) fn cmd_destroy_all(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_inventory, test_config};
+    use crate::testutil::{
+        MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
+        ssh_err, ssh_ok, test_config,
+    };
 
     #[test]
     fn agent_destroy_session_command_generates_kill() {
@@ -231,14 +234,10 @@ mod tests {
     fn cmd_destroy_force_succeeds() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -246,23 +245,17 @@ mod tests {
     #[test]
     fn cmd_destroy_not_found_returns_error() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         let result = cmd_destroy(&ssh, "ghost", true, &cfg, &confirm_yes);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+        });
     }
 
     #[test]
     fn cmd_destroy_aborted_by_user() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(
-            &["skulk-target"],
-            &[("skulk-target", "/path/skulk-target")],
-            &["skulk-target"],
-        ))]);
+        let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-target"))]);
         assert!(cmd_destroy(&ssh, "target", false, &cfg, &confirm_no).is_ok());
     }
 
@@ -270,14 +263,10 @@ mod tests {
     fn cmd_destroy_confirmed_by_user() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy(&ssh, "target", false, &cfg, &confirm_yes).is_ok());
     }
@@ -287,8 +276,8 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-partial"], &[], &["skulk-partial"])),
-            Ok(String::new()),
-            Ok(String::new()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy(&ssh, "partial", true, &cfg, &confirm_yes).is_ok());
     }
@@ -297,14 +286,10 @@ mod tests {
     fn cmd_destroy_session_destroy_fails() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Err(SkulkError::SshFailed("kill-session failed".into())),
-            Ok(String::new()),
-            Ok(String::new()),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_err("kill-session failed"),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -313,14 +298,10 @@ mod tests {
     fn cmd_destroy_worktree_destroy_fails() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Ok(String::new()),
-            Err(SkulkError::SshFailed("worktree remove failed".into())),
-            Ok(String::new()),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_err("worktree remove failed"),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -329,14 +310,10 @@ mod tests {
     fn cmd_destroy_branch_destroy_fails() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Err(SkulkError::SshFailed("branch delete failed".into())),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_err("branch delete failed"),
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -345,14 +322,10 @@ mod tests {
     fn cmd_destroy_all_steps_fail() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-target"],
-                &[("skulk-target", "/path/skulk-target")],
-                &["skulk-target"],
-            )),
-            Err(SkulkError::SshFailed("kill failed".into())),
-            Err(SkulkError::SshFailed("worktree failed".into())),
-            Err(SkulkError::SshFailed("branch failed".into())),
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_err("kill failed"),
+            ssh_err("worktree failed"),
+            ssh_err("branch failed"),
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -362,7 +335,7 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-orphan"])),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy(&ssh, "orphan", true, &cfg, &confirm_yes).is_ok());
     }
@@ -372,7 +345,7 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-orphan"])),
-            Err(SkulkError::SshFailed("branch delete failed".into())),
+            ssh_err("branch delete failed"),
         ]);
         assert!(cmd_destroy(&ssh, "orphan", true, &cfg, &confirm_yes).is_ok());
     }
@@ -380,18 +353,14 @@ mod tests {
     #[test]
     fn cmd_destroy_all_empty_inventory() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
 
     #[test]
     fn cmd_destroy_all_aborted_by_user() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(
-            &["skulk-alpha"],
-            &[("skulk-alpha", "/path/skulk-alpha")],
-            &["skulk-alpha"],
-        ))]);
+        let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-alpha"))]);
         assert!(cmd_destroy_all(&ssh, false, &cfg, &confirm_no).is_ok());
     }
 
@@ -407,12 +376,12 @@ mod tests {
                 ],
                 &["skulk-alpha", "skulk-beta"],
             )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
@@ -421,14 +390,10 @@ mod tests {
     fn cmd_destroy_all_some_steps_fail() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(mock_inventory(
-                &["skulk-alpha"],
-                &[("skulk-alpha", "/path/skulk-alpha")],
-                &["skulk-alpha"],
-            )),
-            Err(SkulkError::SshFailed("session kill failed".into())),
-            Err(SkulkError::SshFailed("worktree remove failed".into())),
-            Err(SkulkError::SshFailed("branch delete failed".into())),
+            Ok(mock_inventory_single_agent("skulk-alpha")),
+            ssh_err("session kill failed"),
+            ssh_err("worktree remove failed"),
+            ssh_err("branch delete failed"),
         ]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
@@ -445,12 +410,12 @@ mod tests {
                 ],
                 &["skulk-alpha", "skulk-beta"],
             )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
-            Err(SkulkError::SshFailed("session kill failed".into())),
-            Ok(String::new()),
-            Err(SkulkError::SshFailed("branch delete failed".into())),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_err("session kill failed"),
+            ssh_ok(),
+            ssh_err("branch delete failed"),
         ]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }

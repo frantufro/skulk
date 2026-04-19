@@ -98,7 +98,7 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, test_config};
+    use crate::testutil::{MockSsh, assert_err, ssh_ok, test_config};
 
     // ── precheck_command ──────────────────────────────────────────────────
 
@@ -247,8 +247,8 @@ mod tests {
     fn cmd_ship_runs_precheck_push_then_ship_in_order() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()),                           // precheck
-            Ok(String::new()),                           // push
+            ssh_ok(),                                    // precheck
+            ssh_ok(),                                    // push
             Ok("https://github.com/x/y/pull/42".into()), // gh pr create
         ]);
         let result = cmd_ship(&ssh, "feat", &cfg);
@@ -273,18 +273,12 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("exit code 127".into()))]);
         let result = cmd_ship(&ssh, "feat", &cfg);
-        match result {
-            Err(SkulkError::Diagnostic {
-                message,
-                suggestion,
-            }) => {
-                assert!(message.contains("gh"));
-                assert!(message.contains("claude"));
-                assert!(suggestion.contains("cli.github.com"));
-                assert!(suggestion.contains("claude"));
-            }
-            other => panic!("expected Diagnostic, got {other:?}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("gh"));
+            assert!(message.contains("claude"));
+            assert!(suggestion.contains("cli.github.com"));
+            assert!(suggestion.contains("claude"));
+        });
     }
 
     #[test]
@@ -295,57 +289,46 @@ mod tests {
             suggestion: "Check network.".into(),
         })]);
         let result = cmd_ship(&ssh, "feat", &cfg);
-        match result {
-            Err(SkulkError::Diagnostic { message, .. }) => {
-                assert!(message.contains("timed out"));
-            }
-            other => panic!("expected timeout Diagnostic, got {other:?}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("timed out"));
+        });
     }
 
     #[test]
     fn cmd_ship_classifies_push_branch_not_found() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // precheck OK
+            ssh_ok(), // precheck OK
             Err(SkulkError::SshFailed(
                 "error: src refspec skulk-nope does not match any".into(),
             )),
         ]);
         let result = cmd_ship(&ssh, "nope", &cfg);
-        match result {
-            Err(SkulkError::NotFound(msg)) => assert!(msg.contains("nope")),
-            other => panic!("expected NotFound, got {other:?}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("nope"));
+        });
     }
 
     #[test]
     fn cmd_ship_propagates_pr_creation_failure() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // precheck OK
-            Ok(String::new()), // push OK
+            ssh_ok(), // precheck OK
+            ssh_ok(), // push OK
             Err(SkulkError::SshFailed(
                 "a pull request for branch \"skulk-feat\" already exists".into(),
             )),
         ]);
         let result = cmd_ship(&ssh, "feat", &cfg);
-        match result {
-            Err(SkulkError::SshFailed(msg)) => {
-                assert!(msg.contains("already exists"));
-            }
-            other => panic!("expected SshFailed, got {other:?}"),
-        }
+        assert_err!(result, SkulkError::SshFailed(msg) => {
+            assert!(msg.contains("already exists"));
+        });
     }
 
     #[test]
     fn cmd_ship_succeeds_with_empty_gh_output() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
-        ]);
+        let ssh = MockSsh::new(vec![ssh_ok(), ssh_ok(), ssh_ok()]);
         assert!(cmd_ship(&ssh, "feat", &cfg).is_ok());
     }
 }
