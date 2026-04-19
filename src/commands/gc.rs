@@ -13,7 +13,8 @@ use crate::ssh::Ssh;
 ///
 /// Orphan definitions:
 /// - Orphaned session: tmux session with session prefix but no matching worktree or branch
-/// - Orphaned worktree: worktree with session prefix but no matching tmux session
+/// - Orphaned worktree: worktree with session prefix but no matching session AND no matching branch
+///   (a worktree with its branch intact is an *archived* agent -- preserved for `skulk restart`)
 /// - Orphaned branch: branch with session prefix but no matching session or worktree
 pub(crate) fn gc_find_orphans(inv: &AgentInventory) -> GcOrphans {
     let session_set: HashSet<&str> = inv.sessions.iter().map(String::as_str).collect();
@@ -27,10 +28,12 @@ pub(crate) fn gc_find_orphans(inv: &AgentInventory) -> GcOrphans {
         .map(ToString::to_string)
         .collect();
 
-    // Orphaned worktrees: have worktree but no tmux session
+    // Orphaned worktrees: have worktree but no session AND no branch.
+    // A worktree whose branch still exists is an *archived* agent (killed tmux
+    // session, work preserved for `skulk restart`) and must not be reaped here.
     let mut worktrees: Vec<String> = worktree_set
         .iter()
-        .filter(|w| !session_set.contains(*w))
+        .filter(|w| !session_set.contains(*w) && !branch_set.contains(*w))
         .map(ToString::to_string)
         .collect();
 
@@ -149,17 +152,45 @@ mod tests {
 
     #[test]
     fn gc_find_orphans_orphaned_worktree() {
+        // Truly dangling: worktree directory tracked by git but with no matching
+        // branch (e.g. after a manual `git branch -D`). Still safe to reap.
         let mut worktrees = HashMap::new();
         worktrees.insert("skulk-stale".to_string(), "/path/skulk-stale".to_string());
         let inv = AgentInventory {
             sessions: vec![],
             worktrees,
-            branches: vec!["skulk-stale".to_string()],
+            branches: vec![],
         };
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.sessions.is_empty());
         assert_eq!(orphans.worktrees, vec!["skulk-stale"]);
         assert!(orphans.branches.is_empty());
+    }
+
+    #[test]
+    fn gc_find_orphans_archived_agent_not_reaped() {
+        // Archived state: worktree + branch present, session killed. Must be
+        // preserved so `skulk restart` can resume the agent.
+        let mut worktrees = HashMap::new();
+        worktrees.insert(
+            "skulk-archived".to_string(),
+            "/path/skulk-archived".to_string(),
+        );
+        let inv = AgentInventory {
+            sessions: vec![],
+            worktrees,
+            branches: vec!["skulk-archived".to_string()],
+        };
+        let orphans = gc_find_orphans(&inv);
+        assert!(orphans.sessions.is_empty());
+        assert!(
+            orphans.worktrees.is_empty(),
+            "archived worktree must not be reaped"
+        );
+        assert!(
+            orphans.branches.is_empty(),
+            "archived branch must not be reaped"
+        );
     }
 
     #[test]
@@ -189,7 +220,8 @@ mod tests {
         let inv = AgentInventory {
             sessions: vec!["skulk-healthy".to_string(), "skulk-ghost-sess".to_string()],
             worktrees,
-            branches: vec!["skulk-healthy".to_string(), "skulk-stale-wt".to_string()],
+            // `skulk-stale-wt` has no branch listed -- truly dangling, not archived.
+            branches: vec!["skulk-healthy".to_string()],
         };
         let orphans = gc_find_orphans(&inv);
         assert_eq!(orphans.sessions, vec!["skulk-ghost-sess"]);
@@ -288,16 +320,37 @@ mod tests {
     fn cmd_gc_cleans_orphaned_worktree() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
+            // Branch absent -- truly dangling worktree, safe to reap.
             Ok(mock_inventory(
                 &[],
                 &[("skulk-stale", "/path/skulk-stale")],
-                &["skulk-stale"],
+                &[],
             )),
             Ok(String::new()),
             Ok(String::new()),
             Ok(String::new()),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_gc_archived_agent_preserved() {
+        // End-to-end: gc must not touch an archived agent's worktree or branch.
+        // Only the inventory SSH call plus the bookkeeping `git worktree prune`
+        // should run; no destroy calls.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(mock_inventory(
+            &[],
+            &[("skulk-archived", "/path/skulk-archived")],
+            &["skulk-archived"],
+        ))]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        assert_eq!(
+            ssh.calls().len(),
+            1,
+            "only the inventory call should have run, got: {:?}",
+            ssh.calls()
+        );
     }
 
     #[test]
@@ -340,7 +393,7 @@ mod tests {
             Ok(mock_inventory(
                 &[],
                 &[("skulk-stale", "/path/skulk-stale")],
-                &["skulk-stale"],
+                &[],
             )),
             Err(SkulkError::SshFailed("worktree remove failed".into())),
             Ok(String::new()),

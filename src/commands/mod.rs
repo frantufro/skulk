@@ -5,3 +5,4 @@ pub(crate) mod interact;
 pub(crate) mod list;
 pub(crate) mod new;
 pub(crate) mod pull;
+pub(crate) mod restart;
