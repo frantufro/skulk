@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 
 use clap::Parser;
 
-use crate::commands::init::{self, Prompter};
+use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::commands::interact::logs_snapshot_deep_command;
 use crate::config::{self, Config, load_config};
 use crate::display::checkmark;
@@ -236,7 +236,7 @@ fn run_local_command(cmd: &str) -> Result<String, String> {
     }
 }
 
-fn run_init() -> Result<(), SkulkError> {
+fn run_init() -> Result<InitOutcome, SkulkError> {
     let color = use_color();
 
     // Print welcome banner
@@ -262,7 +262,10 @@ fn run_init() -> Result<(), SkulkError> {
 
     // Run wizard
     let mut prompter = StdinPrompter;
-    let answers = init::run_wizard(&mut prompter, &git_ctx, config_exists, color, &test_ssh)?;
+    let Some(answers) = init::run_wizard(&mut prompter, &git_ctx, config_exists, color, &test_ssh)?
+    else {
+        return Ok(InitOutcome::Aborted);
+    };
 
     // Write config under .skulk/
     let toml_content = init::generate_config_toml(&answers);
@@ -343,7 +346,7 @@ fn run_init() -> Result<(), SkulkError> {
     // Success
     eprintln!("{}", init::success_message(color));
 
-    Ok(())
+    Ok(InitOutcome::Done)
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -358,10 +361,10 @@ pub(crate) fn main() {
 
     // Init runs before config exists — handle it specially
     if matches!(cli.command, Commands::Init) {
-        if let Err(e) = run_init() {
-            if let SkulkError::InitAborted = e {
-                eprintln!("Aborted.");
-            } else {
+        match run_init() {
+            Ok(InitOutcome::Done) => {}
+            Ok(InitOutcome::Aborted) => eprintln!("Aborted."),
+            Err(e) => {
                 eprintln!("skulk init: {e}");
                 std::process::exit(1);
             }

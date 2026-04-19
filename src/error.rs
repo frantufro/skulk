@@ -15,14 +15,17 @@ pub(crate) enum SkulkError {
     /// Resource not found
     #[error("{0}")]
     NotFound(String),
-    /// User aborted an interactive operation
-    #[error("Aborted.")]
-    InitAborted,
 }
 
 pub(crate) fn classify_ssh_error(stderr: &str, host: &str) -> SkulkError {
     let lower = stderr.to_lowercase();
+    classify_ssh_error_lower(stderr, &lower, host)
+}
 
+/// Same as `classify_ssh_error` but accepts a pre-lowercased copy of `stderr`.
+/// Use this from callers that already hold a lowercased string to avoid
+/// allocating a second one.
+fn classify_ssh_error_lower(stderr: &str, lower: &str, host: &str) -> SkulkError {
     if lower.contains("connection timed out") || lower.contains("operation timed out") {
         SkulkError::Diagnostic {
             message: format!("Connection to {host} timed out."),
@@ -51,7 +54,7 @@ pub(crate) fn classify_ssh_error(stderr: &str, host: &str) -> SkulkError {
     } else if lower.contains("command not found") {
         SkulkError::Diagnostic {
             message: format!("Required command not found on {host}."),
-            suggestion: format!("tmux not installed on {host}"),
+            suggestion: format!("Ensure required tools (tmux, git, gh) are installed on {host}."),
         }
     } else {
         SkulkError::SshFailed(stderr.trim().to_string())
@@ -91,7 +94,7 @@ pub(crate) fn classify_agent_error(name: &str, err: SkulkError, host: &str) -> S
                     ),
                 }
             } else {
-                classify_ssh_error(stderr, host)
+                classify_ssh_error_lower(stderr, &lower, host)
             }
         }
         _ => err,
@@ -215,7 +218,8 @@ mod tests {
                 suggestion,
             } => {
                 assert!(message.contains("not found"));
-                assert!(suggestion.contains("tmux not installed"));
+                assert!(suggestion.contains("required tools"));
+                assert!(suggestion.contains("testhost"));
             }
             _ => panic!("Expected Diagnostic, got: {err:?}"),
         }
