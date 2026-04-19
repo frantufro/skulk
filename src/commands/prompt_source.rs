@@ -215,7 +215,7 @@ pub(crate) fn load_github_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, test_config};
+    use crate::testutil::{MockSsh, assert_err, test_config};
 
     // ── validate_issue_id ──────────────────────────────────────────────
 
@@ -380,34 +380,22 @@ mod tests {
     fn check_gh_available_missing_returns_diagnostic() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("SKULK_GH_MISSING".into())]);
-        let err = check_gh_available(&ssh, &cfg).unwrap_err();
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("not installed"));
-                assert!(suggestion.contains("skulk init"));
-            }
-            other => panic!("expected Diagnostic, got {other}"),
-        }
+        let result = check_gh_available(&ssh, &cfg);
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("not installed"));
+            assert!(suggestion.contains("skulk init"));
+        });
     }
 
     #[test]
     fn check_gh_available_unauthenticated_returns_diagnostic() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("SKULK_GH_UNAUTHENTICATED".into())]);
-        let err = check_gh_available(&ssh, &cfg).unwrap_err();
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("not authenticated"));
-                assert!(suggestion.contains("gh auth login"));
-            }
-            other => panic!("expected Diagnostic, got {other}"),
-        }
+        let result = check_gh_available(&ssh, &cfg);
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("not authenticated"));
+            assert!(suggestion.contains("gh auth login"));
+        });
     }
 
     // ── gh_issue_fetch_command ─────────────────────────────────────────
@@ -437,11 +425,10 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "GraphQL: Could not resolve to an Issue with the number of 999.".into(),
         ))]);
-        let err = fetch_github_issue_raw(&ssh, "999", &cfg).unwrap_err();
-        match err {
-            SkulkError::NotFound(msg) => assert!(msg.contains("#999")),
-            other => panic!("expected NotFound, got {other}"),
-        }
+        let result = fetch_github_issue_raw(&ssh, "999", &cfg);
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("#999"));
+        });
     }
 
     #[test]
@@ -514,11 +501,10 @@ mod tests {
     #[test]
     fn load_file_prompt_empty_file_errors() {
         let path = make_tmp_file("empty.txt", "   \n\n  ");
-        let err = load_file_prompt(&path, "skulk-t").unwrap_err();
-        match err {
-            SkulkError::Validation(msg) => assert!(msg.contains("empty")),
-            other => panic!("expected Validation, got {other}"),
-        }
+        let result = load_file_prompt(&path, "skulk-t");
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("empty"));
+        });
         let _ = std::fs::remove_file(&path);
     }
 }

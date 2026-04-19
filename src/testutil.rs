@@ -1,11 +1,42 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use crate::commands::init::Prompter;
 use crate::config::Config;
 use crate::error::SkulkError;
+use crate::inventory::AgentInventory;
 use crate::ssh::Ssh;
+
+/// Matches a `Result<_, SkulkError>` against an expected error variant.
+///
+/// The `Ok` arm panics with a clear message; a mismatched error variant panics
+/// with the actual variant so test failures are diagnosable.
+///
+/// ```ignore
+/// assert_err!(result, SkulkError::NotFound(msg) => {
+///     assert!(msg.contains("foo"));
+/// });
+/// ```
+macro_rules! assert_err {
+    ($result:expr, $variant:pat => $body:block) => {
+        match $result.expect_err("expected Err, got Ok") {
+            $variant => $body,
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    };
+}
+pub(crate) use assert_err;
+
+/// Short-hand for a successful, empty SSH response.
+pub(crate) fn ssh_ok() -> Result<String, SkulkError> {
+    Ok(String::new())
+}
+
+/// Short-hand for an `SshFailed` error with the given message.
+pub(crate) fn ssh_err(msg: &str) -> Result<String, SkulkError> {
+    Err(SkulkError::SshFailed(msg.to_string()))
+}
 
 /// Builds a `Config` with known values for testing.
 pub(crate) fn test_config() -> Config {
@@ -72,6 +103,39 @@ impl Ssh for MockSsh {
             .borrow_mut()
             .pop_front()
             .unwrap_or(Ok(()))
+    }
+}
+
+/// Helper: shorthand for `mock_inventory(&[], &[], &[])`.
+pub(crate) fn mock_empty_inventory() -> String {
+    mock_inventory(&[], &[], &[])
+}
+
+/// Helper: fully-healthy single-agent inventory. `name` is the full
+/// session-prefixed name (e.g. `"skulk-target"`); session, worktree branch,
+/// and worktree path all key off that name.
+pub(crate) fn mock_inventory_single_agent(name: &str) -> String {
+    let path = format!("/path/{name}");
+    mock_inventory(&[name], &[(name, &path)], &[name])
+}
+
+/// Helper: build an `AgentInventory` struct directly. Used by tests that
+/// exercise pure-logic functions consuming the struct (e.g. `gc_find_orphans`).
+/// `worktrees` is given as `(branch, path)` pairs for parity with
+/// [`mock_inventory`].
+pub(crate) fn make_inventory(
+    sessions: &[&str],
+    worktrees: &[(&str, &str)],
+    branches: &[&str],
+) -> AgentInventory {
+    let mut worktree_map = HashMap::new();
+    for (branch, path) in worktrees {
+        worktree_map.insert((*branch).to_string(), (*path).to_string());
+    }
+    AgentInventory {
+        sessions: sessions.iter().map(|s| (*s).to_string()).collect(),
+        worktrees: worktree_map,
+        branches: branches.iter().map(|s| (*s).to_string()).collect(),
     }
 }
 

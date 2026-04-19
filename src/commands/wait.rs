@@ -115,7 +115,9 @@ pub(crate) fn cmd_wait_all(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_inventory, test_config};
+    use crate::testutil::{
+        MockSsh, assert_err, mock_empty_inventory, mock_inventory, ssh_ok, test_config,
+    };
 
     #[test]
     fn wait_state_command_reads_marker_with_fallback() {
@@ -154,7 +156,7 @@ mod tests {
     fn cmd_wait_returns_immediately_when_idle() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // has-session
+            ssh_ok(),          // has-session
             Ok("idle".into()), // first poll
         ]);
         assert!(cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::from_secs(60)).is_ok());
@@ -164,7 +166,7 @@ mod tests {
     fn cmd_wait_polls_until_idle() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()),
+            ssh_ok(),
             Ok("busy".into()),
             Ok("busy".into()),
             Ok("idle".into()),
@@ -177,39 +179,36 @@ mod tests {
     fn cmd_wait_times_out_when_agent_stays_busy() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // has-session
+            ssh_ok(),          // has-session
             Ok("busy".into()), // first poll, then timeout check fires
         ]);
         let result = cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::ZERO);
-        match result {
-            Err(SkulkError::Diagnostic { message, .. }) => {
-                assert!(
-                    message.to_lowercase().contains("timed out"),
-                    "expected timeout message, got: {message}"
-                );
-            }
-            other => panic!("expected Diagnostic, got: {other:?}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("timed out"),
+                "expected timeout message, got: {message}"
+            );
+        });
     }
 
     #[test]
     fn cmd_wait_polls_at_least_once_even_with_zero_timeout_when_already_idle() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new()), Ok("idle".into())]);
+        let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle".into())]);
         assert!(cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::ZERO).is_ok());
     }
 
     #[test]
     fn cmd_wait_treats_missing_marker_as_idle() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new()), Ok("missing".into())]);
+        let ssh = MockSsh::new(vec![ssh_ok(), Ok("missing".into())]);
         assert!(cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::from_secs(60)).is_ok());
     }
 
     #[test]
     fn cmd_wait_trims_trailing_whitespace_before_matching() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(String::new()), Ok("idle\n".into())]);
+        let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle\n".into())]);
         assert!(cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::from_secs(60)).is_ok());
     }
 
@@ -220,18 +219,16 @@ mod tests {
             "can't find session: skulk-ghost".into(),
         ))]);
         let result = cmd_wait(&ssh, "ghost", &cfg, Duration::ZERO, Duration::from_secs(60));
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::NotFound(msg) => assert!(msg.contains("ghost")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("ghost"));
+        });
     }
 
     #[test]
     fn cmd_wait_surfaces_poll_ssh_failure() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok(String::new()),
+            ssh_ok(),
             Err(SkulkError::SshFailed("connection lost".into())),
         ]);
         let result = cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::from_secs(60));
@@ -257,9 +254,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-alpha", "skulk-beta"], &[], &[])),
-            Ok(String::new()), // has-session alpha
+            ssh_ok(),          // has-session alpha
             Ok("idle".into()), // alpha idle
-            Ok(String::new()), // has-session beta
+            ssh_ok(),          // has-session beta
             Ok("idle".into()), // beta idle
         ]);
         assert!(cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::from_secs(60)).is_ok());
@@ -268,7 +265,7 @@ mod tests {
     #[test]
     fn cmd_wait_all_no_sessions_is_ok() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &[]))]);
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         assert!(cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::from_secs(60)).is_ok());
     }
 

@@ -601,7 +601,7 @@ fn example_agent_name() -> &'static str {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::testutil::{MockPrompter, MockSsh};
+    use crate::testutil::{MockPrompter, MockSsh, ssh_ok};
 
     fn mock_ssh_test_ok(_host: &str) -> Result<(), SkulkError> {
         Ok(())
@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn remote_setup_all_installed() {
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // apt-get check
+            ssh_ok(), // apt-get check
             Ok(
                 "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
                 repo:cloned\nworktree-dir:exists"
@@ -1057,15 +1057,15 @@ mod tests {
     #[test]
     fn remote_setup_installs_missing_tools() {
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // apt-get check
+            ssh_ok(), // apt-get check
             Ok("tmux:missing\ngit:installed\ngh:missing\nclaude:missing\n\
                 repo:missing\nworktree-dir:missing"
                 .into()),
-            Ok(String::new()), // tmux install
-            Ok(String::new()), // gh install
-            Ok(String::new()), // claude install
-            Ok(String::new()), // clone
-            Ok(String::new()), // mkdir
+            ssh_ok(), // tmux install
+            ssh_ok(), // gh install
+            ssh_ok(), // claude install
+            ssh_ok(), // clone
+            ssh_ok(), // mkdir
         ]);
         assert!(run_remote_setup(&ssh, &test_answers(), false).is_ok());
     }
@@ -1080,7 +1080,7 @@ mod tests {
     #[test]
     fn remote_setup_tool_install_fails_continues() {
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // apt-get check
+            ssh_ok(), // apt-get check
             Ok(
                 "tmux:missing\ngit:installed\ngh:installed\nclaude:installed\n\
                 repo:cloned\nworktree-dir:exists"
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn remote_setup_clone_failure_propagates() {
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // apt-get check
+            ssh_ok(), // apt-get check
             Ok(
                 "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
                 repo:missing\nworktree-dir:missing"
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn remote_setup_repo_already_cloned() {
         let ssh = MockSsh::new(vec![
-            Ok(String::new()), // apt-get check
+            ssh_ok(), // apt-get check
             Ok(
                 "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
                 repo:cloned\nworktree-dir:exists"

@@ -61,7 +61,7 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, test_config};
+    use crate::testutil::{MockSsh, assert_err, test_config};
 
     #[test]
     fn cmd_pull_normal_succeeds() {
@@ -75,13 +75,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => {
-                assert!(msg.contains("Base clone not found"));
-            }
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Base clone not found"));
+        });
     }
 
     #[test]
@@ -104,13 +100,9 @@ mod tests {
             )),
         ]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => {
-                assert!(msg.contains("Cannot fast-forward"));
-            }
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Cannot fast-forward"));
+        });
     }
 
     #[test]
@@ -125,13 +117,9 @@ mod tests {
             )),
         ]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => {
-                assert!(msg.contains("uncommitted changes"));
-            }
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("uncommitted changes"));
+        });
     }
 
     #[test]
@@ -144,13 +132,9 @@ mod tests {
             )),
         ]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Validation(msg) => {
-                assert!(msg.contains("Cannot find 'main' branch"));
-            }
-            other => panic!("expected Validation, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Cannot find 'main' branch"));
+        });
     }
 
     #[test]
@@ -164,13 +148,9 @@ mod tests {
             }),
         ]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Diagnostic { message, .. } => {
-                assert!(message.contains("timed out"));
-            }
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("timed out"));
+        });
     }
 
     #[test]
@@ -181,13 +161,9 @@ mod tests {
             suggestion: "SSH not running.".into(),
         })]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::Diagnostic { message, .. } => {
-                assert!(message.contains("refused"));
-            }
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("refused"));
+        });
     }
 
     #[test]
@@ -200,13 +176,9 @@ mod tests {
             )),
         ]);
         let result = cmd_pull(&ssh, false, &cfg);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SkulkError::SshFailed(msg) => {
-                assert!(msg.contains("some totally unknown git error"));
-            }
-            other => panic!("expected SshFailed, got: {other}"),
-        }
+        assert_err!(result, SkulkError::SshFailed(msg) => {
+            assert!(msg.contains("some totally unknown git error"));
+        });
     }
 
     #[test]

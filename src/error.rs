@@ -109,131 +109,99 @@ pub(crate) fn is_tmux_no_server(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::assert_err;
 
     #[test]
     fn classify_ssh_error_connection_timed_out() {
-        let err = classify_ssh_error(
+        let err: Result<(), _> = Err(classify_ssh_error(
             "ssh: connect to host bluebubble: Connection timed out",
             "testhost",
-        );
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("timed out"));
-                assert!(suggestion.contains("network connection"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("timed out"));
+            assert!(suggestion.contains("network connection"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_operation_timed_out() {
-        let err = classify_ssh_error(
+        let err: Result<(), _> = Err(classify_ssh_error(
             "ssh: connect to host bluebubble: Operation timed out",
             "testhost",
-        );
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("timed out"));
-                assert!(suggestion.contains("network connection"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("timed out"));
+            assert!(suggestion.contains("network connection"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_connection_refused() {
-        let err = classify_ssh_error(
+        let err: Result<(), _> = Err(classify_ssh_error(
             "ssh: connect to host bluebubble port 22: Connection refused",
             "testhost",
-        );
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("refused"));
-                assert!(suggestion.contains("Ensure SSH is running"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("refused"));
+            assert!(suggestion.contains("Ensure SSH is running"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_host_key_verification_failed() {
-        let err = classify_ssh_error("Host key verification failed.", "testhost");
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("Host key verification failed"));
-                assert!(suggestion.contains("Accept the host key"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        let err: Result<(), _> = Err(classify_ssh_error(
+            "Host key verification failed.",
+            "testhost",
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("Host key verification failed"));
+            assert!(suggestion.contains("Accept the host key"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_permission_denied() {
-        let err = classify_ssh_error("Permission denied (publickey)", "testhost");
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("authentication"));
-                assert!(suggestion.contains("ssh testhost whoami"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        let err: Result<(), _> = Err(classify_ssh_error(
+            "Permission denied (publickey)",
+            "testhost",
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("authentication"));
+            assert!(suggestion.contains("ssh testhost whoami"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_cannot_resolve() {
-        let err = classify_ssh_error("ssh: Could not resolve hostname bluebubble", "testhost");
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("resolve"));
-                assert!(suggestion.contains("DNS resolution"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        let err: Result<(), _> = Err(classify_ssh_error(
+            "ssh: Could not resolve hostname bluebubble",
+            "testhost",
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("resolve"));
+            assert!(suggestion.contains("DNS resolution"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_command_not_found() {
-        let err = classify_ssh_error("bash: tmux: command not found", "testhost");
-        match err {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.contains("not found"));
-                assert!(suggestion.contains("required tools"));
-                assert!(suggestion.contains("testhost"));
-            }
-            _ => panic!("Expected Diagnostic, got: {err:?}"),
-        }
+        let err: Result<(), _> = Err(classify_ssh_error(
+            "bash: tmux: command not found",
+            "testhost",
+        ));
+        assert_err!(err, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("not found"));
+            assert!(suggestion.contains("required tools"));
+            assert!(suggestion.contains("testhost"));
+        });
     }
 
     #[test]
     fn classify_ssh_error_unknown_returns_ssh_failed() {
-        let err = classify_ssh_error("some unknown error text", "testhost");
-        match err {
-            SkulkError::SshFailed(msg) => {
-                assert_eq!(msg, "some unknown error text");
-            }
-            _ => panic!("Expected SshFailed, got: {err:?}"),
-        }
+        let err: Result<(), _> = Err(classify_ssh_error("some unknown error text", "testhost"));
+        assert_err!(err, SkulkError::SshFailed(msg) => {
+            assert_eq!(msg, "some unknown error text");
+        });
     }
 
     #[test]
@@ -256,26 +224,20 @@ mod tests {
     #[test]
     fn classify_agent_error_session_not_found() {
         let err = SkulkError::SshFailed("can't find session: skulk-foo".to_string());
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::NotFound(msg) => {
-                assert!(msg.contains("foo"));
-                assert!(msg.contains("not found"));
-            }
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("foo"));
+            assert!(msg.contains("not found"));
+        });
     }
 
     #[test]
     fn classify_agent_error_session_not_found_variant() {
         let err = SkulkError::SshFailed("session not found: skulk-bar".to_string());
-        let result = classify_agent_error("bar", err, "testhost");
-        match result {
-            SkulkError::NotFound(msg) => {
-                assert!(msg.contains("bar"));
-            }
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("bar", err, "testhost"));
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("bar"));
+        });
     }
 
     #[test]
@@ -284,35 +246,30 @@ mod tests {
             "fatal: ambiguous argument 'main...skulk-foo': unknown revision or path not in the working tree"
                 .to_string(),
         );
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::NotFound(msg) => {
-                assert!(msg.contains("foo"));
-                assert!(msg.contains("not found"));
-            }
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("foo"));
+            assert!(msg.contains("not found"));
+        });
     }
 
     #[test]
     fn classify_agent_error_not_a_valid_object_name_returns_not_found() {
         let err = SkulkError::SshFailed("fatal: Not a valid object name skulk-foo".to_string());
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("foo"));
+        });
     }
 
     #[test]
     fn classify_agent_error_src_refspec_returns_not_found() {
         let err =
             SkulkError::SshFailed("error: src refspec skulk-foo does not match any".to_string());
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::NotFound(msg) => assert!(msg.contains("foo")),
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("foo"));
+        });
     }
 
     #[test]
@@ -320,27 +277,18 @@ mod tests {
         let err = SkulkError::SshFailed(
             "fatal: 'origin' does not appear to be a git repository".to_string(),
         );
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::Diagnostic {
-                message,
-                suggestion,
-            } => {
-                assert!(message.to_lowercase().contains("origin"));
-                assert!(suggestion.contains("testhost"));
-            }
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.to_lowercase().contains("origin"));
+            assert!(suggestion.contains("testhost"));
+        });
     }
 
     #[test]
     fn classify_agent_error_no_such_remote_returns_diagnostic() {
         let err = SkulkError::SshFailed("fatal: No such remote 'origin'".to_string());
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::Diagnostic { .. } => {}
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::Diagnostic { .. } => {});
     }
 
     #[test]
@@ -354,20 +302,17 @@ mod tests {
              fatal: Could not read from remote repository."
                 .to_string(),
         );
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::Diagnostic { message, .. } => {
-                assert!(
-                    message.to_lowercase().contains("timed out"),
-                    "expected timeout diagnostic, got: {message}"
-                );
-                assert!(
-                    !message.to_lowercase().contains("origin"),
-                    "timeout must not be reported as origin-missing: {message}"
-                );
-            }
-            other => panic!("expected timeout Diagnostic, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("timed out"),
+                "expected timeout diagnostic, got: {message}"
+            );
+            assert!(
+                !message.to_lowercase().contains("origin"),
+                "timeout must not be reported as origin-missing: {message}"
+            );
+        });
     }
 
     #[test]
@@ -379,53 +324,41 @@ mod tests {
              fatal: Could not read from remote repository."
                 .to_string(),
         );
-        let result = classify_agent_error("foo", err, "testhost");
-        match result {
-            SkulkError::Diagnostic { message, .. } => {
-                assert!(
-                    message.to_lowercase().contains("authentication"),
-                    "expected auth diagnostic, got: {message}"
-                );
-            }
-            other => panic!("expected auth Diagnostic, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("foo", err, "testhost"));
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("authentication"),
+                "expected auth diagnostic, got: {message}"
+            );
+        });
     }
 
     #[test]
     fn classify_agent_error_pane_not_found() {
         let err = SkulkError::SshFailed("can't find pane: skulk-nope".to_string());
-        let result = classify_agent_error("nope", err, "testhost");
-        match result {
-            SkulkError::NotFound(msg) => {
-                assert!(msg.contains("nope"));
-                assert!(msg.contains("not found"));
-            }
-            other => panic!("expected NotFound, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("nope", err, "testhost"));
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("nope"));
+            assert!(msg.contains("not found"));
+        });
     }
 
     #[test]
     fn classify_agent_error_ssh_error_passthrough() {
         let err = SkulkError::SshFailed("Connection timed out".to_string());
-        let result = classify_agent_error("baz", err, "testhost");
-        match result {
-            SkulkError::Diagnostic { message, .. } => {
-                assert!(message.contains("timed out"));
-            }
-            other => panic!("expected Diagnostic, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("baz", err, "testhost"));
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("timed out"));
+        });
     }
 
     #[test]
     fn classify_agent_error_non_ssh_passthrough() {
         let err = SkulkError::Validation("bad name".to_string());
-        let result = classify_agent_error("whatever", err, "testhost");
-        match result {
-            SkulkError::Validation(msg) => {
-                assert_eq!(msg, "bad name");
-            }
-            other => panic!("expected Validation passthrough, got: {other}"),
-        }
+        let result: Result<(), _> = Err(classify_agent_error("whatever", err, "testhost"));
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert_eq!(msg, "bad name");
+        });
     }
 
     #[test]

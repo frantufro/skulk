@@ -130,29 +130,24 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_inventory, test_config};
-    use std::collections::HashMap;
+    use crate::testutil::{
+        MockSsh, make_inventory, mock_inventory, mock_inventory_single_agent, ssh_ok, test_config,
+    };
 
     #[test]
     fn gc_find_orphans_no_orphans() {
-        let mut worktrees = HashMap::new();
-        worktrees.insert("skulk-task1".to_string(), "/path/skulk-task1".to_string());
-        let inv = AgentInventory {
-            sessions: vec!["skulk-task1".to_string()],
-            worktrees,
-            branches: vec!["skulk-task1".to_string()],
-        };
+        let inv = make_inventory(
+            &["skulk-task1"],
+            &[("skulk-task1", "/path/skulk-task1")],
+            &["skulk-task1"],
+        );
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.is_empty());
     }
 
     #[test]
     fn gc_find_orphans_orphaned_session() {
-        let inv = AgentInventory {
-            sessions: vec!["skulk-ghost".to_string()],
-            worktrees: HashMap::new(),
-            branches: vec![],
-        };
+        let inv = make_inventory(&["skulk-ghost"], &[], &[]);
         let orphans = gc_find_orphans(&inv);
         assert_eq!(orphans.sessions, vec!["skulk-ghost"]);
         assert!(orphans.worktrees.is_empty());
@@ -163,13 +158,7 @@ mod tests {
     fn gc_find_orphans_orphaned_worktree() {
         // Truly dangling: worktree directory tracked by git but with no matching
         // branch (e.g. after a manual `git branch -D`). Still safe to reap.
-        let mut worktrees = HashMap::new();
-        worktrees.insert("skulk-stale".to_string(), "/path/skulk-stale".to_string());
-        let inv = AgentInventory {
-            sessions: vec![],
-            worktrees,
-            branches: vec![],
-        };
+        let inv = make_inventory(&[], &[("skulk-stale", "/path/skulk-stale")], &[]);
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.sessions.is_empty());
         assert_eq!(orphans.worktrees, vec!["skulk-stale"]);
@@ -180,16 +169,11 @@ mod tests {
     fn gc_find_orphans_archived_agent_not_reaped() {
         // Archived state: worktree + branch present, session killed. Must be
         // preserved so `skulk restart` can resume the agent.
-        let mut worktrees = HashMap::new();
-        worktrees.insert(
-            "skulk-archived".to_string(),
-            "/path/skulk-archived".to_string(),
+        let inv = make_inventory(
+            &[],
+            &[("skulk-archived", "/path/skulk-archived")],
+            &["skulk-archived"],
         );
-        let inv = AgentInventory {
-            sessions: vec![],
-            worktrees,
-            branches: vec!["skulk-archived".to_string()],
-        };
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.sessions.is_empty());
         assert!(
@@ -204,11 +188,7 @@ mod tests {
 
     #[test]
     fn gc_find_orphans_orphaned_branch() {
-        let inv = AgentInventory {
-            sessions: vec![],
-            worktrees: HashMap::new(),
-            branches: vec!["skulk-leftover".to_string()],
-        };
+        let inv = make_inventory(&[], &[], &["skulk-leftover"]);
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.sessions.is_empty());
         assert!(orphans.worktrees.is_empty());
@@ -217,21 +197,15 @@ mod tests {
 
     #[test]
     fn gc_find_orphans_mixed() {
-        let mut worktrees = HashMap::new();
-        worktrees.insert(
-            "skulk-healthy".to_string(),
-            "/path/skulk-healthy".to_string(),
+        // `skulk-stale-wt` has no branch listed -- truly dangling, not archived.
+        let inv = make_inventory(
+            &["skulk-healthy", "skulk-ghost-sess"],
+            &[
+                ("skulk-healthy", "/path/skulk-healthy"),
+                ("skulk-stale-wt", "/path/skulk-stale-wt"),
+            ],
+            &["skulk-healthy"],
         );
-        worktrees.insert(
-            "skulk-stale-wt".to_string(),
-            "/path/skulk-stale-wt".to_string(),
-        );
-        let inv = AgentInventory {
-            sessions: vec!["skulk-healthy".to_string(), "skulk-ghost-sess".to_string()],
-            worktrees,
-            // `skulk-stale-wt` has no branch listed -- truly dangling, not archived.
-            branches: vec!["skulk-healthy".to_string()],
-        };
         let orphans = gc_find_orphans(&inv);
         assert_eq!(orphans.sessions, vec!["skulk-ghost-sess"]);
         assert_eq!(orphans.worktrees, vec!["skulk-stale-wt"]);
@@ -240,11 +214,7 @@ mod tests {
 
     #[test]
     fn gc_find_orphans_empty_inventory() {
-        let inv = AgentInventory {
-            sessions: vec![],
-            worktrees: HashMap::new(),
-            branches: vec![],
-        };
+        let inv = make_inventory(&[], &[], &[]);
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.is_empty());
         assert_eq!(orphans.total(), 0);
@@ -252,16 +222,11 @@ mod tests {
 
     #[test]
     fn gc_find_orphans_all_orphaned() {
-        let mut worktrees = HashMap::new();
-        worktrees.insert(
-            "skulk-wt-only".to_string(),
-            "/path/skulk-wt-only".to_string(),
+        let inv = make_inventory(
+            &["skulk-sess-only"],
+            &[("skulk-wt-only", "/path/skulk-wt-only")],
+            &["skulk-br-only"],
         );
-        let inv = AgentInventory {
-            sessions: vec!["skulk-sess-only".to_string()],
-            worktrees,
-            branches: vec!["skulk-br-only".to_string()],
-        };
         let orphans = gc_find_orphans(&inv);
         assert_eq!(orphans.sessions.len(), 1);
         assert_eq!(orphans.worktrees.len(), 1);
@@ -271,26 +236,22 @@ mod tests {
 
     #[test]
     fn gc_find_orphans_multiple_healthy_agents() {
-        let mut worktrees = HashMap::new();
-        worktrees.insert("skulk-a".to_string(), "/path/skulk-a".to_string());
-        worktrees.insert("skulk-b".to_string(), "/path/skulk-b".to_string());
-        worktrees.insert("skulk-c".to_string(), "/path/skulk-c".to_string());
-        let inv = AgentInventory {
-            sessions: vec!["skulk-a".into(), "skulk-b".into(), "skulk-c".into()],
-            worktrees,
-            branches: vec!["skulk-a".into(), "skulk-b".into(), "skulk-c".into()],
-        };
+        let inv = make_inventory(
+            &["skulk-a", "skulk-b", "skulk-c"],
+            &[
+                ("skulk-a", "/path/skulk-a"),
+                ("skulk-b", "/path/skulk-b"),
+                ("skulk-c", "/path/skulk-c"),
+            ],
+            &["skulk-a", "skulk-b", "skulk-c"],
+        );
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.is_empty());
     }
 
     #[test]
     fn gc_session_with_branch_not_orphaned() {
-        let inv = AgentInventory {
-            sessions: vec!["skulk-running".to_string()],
-            worktrees: HashMap::new(),
-            branches: vec!["skulk-running".to_string()],
-        };
+        let inv = make_inventory(&["skulk-running"], &[], &["skulk-running"]);
         let orphans = gc_find_orphans(&inv);
         assert!(orphans.sessions.is_empty());
         assert!(orphans.branches.is_empty());
@@ -306,11 +267,7 @@ mod tests {
     #[test]
     fn cmd_gc_clean_state() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(
-            &["skulk-healthy"],
-            &[("skulk-healthy", "/path/skulk-healthy")],
-            &["skulk-healthy"],
-        ))]);
+        let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-healthy"))]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
 
@@ -319,8 +276,8 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-ghost"], &[], &[])),
-            Ok(String::new()),
-            Ok(String::new()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -335,9 +292,9 @@ mod tests {
                 &[("skulk-stale", "/path/skulk-stale")],
                 &[],
             )),
-            Ok(String::new()),
-            Ok(String::new()),
-            Ok(String::new()),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -367,8 +324,8 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-leftover"])),
-            Ok(String::new()),
-            Ok(String::new()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -390,7 +347,7 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-ghost"], &[], &[])),
             Err(SkulkError::SshFailed("kill-session failed".into())),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -405,8 +362,8 @@ mod tests {
                 &[],
             )),
             Err(SkulkError::SshFailed("worktree remove failed".into())),
-            Ok(String::new()),
-            Ok(String::new()),
+            ssh_ok(),
+            ssh_ok(),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -417,7 +374,7 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-leftover"])),
             Err(SkulkError::SshFailed("branch delete failed".into())),
-            Ok(String::new()),
+            ssh_ok(),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
