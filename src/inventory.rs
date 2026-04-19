@@ -16,6 +16,101 @@ pub(crate) struct AgentInventory {
     pub branches: Vec<String>,
 }
 
+/// Lifecycle state of a Skulk agent.
+///
+/// `Attached` / `Detached` refer to the tmux session's `session_attached`
+/// flag: `Attached` means at least one client is connected. `Idle` supersedes
+/// both when the Stop-hook marker is newer than the session's last activity,
+/// signalling that the agent has finished its turn and is awaiting input.
+/// `Stopped` means the tmux session is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentState {
+    Attached,
+    Detached,
+    Idle,
+    Stopped,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Session {
+    pub name: String,
+    pub created: i64,
+    /// tmux `session_activity` epoch — last time any pane output changed.
+    pub activity: i64,
+    pub state: AgentState,
+    pub worktree: Option<String>,
+}
+
+/// Parse a raw tmux `list-sessions` output into `Session`s with an initial
+/// `Attached` or `Detached` state. Callers upgrade to `Idle` via
+/// [`resolve_agent_state`] once the Stop-hook mtime is known.
+pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
+    raw.lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 4 {
+                return None;
+            }
+            let created = parts[1].parse::<i64>().ok()?;
+            let activity = parts[2].parse::<i64>().ok()?;
+            let state = if parts[3] == "0" {
+                AgentState::Detached
+            } else {
+                AgentState::Attached
+            };
+            Some(Session {
+                name: parts[0].to_string(),
+                created,
+                activity,
+                state,
+                worktree: None,
+            })
+        })
+        .collect()
+}
+
+/// Upgrade a live session's state to `Idle` when the Stop-hook marker is at
+/// least as recent as the tmux activity timestamp. `Stopped` is preserved.
+///
+/// The Stop hook fires just after Claude writes its last output, so when idle
+/// `state_mtime >= activity`. When Claude resumes, new output bumps `activity`
+/// above `state_mtime` until the next turn ends.
+pub(crate) fn resolve_agent_state(
+    state: &AgentState,
+    activity: i64,
+    state_mtime: Option<i64>,
+) -> AgentState {
+    if *state == AgentState::Stopped {
+        return AgentState::Stopped;
+    }
+    match state_mtime {
+        Some(m) if m >= activity => AgentState::Idle,
+        _ => state.clone(),
+    }
+}
+
+/// Orphaned resources identified by gc.
+#[derive(Debug, Clone)]
+pub(crate) struct GcOrphans {
+    /// tmux sessions with session prefix but no matching worktree
+    pub sessions: Vec<String>,
+    /// worktrees with session prefix but no matching tmux session
+    pub worktrees: Vec<String>,
+    /// branches with session prefix but no matching session or worktree
+    pub branches: Vec<String>,
+}
+
+impl GcOrphans {
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.worktrees.is_empty() && self.branches.is_empty()
+    }
+
+    pub fn total(&self) -> usize {
+        self.sessions.len() + self.worktrees.len() + self.branches.len()
+    }
+}
+
 /// Parse `git worktree list --porcelain` output into a map of `branch_name` -> `worktree_path`.
 /// Only includes branches matching the configured session prefix.
 ///
@@ -113,6 +208,106 @@ pub(crate) fn fetch_inventory(ssh: &impl Ssh, cfg: &Config) -> Result<AgentInven
 mod tests {
     use super::*;
     use crate::testutil::test_config;
+
+    // ── parse_sessions ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_sessions_single_line() {
+        let raw = "skulk-test\t1700000000\t1700000100\t0\n";
+        let sessions = parse_sessions(raw);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "skulk-test");
+        assert_eq!(sessions[0].created, 1700000000);
+        assert_eq!(sessions[0].activity, 1700000100);
+        assert_eq!(sessions[0].state, AgentState::Detached);
+        assert!(sessions[0].worktree.is_none());
+    }
+
+    #[test]
+    fn parse_sessions_empty_input() {
+        let sessions = parse_sessions("");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_sessions_malformed_skipped() {
+        let sessions = parse_sessions("bad\tdata");
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_sessions_multiple_lines() {
+        let raw = "skulk-a\t1\t2\t0\nskulk-b\t3\t4\t1\n";
+        let sessions = parse_sessions(raw);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].state, AgentState::Detached);
+        assert_eq!(sessions[1].state, AgentState::Attached);
+    }
+
+    // ── resolve_agent_state ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_agent_state_stopped_when_session_gone() {
+        assert_eq!(
+            resolve_agent_state(&AgentState::Stopped, 0, None),
+            AgentState::Stopped
+        );
+        assert_eq!(
+            resolve_agent_state(&AgentState::Stopped, 1000, Some(2000)),
+            AgentState::Stopped
+        );
+    }
+
+    #[test]
+    fn resolve_agent_state_preserves_live_state_without_marker() {
+        assert_eq!(
+            resolve_agent_state(&AgentState::Detached, 1000, None),
+            AgentState::Detached
+        );
+        assert_eq!(
+            resolve_agent_state(&AgentState::Attached, 1000, None),
+            AgentState::Attached
+        );
+    }
+
+    #[test]
+    fn resolve_agent_state_idle_when_mtime_ge_activity() {
+        assert_eq!(
+            resolve_agent_state(&AgentState::Detached, 1000, Some(1000)),
+            AgentState::Idle
+        );
+        assert_eq!(
+            resolve_agent_state(&AgentState::Attached, 1000, Some(1005)),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn resolve_agent_state_working_when_activity_after_mtime() {
+        assert_eq!(
+            resolve_agent_state(&AgentState::Detached, 2000, Some(1000)),
+            AgentState::Detached
+        );
+        assert_eq!(
+            resolve_agent_state(&AgentState::Attached, 2000, Some(1000)),
+            AgentState::Attached
+        );
+    }
+
+    // ── GcOrphans ───────────────────────────────────────────────────────
+
+    #[test]
+    fn gc_orphans_total() {
+        let orphans = GcOrphans {
+            sessions: vec!["a".into()],
+            worktrees: vec!["b".into(), "c".into()],
+            branches: vec!["d".into()],
+        };
+        assert_eq!(orphans.total(), 4);
+        assert!(!orphans.is_empty());
+    }
+
+    // ── worktree map / inventory ────────────────────────────────────────
 
     #[test]
     fn worktree_map_parses_agent_entries() {

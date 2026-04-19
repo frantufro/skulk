@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::config::Config;
-use crate::display::{
-    IdleState, Session, SessionState, derive_idle_state, format_sessions_table, parse_sessions,
-};
+use crate::display::format_sessions_table;
 use crate::error::{SkulkError, is_tmux_no_server};
-use crate::inventory::get_worktree_map;
+use crate::inventory::{
+    AgentState, Session, get_worktree_map, parse_sessions, resolve_agent_state,
+};
 use crate::ssh::Ssh;
 use crate::util::extract_section;
 
@@ -84,10 +84,10 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     let state_raw = extract_section(raw, "__STATE_START__\n", "\n__STATE_END__");
     let state_map = parse_state_map(state_raw);
 
-    // Join worktree paths and compute idle state for each live session
+    // Join worktree paths and upgrade live sessions to Idle when appropriate.
     for session in &mut sessions {
         session.worktree = worktree_map.get(&session.name).cloned();
-        session.idle = derive_idle_state(
+        session.state = resolve_agent_state(
             &session.state,
             session.activity,
             state_map.get(&session.name).copied(),
@@ -101,8 +101,7 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
                 name: name.clone(),
                 created: 0,
                 activity: 0,
-                state: SessionState::Stopped,
-                idle: IdleState::Stopped,
+                state: AgentState::Stopped,
                 worktree: Some(path.clone()),
             });
         }
@@ -121,7 +120,6 @@ pub(crate) fn cmd_list(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::{IdleState, SessionState};
     use crate::testutil::{MockSsh, mock_list_output, mock_list_output_with_state, test_config};
 
     #[test]
@@ -157,11 +155,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_list_output_defaults_idle_to_working_without_state_file() {
+    fn parse_list_output_keeps_detached_state_without_state_file() {
         let cfg = test_config();
         let raw = mock_list_output(1_700_000_000, "skulk-test\t1700000000\t1700000100\t0", &[]);
         let (sessions, _) = parse_list_output(&raw, &cfg);
-        assert_eq!(sessions[0].idle, IdleState::Working);
+        assert_eq!(sessions[0].state, AgentState::Detached);
     }
 
     #[test]
@@ -175,11 +173,11 @@ mod tests {
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].idle, IdleState::Idle);
+        assert_eq!(sessions[0].state, AgentState::Idle);
     }
 
     #[test]
-    fn parse_list_output_marks_working_when_activity_after_state_mtime() {
+    fn parse_list_output_keeps_detached_when_activity_after_state_mtime() {
         let cfg = test_config();
         let raw = mock_list_output_with_state(
             1_700_000_200,
@@ -189,11 +187,11 @@ mod tests {
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].idle, IdleState::Working);
+        assert_eq!(sessions[0].state, AgentState::Detached);
     }
 
     #[test]
-    fn parse_list_output_stopped_session_has_stopped_idle() {
+    fn parse_list_output_stopped_session_stays_stopped() {
         let cfg = test_config();
         let raw = mock_list_output(
             1_700_000_000,
@@ -201,7 +199,7 @@ mod tests {
             &[("skulk-zombie", "/home/user/agents/skulk-zombie")],
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
-        assert_eq!(sessions[0].idle, IdleState::Stopped);
+        assert_eq!(sessions[0].state, AgentState::Stopped);
     }
 
     #[test]
@@ -280,7 +278,7 @@ mod tests {
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "skulk-zombie");
-        assert_eq!(sessions[0].state, SessionState::Stopped);
+        assert_eq!(sessions[0].state, AgentState::Stopped);
         assert_eq!(
             sessions[0].worktree.as_deref(),
             Some("/home/user/agents/skulk-zombie")
@@ -290,7 +288,7 @@ mod tests {
     #[test]
     fn parse_list_output_does_not_duplicate_matched_worktrees() {
         let cfg = test_config();
-        // Session AND worktree both exist — should appear once as Running, not also as Stopped
+        // Session AND worktree both exist — should appear once as Detached, not also as Stopped
         let raw = mock_list_output(
             1_700_000_000,
             "skulk-test\t1700000000\t1700000100\t0",
@@ -298,7 +296,7 @@ mod tests {
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].state, SessionState::Running);
+        assert_eq!(sessions[0].state, AgentState::Detached);
     }
 
     #[test]
