@@ -1,6 +1,30 @@
 use std::io::BufRead;
 
+use crate::config::Config;
 use crate::error::SkulkError;
+use crate::ssh::Ssh;
+
+/// Verify the remote base clone exists (`{base_path}/.git` directory present).
+///
+/// Each caller supplies its own `Validation` message via `missing_msg` because
+/// `skulk pull` and `skulk new` guide the user toward different next steps when
+/// the clone is absent.
+///
+/// `SshFailed` is interpreted as "directory missing" (the `test -d` command
+/// returned non-zero). Other errors — connectivity, auth, DNS — are propagated
+/// unchanged so the user sees the real cause.
+pub(crate) fn check_base_clone(
+    ssh: &impl Ssh,
+    cfg: &Config,
+    missing_msg: impl FnOnce() -> String,
+) -> Result<(), SkulkError> {
+    let base_path = &cfg.base_path;
+    match ssh.run(&format!("test -d {base_path}/.git && echo exists")) {
+        Ok(_) => Ok(()),
+        Err(SkulkError::SshFailed(_)) => Err(SkulkError::Validation(missing_msg())),
+        Err(e) => Err(e),
+    }
+}
 
 /// Validate a Claude model identifier: `[A-Za-z0-9._-]`, 1-64 chars.
 ///

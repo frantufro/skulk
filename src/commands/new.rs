@@ -6,7 +6,7 @@ use crate::config::{Config, DEFAULT_INIT_SCRIPT};
 use crate::error::SkulkError;
 use crate::inventory::{inventory_command, parse_inventory};
 use crate::ssh::Ssh;
-use crate::util::{shell_escape, validate_model, validate_name};
+use crate::util::{check_base_clone, shell_escape, validate_model, validate_name};
 
 const STARTUP_DELAY: u32 = 5;
 
@@ -277,15 +277,11 @@ pub(crate) fn cmd_new(
     }
 
     // Step 1: Check base clone exists
-    match ssh.run(&format!("test -d {base_path}/.git && echo exists")) {
-        Ok(_) => {}
-        Err(SkulkError::SshFailed(_)) => {
-            return Err(SkulkError::Validation(format!(
-                "Base clone not found at {base_path} on {host}. Run `skulk pull` or clone manually."
-            )));
-        }
-        Err(e) => return Err(e),
-    }
+    check_base_clone(ssh, cfg, || {
+        format!(
+            "Base clone not found at {base_path} on {host}. Run `skulk pull` or clone manually."
+        )
+    })?;
 
     // Step 2: Fetch inventory and check uniqueness
     let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);

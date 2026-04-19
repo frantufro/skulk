@@ -1,22 +1,18 @@
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
+use crate::util::check_base_clone;
 
 pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
     let host = &cfg.host;
     let default_branch = &cfg.default_branch;
-    // Check if the base clone directory exists and is a git repo
-    match ssh.run(&format!("test -d {base_path}/.git && echo exists")) {
-        Ok(_) => {} // Directory exists and is a git repo
-        Err(SkulkError::SshFailed(_)) => {
-            return Err(SkulkError::Validation(format!(
-                "Base clone not found at {base_path} on {host}.\n\
-                 Set it up with: ssh {host} 'git clone <your-repo-url> {base_path}'"
-            )));
-        }
-        Err(e) => return Err(e), // SSH connectivity issue — propagate
-    }
+    check_base_clone(ssh, cfg, || {
+        format!(
+            "Base clone not found at {base_path} on {host}.\n\
+             Set it up with: ssh {host} 'git clone <your-repo-url> {base_path}'"
+        )
+    })?;
 
     if force {
         eprintln!("Warning: This will discard any local changes on {host}.");
