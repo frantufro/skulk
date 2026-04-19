@@ -80,3 +80,11 @@ worktree_base = "~/your-project-worktrees"
 ## Preferred Crates
 
 `serde`, `clap`, `thiserror`, `toml`
+
+## Agent Status Checks
+
+When asked to check the status of running skulk agents, **always spawn a
+subagent** to do the work. The subagent should run `skulk list` and
+`skulk logs <name> --lines 5` for each agent, then return a concise summary
+table (agent name, status, what it's doing). This keeps raw log output out
+of the main conversation context.
