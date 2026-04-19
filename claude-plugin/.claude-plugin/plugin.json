@@ -1,0 +1,12 @@
+{
+  "name": "skulk",
+  "description": "Manage a fleet of remote Claude Code agents over SSH with skulk. Create, monitor, review, and ship parallel coding agents, each isolated in its own git worktree.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Fran Tufro"
+  },
+  "homepage": "https://github.com/frantufro/skulk",
+  "repository": "https://github.com/frantufro/skulk",
+  "license": "MIT",
+  "keywords": ["agents", "ssh", "tmux", "worktree", "parallel", "remote"]
+}
