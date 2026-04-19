@@ -17,7 +17,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    destroy, doctor, gc, interact, list, new, prompt_source, pull, restart, ship, wait,
+    destroy, doctor, gc, interact, list, new, prompt_source, pull, restart, ship, status, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -280,6 +280,16 @@ pub(crate) enum Commands {
         output: Option<std::path::PathBuf>,
     },
 
+    /// Show detailed status for a single agent
+    ///
+    /// Fleet view is `skulk list`; this is the deep look — state, uptime,
+    /// branch, commits ahead of the default branch, diff summary, and
+    /// worktree path, all from a single SSH roundtrip.
+    Status {
+        /// Agent name
+        name: String,
+    },
+
     /// Block until an agent has finished its current turn
     ///
     /// Polls a marker file maintained by Claude Code `Stop` and
@@ -324,6 +334,7 @@ impl Commands {
             Commands::Restart { .. } => "restart",
             Commands::GitLog { .. } => "git-log",
             Commands::Ship { .. } => "ship",
+            Commands::Status { .. } => "status",
             Commands::Transcript { .. } => "transcript",
             Commands::Wait { .. } => "wait",
         }
@@ -421,6 +432,7 @@ pub(crate) fn run(
         Commands::Restart { name } => restart::cmd_restart(ssh, &name, cfg),
         Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
         Commands::Ship { name } => ship::cmd_ship(ssh, &name, cfg),
+        Commands::Status { name } => status::cmd_status(ssh, &name, cfg),
         Commands::Transcript { name, output } => {
             interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
         }
@@ -450,7 +462,7 @@ mod tests {
     use super::*;
     use crate::testutil::{
         MockSsh, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
-        mock_list_output, ssh_ok, test_config,
+        mock_list_output, mock_status_output, ssh_ok, test_config,
     };
 
     fn confirm_yes(_: &str) -> bool {
@@ -930,6 +942,27 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::Ship {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_status() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(mock_status_output(
+            1_700_000_200,
+            "skulk-test\t1700000000\t1700000100\t0",
+            &[("skulk-test", "/wt/skulk-test")],
+            true,
+            Some(1_700_000_150),
+            Some(1),
+            " 1 file changed, 5 insertions(+)",
+        ))]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Status {
                 name: "test".into(),
             },
         };
