@@ -1,6 +1,6 @@
 use crate::commands::new::agent_create_tmux_command;
 use crate::config::Config;
-use crate::error::SkulkError;
+use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::{inventory_command, parse_inventory};
 use crate::ssh::Ssh;
 use crate::util::validate_name;
@@ -33,7 +33,8 @@ pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
         )));
     }
 
-    ssh.run(&agent_create_tmux_command(name, cfg, false))?;
+    ssh.run(&agent_create_tmux_command(name, cfg, false))
+        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
 
     println!(
         "Agent '{name}' restarted.\n\
@@ -199,5 +200,29 @@ mod tests {
         })]);
         let result = cmd_restart(&ssh, "task", &cfg);
         assert!(matches!(result, Err(SkulkError::Diagnostic { .. })));
+    }
+
+    #[test]
+    fn cmd_restart_classifies_tmux_connection_error() {
+        // A transient SSH error during tmux-create must be upgraded to a
+        // Diagnostic (friendly message) via `classify_agent_error`, not leak
+        // as raw SshFailed. Mirrors the classification applied elsewhere in
+        // the command surface.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            Err(SkulkError::SshFailed("Connection timed out".into())),
+        ]);
+        let result = cmd_restart(&ssh, "task", &cfg);
+        match result.unwrap_err() {
+            SkulkError::Diagnostic { message, .. } => {
+                assert!(message.to_lowercase().contains("timed out"));
+            }
+            other => panic!("expected Diagnostic, got: {other}"),
+        }
     }
 }
