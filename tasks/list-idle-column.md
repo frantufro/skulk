@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: b6ea743
 ---
 
 Enrich `skulk list` output with an IDLE column.

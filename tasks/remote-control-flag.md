@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: 67a9384
 ---
 
 Make Claude Code's `--remote-control` flag **opt-in** on `skulk new` (currently always on).

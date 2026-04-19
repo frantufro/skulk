@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: cb51c8e
 ---
 
 Add `skulk wait <name>` (and `--all`) — block until the agent is idle (finished current turn, ready for next input).

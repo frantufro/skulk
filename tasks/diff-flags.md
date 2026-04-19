@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: 0050e20
 ---
 
 Add output-mode flags to `skulk diff <name>` — passthrough to `git diff`.

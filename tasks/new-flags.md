@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: fb3fc2b
 ---
 
 Add `--model <name>` and `--claude-args "..."` flags to `skulk new` — pass-through to the Claude Code launch command.

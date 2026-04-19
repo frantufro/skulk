@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: 3555d2d
 ---
 
 Add `skulk ship <name>` — push the agent's branch and open a PR with a **Claude-authored PR description** (not manual).

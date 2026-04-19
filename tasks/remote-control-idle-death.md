@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: fde7c66
 ---
 
 Document the `--remote-control` idle-death limitation in the README.

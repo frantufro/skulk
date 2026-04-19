@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: 220bf54
 ---
 
 Add `skulk git-log <name>` — run `git log <default_branch>..{session_prefix}<name> --oneline` on the remote.

@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: f78a744
 ---
 
 Restructure project config into a `.skulk/` directory.

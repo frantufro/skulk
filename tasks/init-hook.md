@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: b604220
 ---
 
 Add a pre-launch hook script that runs inside the agent's tmux session before Claude Code starts. Use case: setting up the project environment per agent (docker compose up, migrations, dependency installs, mock services, env sourcing, etc.).

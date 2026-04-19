@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: c9173de
 ---
 
 Add `skulk push <name>` — push the `{session_prefix}<name>` branch to `origin` via SSH.

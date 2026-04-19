@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: b03ba11
 ---
 
 Add `skulk restart <name>` — spin up a fresh tmux session in an existing worktree (archived, crashed, or stopped agent).

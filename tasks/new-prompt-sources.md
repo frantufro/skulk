@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: dc19793
 ---
 
 Add two new flags to `skulk new` for loading the initial prompt from external sources:

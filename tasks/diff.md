@@ -1,5 +1,5 @@
 ---
-status: READY
+status: DONE
 ---
 
 Add `skulk diff <name>` — show `git diff <default_branch>...{session_prefix}<name>` on the remote.

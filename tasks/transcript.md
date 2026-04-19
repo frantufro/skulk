@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: 233bb87
 ---
 
 Add `skulk transcript <name>` — dump the full tmux scrollback to stdout (or to a file via `--output <path>`).

@@ -1,5 +1,6 @@
 ---
-status: READY
+status: DONE
+implemented: 18d120c
 ---
 
 Add `skulk archive <name>` — kill the agent's tmux session but keep the worktree and branch intact.

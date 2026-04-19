@@ -1,6 +1,6 @@
 ---
-status: BLOCKED
-blocked_on: all subcommands (push, archive, git-log, transcript, diff-flags, remote-control-flag, ship, wait, restart, new-flags, new-prompt-sources, init-hook, skulk-directory)
+status: READY
+unblocked: all subcommands are now implemented
 ---
 
 Build a Claude Code plugin (or skill bundle) that teaches Claude how to use skulk.
