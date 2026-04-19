@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, gc, interact, list, new, pull, restart, ship, wait};
+use commands::{destroy, doctor, gc, interact, list, new, pull, restart, ship, wait};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -127,6 +127,14 @@ pub(crate) enum Commands {
     /// the remote server (install tools, clone repo, create worktree dir).
     /// Run this first in any new project.
     Init,
+
+    /// Verify the runtime environment is correctly set up
+    ///
+    /// Runs a sequence of pass/fail checks against the local config and the
+    /// remote host (SSH connectivity, tmux, claude, gh, base clone, worktree
+    /// directory). Useful for debugging setup issues without re-running
+    /// `skulk init`. Exits non-zero if any check fails.
+    Doctor,
 
     /// Clean up orphaned tmux sessions, worktrees, and branches
     ///
@@ -287,6 +295,7 @@ impl Commands {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Commands::Init => "init",
+            Commands::Doctor => "doctor",
             Commands::List => "list",
             Commands::Pull { .. } => "pull",
             Commands::New { .. } => "new",
@@ -331,6 +340,7 @@ pub(crate) fn run(
 
     let result = match cli.command {
         Commands::Init => unreachable!(),
+        Commands::Doctor => doctor::cmd_doctor(ssh, cfg),
         Commands::List => list::cmd_list(ssh, cfg),
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
         Commands::New {
@@ -892,6 +902,24 @@ mod tests {
     fn wait_accepts_all_flag_only() {
         let result = Cli::try_parse_from(["skulk", "wait", "--all"]);
         assert!(result.is_ok(), "expected parse success");
+    }
+
+    #[test]
+    fn run_dispatches_doctor() {
+        let cfg = test_config();
+        // Single SSH roundtrip — all checks pass.
+        let probe = "tmux:installed:tmux 3.3a\n\
+                     claude:installed:1.2.0\n\
+                     gh:installed:gh version 2.40.1\n\
+                     gh-auth:yes\n\
+                     base:exists\n\
+                     worktree:exists\n";
+        let ssh = MockSsh::new(vec![Ok(probe.into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Doctor,
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
