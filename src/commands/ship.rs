@@ -8,10 +8,52 @@ use crate::util::validate_name;
 /// Build the SSH command that verifies `gh` and `claude` exist on the remote.
 ///
 /// Both are hard requirements for `skulk ship`: `gh` opens the PR and `claude`
-/// authors the description. Returning a non-zero exit lets the caller diagnose
-/// either as missing without parsing stderr.
+/// authors the description. Prepends `$HOME/.local/bin` to PATH so Claude
+/// Code's default Linux install location is discoverable — non-login SSH does
+/// not source `~/.profile` / `~/.bash_profile`, so user-level PATH additions
+/// defined there are absent by default. Matches the PATH the agent's tmux
+/// session (a login shell) already sees and `skulk doctor`'s probe.
+///
+/// Emits a space-separated list of missing tool names on stdout (empty if
+/// both present) and always exits 0, so the caller can report exactly which
+/// tool is missing instead of conflating the two.
 pub(crate) fn precheck_command() -> String {
-    "command -v gh > /dev/null 2>&1 && command -v claude > /dev/null 2>&1".to_string()
+    "PATH=\"$HOME/.local/bin:$PATH\"; \
+     missing=; \
+     command -v gh > /dev/null 2>&1 || missing=\"${missing:+$missing }gh\"; \
+     command -v claude > /dev/null 2>&1 || missing=\"${missing:+$missing }claude\"; \
+     printf '%s' \"$missing\""
+        .to_string()
+}
+
+/// Build the human-readable diagnostic for a precheck that reports missing tools.
+///
+/// `missing` is the space-separated list of tool names emitted by
+/// `precheck_command`. Lists exactly which tool(s) are absent — no "and/or"
+/// hedging — and suggests the install command for each.
+pub(crate) fn missing_tools_diagnostic(missing: &str, host: &str) -> SkulkError {
+    let tools: Vec<&str> = missing.split_whitespace().collect();
+    let joined = match tools.as_slice() {
+        [one] => (*one).to_string(),
+        [a, b] => format!("{a} and {b}"),
+        _ => tools.join(", "),
+    };
+    let mut suggestions: Vec<String> = Vec::with_capacity(tools.len());
+    for tool in &tools {
+        match *tool {
+            "gh" => suggestions.push(format!(
+                "Install GitHub CLI on {host} (https://cli.github.com) and ensure it is on PATH for non-login shells."
+            )),
+            "claude" => suggestions.push(format!(
+                "Install Claude Code on {host} (https://docs.claude.com/en/docs/claude-code/setup). If it is already installed at ~/.local/bin/claude, ensure that directory is on PATH for non-login shells (e.g. add it in ~/.bashrc)."
+            )),
+            _ => {}
+        }
+    }
+    SkulkError::Diagnostic {
+        message: format!("{joined} not installed on {host} (or not on PATH for non-login SSH)."),
+        suggestion: suggestions.join(" "),
+    }
 }
 
 /// Prompt sent to `claude -p` to author the PR description from a piped diff.
@@ -42,6 +84,7 @@ pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
     let prompt = DESCRIPTION_PROMPT;
     format!(
         "set -e; set -o pipefail; \
+         PATH=\"$HOME/.local/bin:$PATH\"; \
          cd {base_path}; \
          T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; \
          git diff {default_branch}...{branch} | claude -p '{prompt}' > \"$T/desc\"; \
@@ -71,15 +114,10 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     let host = &cfg.host;
     let agent = AgentRef::new(name, cfg);
 
-    ssh.run(&precheck_command()).map_err(|e| match e {
-        SkulkError::SshFailed(_) => SkulkError::Diagnostic {
-            message: format!("`gh` and/or `claude` not installed on {host}."),
-            suggestion: format!(
-                "Install both on {host}: GitHub CLI (https://cli.github.com) and Claude Code (https://docs.claude.com/en/docs/claude-code/setup)."
-            ),
-        },
-        other => other,
-    })?;
+    let missing = ssh.run(&precheck_command())?;
+    if !missing.is_empty() {
+        return Err(missing_tools_diagnostic(&missing, host));
+    }
 
     ssh.run(&push_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, host))?;
@@ -115,6 +153,62 @@ mod tests {
         assert!(cmd.contains("> /dev/null 2>&1"));
     }
 
+    #[test]
+    fn precheck_command_prepends_local_bin_to_path() {
+        // ~/.local/bin is Claude Code's default install location on Linux.
+        // Non-login SSH does not source ~/.profile, so without this prefix
+        // `command -v claude` misses installations there.
+        let cmd = precheck_command();
+        assert!(
+            cmd.contains("PATH=\"$HOME/.local/bin:$PATH\""),
+            "precheck must prepend ~/.local/bin to PATH: {cmd}"
+        );
+    }
+
+    #[test]
+    fn precheck_command_emits_missing_tools_to_stdout() {
+        let cmd = precheck_command();
+        assert!(
+            cmd.contains("printf '%s' \"$missing\""),
+            "precheck must print the missing-tools list to stdout: {cmd}"
+        );
+    }
+
+    // ── missing_tools_diagnostic ──────────────────────────────────────────
+
+    #[test]
+    fn missing_tools_diagnostic_names_single_tool() {
+        let err = missing_tools_diagnostic("claude", "bluebubble");
+        assert_err!(Err::<(), _>(err), SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("claude"));
+            assert!(!message.contains("gh"));
+            assert!(message.contains("bluebubble"));
+            assert!(suggestion.contains("claude"));
+        });
+    }
+
+    #[test]
+    fn missing_tools_diagnostic_names_both_tools() {
+        let err = missing_tools_diagnostic("gh claude", "bluebubble");
+        assert_err!(Err::<(), _>(err), SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("gh"));
+            assert!(message.contains("claude"));
+            assert!(message.contains("and"));
+            assert!(suggestion.contains("cli.github.com"));
+            assert!(suggestion.contains("claude"));
+        });
+    }
+
+    #[test]
+    fn missing_tools_diagnostic_mentions_path_in_suggestion() {
+        // Claude Code installs to ~/.local/bin by default on Linux; the fix
+        // must nudge the user toward adding that to non-login PATH.
+        let err = missing_tools_diagnostic("claude", "bluebubble");
+        assert_err!(Err::<(), _>(err), SkulkError::Diagnostic { suggestion, .. } => {
+            assert!(suggestion.contains(".local/bin") || suggestion.contains("PATH"));
+        });
+    }
+
     // ── ship_command ──────────────────────────────────────────────────────
 
     #[test]
@@ -122,6 +216,19 @@ mod tests {
         let cfg = test_config();
         let cmd = ship_command("feat", &cfg);
         assert!(cmd.contains(&format!("cd {}", cfg.base_path)));
+    }
+
+    #[test]
+    fn ship_command_prepends_local_bin_to_path() {
+        // The `claude -p` invocation needs the same PATH fix as precheck:
+        // without it, `claude` installed at ~/.local/bin is not found over
+        // non-login SSH even though precheck reported it present.
+        let cfg = test_config();
+        let cmd = ship_command("feat", &cfg);
+        assert!(
+            cmd.contains("PATH=\"$HOME/.local/bin:$PATH\""),
+            "ship_command must prepend ~/.local/bin to PATH: {cmd}"
+        );
     }
 
     #[test]
@@ -247,7 +354,7 @@ mod tests {
     fn cmd_ship_runs_precheck_push_then_ship_in_order() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            ssh_ok(),                                    // precheck
+            Ok(String::new()),                           // precheck: no missing tools
             ssh_ok(),                                    // push
             Ok("https://github.com/x/y/pull/42".into()), // gh pr create
         ]);
@@ -269,9 +376,36 @@ mod tests {
     }
 
     #[test]
-    fn cmd_ship_diagnoses_missing_gh_or_claude() {
+    fn cmd_ship_diagnoses_missing_claude_only() {
+        // Real-world case: gh lives in /usr/bin (found) but claude is at
+        // ~/.local/bin (not on non-login PATH). Error must name only claude,
+        // not "gh and/or claude".
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("exit code 127".into()))]);
+        let ssh = MockSsh::new(vec![Ok("claude".into())]);
+        let result = cmd_ship(&ssh, "feat", &cfg);
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(message.contains("claude"));
+            assert!(!message.contains("gh "));
+            assert!(!message.contains(" gh"));
+            assert!(suggestion.contains("claude"));
+        });
+    }
+
+    #[test]
+    fn cmd_ship_diagnoses_missing_gh_only() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("gh".into())]);
+        let result = cmd_ship(&ssh, "feat", &cfg);
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("gh"));
+            assert!(!message.contains("claude"));
+        });
+    }
+
+    #[test]
+    fn cmd_ship_diagnoses_both_missing() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("gh claude".into())]);
         let result = cmd_ship(&ssh, "feat", &cfg);
         assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
             assert!(message.contains("gh"));
@@ -282,7 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn cmd_ship_passes_through_non_ssh_failed_precheck_errors() {
+    fn cmd_ship_passes_through_precheck_ssh_errors() {
+        // SSH-level failures (connection timeouts, auth rejection, etc.)
+        // must surface as-is rather than be misreported as missing tools.
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::Diagnostic {
             message: "Connection timed out.".into(),
@@ -298,7 +434,7 @@ mod tests {
     fn cmd_ship_classifies_push_branch_not_found() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            ssh_ok(), // precheck OK
+            Ok(String::new()), // precheck OK (no missing tools)
             Err(SkulkError::SshFailed(
                 "error: src refspec skulk-nope does not match any".into(),
             )),
@@ -313,8 +449,8 @@ mod tests {
     fn cmd_ship_propagates_pr_creation_failure() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            ssh_ok(), // precheck OK
-            ssh_ok(), // push OK
+            Ok(String::new()), // precheck OK
+            ssh_ok(),          // push OK
             Err(SkulkError::SshFailed(
                 "a pull request for branch \"skulk-feat\" already exists".into(),
             )),
@@ -328,7 +464,7 @@ mod tests {
     #[test]
     fn cmd_ship_succeeds_with_empty_gh_output() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![ssh_ok(), ssh_ok(), ssh_ok()]);
+        let ssh = MockSsh::new(vec![Ok(String::new()), ssh_ok(), ssh_ok()]);
         assert!(cmd_ship(&ssh, "feat", &cfg).is_ok());
     }
 }
