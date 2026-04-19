@@ -39,6 +39,12 @@ Claude Code is great, but it works on one thing at a time. If you have a beefy d
 curl -sSL https://raw.githubusercontent.com/frantufro/skulk/main/install.sh | sh
 ```
 
+Or via Homebrew (macOS and Linux):
+
+```bash
+brew install frantufro/tap/skulk
+```
+
 Or build from source:
 
 ```bash
