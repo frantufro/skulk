@@ -6,3 +6,4 @@ pub(crate) mod list;
 pub(crate) mod new;
 pub(crate) mod pull;
 pub(crate) mod restart;
+pub(crate) mod ship;

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, gc, interact, list, new, pull, restart};
+use commands::{destroy, gc, interact, list, new, pull, restart, ship};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -221,6 +221,17 @@ pub(crate) enum Commands {
         name: String,
     },
 
+    /// Push an agent's branch and open a PR with a Claude-authored description
+    ///
+    /// Pushes `<session_prefix><name>` to `origin`, then opens a PR via `gh pr create`
+    /// with a description authored by `claude -p` from the diff against the default
+    /// branch. Requires `gh` and `claude` on the remote -- detected with a clean
+    /// diagnostic if either is missing.
+    Ship {
+        /// Agent name
+        name: String,
+    },
+
     /// Dump an agent's full tmux scrollback for archive or review
     ///
     /// Captures all available scrollback (bounded by tmux's history-limit).
@@ -266,6 +277,7 @@ pub(crate) fn run(
         Commands::Archive { .. } => "archive",
         Commands::Restart { .. } => "restart",
         Commands::GitLog { .. } => "git-log",
+        Commands::Ship { .. } => "ship",
         Commands::Transcript { .. } => "transcript",
     };
 
@@ -317,6 +329,7 @@ pub(crate) fn run(
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
         Commands::Restart { name } => restart::cmd_restart(ssh, &name, cfg),
         Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
+        Commands::Ship { name } => ship::cmd_ship(ssh, &name, cfg),
         Commands::Transcript { name, output } => {
             interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
         }
@@ -593,6 +606,23 @@ mod tests {
         let cli = Cli {
             no_color: true,
             command: Commands::GitLog {
+                name: "test".into(),
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_ship() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(String::new()),                          // precheck
+            Ok(String::new()),                          // push
+            Ok("https://github.com/x/y/pull/1".into()), // gh pr create
+        ]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Ship {
                 name: "test".into(),
             },
         };
