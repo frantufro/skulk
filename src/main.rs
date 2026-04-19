@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, gc, interact, list, new, pull, restart, ship};
+use commands::{destroy, gc, interact, list, new, prompt_source, pull, restart, ship};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -60,12 +60,25 @@ pub(crate) enum Commands {
     /// Create a new agent with worktree isolation
     ///
     /// Spins up a Claude Code instance in its own tmux session and git worktree.
-    /// Optionally sends an initial prompt to start working immediately.
+    /// Optionally loads an initial prompt from a GitHub issue (--github) or a
+    /// local text file (--from).
     New {
         /// Agent name (lowercase letters, digits, and hyphens only)
         name: String,
-        /// Initial prompt to send to the agent after startup
-        prompt: Option<String>,
+        /// Load initial prompt from a GitHub issue by number
+        ///
+        /// Fetches the issue (title, body, and all comments) via `gh` on the
+        /// remote, then wraps it into a prompt for the agent. Requires `gh`
+        /// installed and authenticated on the remote. Cross-repo syntax like
+        /// `owner/repo#123` is not supported yet.
+        #[arg(long, value_name = "ISSUE_ID", conflicts_with = "from")]
+        github: Option<String>,
+        /// Load initial prompt from a local text file
+        ///
+        /// Reads the file locally, wraps its contents into a prompt, and sends
+        /// it to the agent.
+        #[arg(long, value_name = "FILE")]
+        from: Option<std::path::PathBuf>,
         /// Launch Claude with --remote-control so the agent is reachable from the
         /// Claude Code mobile/web app. Off by default because it triggers an upstream
         /// idle-death bug; Skulk's own commands work via tmux directly.
@@ -287,19 +300,43 @@ pub(crate) fn run(
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
         Commands::New {
             name,
-            prompt,
+            github,
+            from,
             remote_control,
             model,
             claude_args,
-        } => new::cmd_new(
-            ssh,
-            &name,
-            prompt.as_deref(),
-            remote_control,
-            model.as_deref(),
-            claude_args.as_deref(),
-            cfg,
-        ),
+        } => {
+            let prompt = match (github.as_deref(), from.as_deref()) {
+                (None, None) => None,
+                (Some(id), None) => {
+                    let branch = format!("{}{name}", cfg.session_prefix);
+                    match prompt_source::load_github_prompt(ssh, id, &branch, cfg) {
+                        Ok(p) => Some(p),
+                        Err(e) => return Err(("new".to_string(), e)),
+                    }
+                }
+                (None, Some(path)) => {
+                    let branch = format!("{}{name}", cfg.session_prefix);
+                    match prompt_source::load_file_prompt(path, &branch) {
+                        Ok(p) => Some(p),
+                        Err(e) => return Err(("new".to_string(), e)),
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    // clap `conflicts_with` enforces this is unreachable via CLI parsing.
+                    unreachable!("--github and --from are mutually exclusive")
+                }
+            };
+            new::cmd_new(
+                ssh,
+                &name,
+                prompt.as_deref(),
+                remote_control,
+                model.as_deref(),
+                claude_args.as_deref(),
+                cfg,
+            )
+        }
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
         Commands::Gc { dry_run } => gc::cmd_gc(ssh, dry_run, cfg),
@@ -382,7 +419,8 @@ mod tests {
             no_color: true,
             command: Commands::New {
                 name: "test".into(),
-                prompt: None,
+                github: None,
+                from: None,
                 remote_control: false,
                 model: None,
                 claude_args: None,
@@ -505,6 +543,135 @@ mod tests {
             result.is_err(),
             "expected clap conflict error when both --stat and --name-only are passed"
         );
+    }
+
+    #[test]
+    fn new_github_and_from_are_mutually_exclusive() {
+        let result = Cli::try_parse_from([
+            "skulk", "new", "agent", "--github", "42", "--from", "/tmp/x",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected clap conflict error when both --github and --from are passed"
+        );
+    }
+
+    #[test]
+    fn new_no_longer_accepts_positional_prompt() {
+        // The old `skulk new <name> <prompt>` form is removed; extra positional args should error.
+        let result = Cli::try_parse_from(["skulk", "new", "agent", "fix the bug"]);
+        assert!(
+            result.is_err(),
+            "positional prompt should no longer be accepted; use --from or --github"
+        );
+    }
+
+    #[test]
+    fn new_accepts_github_flag() {
+        let cli = Cli::try_parse_from(["skulk", "new", "agent", "--github", "42"])
+            .expect("parsing --github should succeed");
+        match cli.command {
+            Commands::New { github, from, .. } => {
+                assert_eq!(github.as_deref(), Some("42"));
+                assert!(from.is_none());
+            }
+            _ => panic!("expected Commands::New"),
+        }
+    }
+
+    #[test]
+    fn new_accepts_from_flag() {
+        let cli = Cli::try_parse_from(["skulk", "new", "agent", "--from", "/tmp/task.txt"])
+            .expect("parsing --from should succeed");
+        match cli.command {
+            Commands::New { github, from, .. } => {
+                assert!(github.is_none());
+                assert_eq!(
+                    from.as_deref().and_then(|p| p.to_str()),
+                    Some("/tmp/task.txt")
+                );
+            }
+            _ => panic!("expected Commands::New"),
+        }
+    }
+
+    #[test]
+    fn run_dispatches_new_with_github_flag() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("SKULK_GH_OK".into()),
+            Ok(r#"{"title":"T","body":"B","comments":[]}"#.into()),
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::New {
+                name: "test".into(),
+                github: Some("42".into()),
+                from: None,
+                remote_control: false,
+                model: None,
+                claude_args: None,
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_new_with_from_flag() {
+        use std::io::Write;
+        let cfg = test_config();
+        let tmp = std::env::temp_dir().join("skulk_main_from_test.txt");
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        writeln!(f, "Do the thing.").unwrap();
+
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory(&[], &[], &[])),
+            Ok(String::new()),
+            Ok(String::new()),
+            Ok(String::new()),
+        ]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::New {
+                name: "test".into(),
+                github: None,
+                from: Some(tmp.clone()),
+                remote_control: false,
+                model: None,
+                claude_args: None,
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_new_propagates_gh_missing_error() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("SKULK_GH_MISSING".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::New {
+                name: "test".into(),
+                github: Some("42".into()),
+                from: None,
+                remote_control: false,
+                model: None,
+                claude_args: None,
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, Duration::ZERO);
+        assert!(result.is_err());
+        let (cmd, err) = result.unwrap_err();
+        assert_eq!(cmd, "new");
+        assert!(matches!(err, SkulkError::Diagnostic { .. }));
     }
 
     #[test]

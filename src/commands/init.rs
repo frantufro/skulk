@@ -314,7 +314,7 @@ pub(crate) fn setup_check_command(answers: &InitAnswers) -> String {
     let base_path = &answers.base_path;
     let worktree_base = &answers.worktree_base;
     format!(
-        "for tool in tmux git; do \
+        "for tool in tmux git gh; do \
             if command -v $tool >/dev/null 2>&1; then \
                 echo \"$tool:installed\"; \
             else \
@@ -356,6 +356,7 @@ pub(crate) fn setup_install_command(tool: &str) -> String {
     match tool {
         "tmux" => "sudo apt-get update -qq && sudo apt-get install -y -qq tmux".to_string(),
         "git" => "sudo apt-get update -qq && sudo apt-get install -y -qq git".to_string(),
+        "gh" => "sudo apt-get update -qq && sudo apt-get install -y -qq gh".to_string(),
         "claude" => "curl -fsSL https://claude.ai/install.sh | sh".to_string(),
         _ => format!("echo 'Unknown tool: {tool}'"),
     }
@@ -399,7 +400,7 @@ pub(crate) fn run_remote_setup(
     let status = parse_setup_status(&raw);
 
     // Step 3: Install missing tools
-    let tools = ["tmux", "git", "claude"];
+    let tools = ["tmux", "git", "gh", "claude"];
     for tool in &tools {
         let state = status.get(*tool).map_or("unknown", String::as_str);
         match state {
@@ -458,6 +459,17 @@ pub(crate) fn run_remote_setup(
         other => {
             eprintln!("  ? worktree dir: unexpected status ({other})");
         }
+    }
+
+    // Step 6: Nudge the user to authenticate gh if they plan to use `skulk new --github`.
+    // We don't run `gh auth login` here — it's interactive and may not be wanted.
+    let gh_state = status.get("gh").map_or("unknown", String::as_str);
+    if gh_state == "missing" || gh_state == "installed" {
+        eprintln!(
+            "  {} To use `skulk new --github <issue>`, authenticate gh on the remote:",
+            dim("note:", color)
+        );
+        eprintln!("     ssh -t {host} gh auth login");
     }
 
     Ok(())
@@ -844,6 +856,7 @@ mod tests {
         let cmd = setup_check_command(&answers);
         assert!(cmd.contains("tmux"));
         assert!(cmd.contains("git"));
+        assert!(cmd.contains("gh"));
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("~/project/.git"));
         assert!(cmd.contains("~/project-wt"));
@@ -851,10 +864,11 @@ mod tests {
 
     #[test]
     fn parse_setup_status_all_installed() {
-        let output =
-            "tmux:installed\ngit:installed\nclaude:installed\nrepo:cloned\nworktree-dir:exists\n";
+        let output = "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
+                      repo:cloned\nworktree-dir:exists\n";
         let status = parse_setup_status(output);
         assert_eq!(status.get("tmux").unwrap(), "installed");
+        assert_eq!(status.get("gh").unwrap(), "installed");
         assert_eq!(status.get("claude").unwrap(), "installed");
         assert_eq!(status.get("repo").unwrap(), "cloned");
     }
@@ -875,6 +889,12 @@ mod tests {
     fn setup_install_git() {
         let cmd = setup_install_command("git");
         assert!(cmd.contains("apt-get") && cmd.contains("git"));
+    }
+
+    #[test]
+    fn setup_install_gh() {
+        let cmd = setup_install_command("gh");
+        assert!(cmd.contains("apt-get") && cmd.contains("gh"));
     }
 
     #[test]
@@ -919,23 +939,26 @@ mod tests {
 
     #[test]
     fn remote_setup_all_installed() {
-        let ssh =
-            MockSsh::new(vec![
+        let ssh = MockSsh::new(vec![
             Ok(String::new()), // apt-get check
-            Ok("tmux:installed\ngit:installed\nclaude:installed\nrepo:cloned\nworktree-dir:exists"
-                .into()),
+            Ok(
+                "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
+                repo:cloned\nworktree-dir:exists"
+                    .into(),
+            ),
         ]);
         assert!(run_remote_setup(&ssh, &test_answers(), false).is_ok());
     }
 
     #[test]
     fn remote_setup_installs_missing_tools() {
-        let ssh =
-            MockSsh::new(vec![
+        let ssh = MockSsh::new(vec![
             Ok(String::new()), // apt-get check
-            Ok("tmux:missing\ngit:installed\nclaude:missing\nrepo:missing\nworktree-dir:missing"
+            Ok("tmux:missing\ngit:installed\ngh:missing\nclaude:missing\n\
+                repo:missing\nworktree-dir:missing"
                 .into()),
             Ok(String::new()), // tmux install
+            Ok(String::new()), // gh install
             Ok(String::new()), // claude install
             Ok(String::new()), // clone
             Ok(String::new()), // mkdir
@@ -952,11 +975,13 @@ mod tests {
 
     #[test]
     fn remote_setup_tool_install_fails_continues() {
-        let ssh =
-            MockSsh::new(vec![
+        let ssh = MockSsh::new(vec![
             Ok(String::new()), // apt-get check
-            Ok("tmux:missing\ngit:installed\nclaude:installed\nrepo:cloned\nworktree-dir:exists"
-                .into()),
+            Ok(
+                "tmux:missing\ngit:installed\ngh:installed\nclaude:installed\n\
+                repo:cloned\nworktree-dir:exists"
+                    .into(),
+            ),
             Err(SkulkError::SshFailed("install failed".into())), // tmux install fails
         ]);
         // Should succeed (tool install failures are non-fatal)
@@ -967,8 +992,11 @@ mod tests {
     fn remote_setup_clone_failure_propagates() {
         let ssh = MockSsh::new(vec![
             Ok(String::new()), // apt-get check
-            Ok("tmux:installed\ngit:installed\nclaude:installed\nrepo:missing\nworktree-dir:missing"
-                .into()),
+            Ok(
+                "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
+                repo:missing\nworktree-dir:missing"
+                    .into(),
+            ),
             Err(SkulkError::SshFailed("clone failed".into())), // clone fails
         ]);
         let result = run_remote_setup(&ssh, &test_answers(), false);
@@ -977,11 +1005,13 @@ mod tests {
 
     #[test]
     fn remote_setup_repo_already_cloned() {
-        let ssh =
-            MockSsh::new(vec![
+        let ssh = MockSsh::new(vec![
             Ok(String::new()), // apt-get check
-            Ok("tmux:installed\ngit:installed\nclaude:installed\nrepo:cloned\nworktree-dir:exists"
-                .into()),
+            Ok(
+                "tmux:installed\ngit:installed\ngh:installed\nclaude:installed\n\
+                repo:cloned\nworktree-dir:exists"
+                    .into(),
+            ),
         ]);
         assert!(run_remote_setup(&ssh, &test_answers(), false).is_ok());
     }

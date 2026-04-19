@@ -71,18 +71,29 @@ pub(crate) fn agent_create_tmux_command(
 
 /// Build the SSH command to send an initial prompt to an agent after a startup delay.
 /// The sleep runs on the remote so it does not block the laptop CLI.
-/// Checks that the session is still alive after sleeping before attempting send-keys,
+/// Checks that the session is still alive after sleeping before attempting delivery,
 /// so it fails cleanly if Claude Code exited during startup.
 ///
-/// Splits the send into two `tmux send-keys` calls with a short gap: the first types
-/// the prompt, the second submits with Enter. Defeats Claude Code's paste-detection,
-/// which otherwise swallows the trailing Enter as a newline inside the input box.
+/// Uses a tmux named buffer + `paste-buffer -p` (bracketed paste) so multi-line
+/// prompts arrive as a single pasted block rather than line-by-line — each newline
+/// in a `send-keys` call would otherwise submit a partial message to Claude Code.
+/// After the paste we sleep briefly then send Enter separately, which defeats
+/// Claude Code's paste-detection swallowing the trailing Enter as a newline.
+///
+/// `paste-buffer -d` deletes the buffer atomically with a successful paste, so a
+/// prompt containing sensitive context never lingers in tmux's server-wide buffer
+/// list. The buffer name is deterministic per agent (`skulk-prompt-<session>`),
+/// so even in the rare race where the session dies between `has-session` and
+/// `paste-buffer` and the buffer leaks, the next attempt for the same agent
+/// overwrites it via `set-buffer`.
 pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
+    let buffer = format!("skulk-prompt-{session_prefix}{name}");
     format!(
         "sleep {STARTUP_DELAY} && tmux has-session -t {session_prefix}{name} && \
-         tmux send-keys -t {session_prefix}{name} '{escaped}' && \
+         tmux set-buffer -b {buffer} -- '{escaped}' && \
+         tmux paste-buffer -p -d -t {session_prefix}{name} -b {buffer} && \
          sleep 0.1 && \
          tmux send-keys -t {session_prefix}{name} Enter"
     )
@@ -365,28 +376,28 @@ mod tests {
         let cfg = test_config();
         let cmd = agent_send_prompt_command("my-task", "fix the bug", &cfg);
         assert!(cmd.contains("sleep 5"));
-        assert!(cmd.contains("tmux send-keys -t skulk-my-task"));
+        assert!(cmd.contains("tmux set-buffer"));
+        assert!(cmd.contains("tmux paste-buffer -p"));
         assert!(cmd.contains("'fix the bug'"));
         assert!(cmd.contains("Enter"));
     }
 
     #[test]
-    fn agent_send_prompt_command_splits_typing_and_submit() {
+    fn agent_send_prompt_command_splits_paste_and_submit() {
         let cfg = test_config();
         let cmd = agent_send_prompt_command("my-task", "fix the bug", &cfg);
-        let type_idx = cmd
-            .find("'fix the bug'")
-            .expect("prompt typing step missing");
-        let submit_sleep_idx = cmd[type_idx..]
+        let paste_idx = cmd.find("tmux paste-buffer").expect("paste step missing");
+        let submit_sleep_idx = cmd[paste_idx..]
             .find("sleep 0.1")
-            .map(|i| i + type_idx)
+            .map(|i| i + paste_idx)
             .expect("submit delay missing");
         let enter_idx = cmd[submit_sleep_idx..]
-            .find("Enter")
+            .find("send-keys")
             .map(|i| i + submit_sleep_idx)
-            .expect("submit step missing");
-        assert!(type_idx < submit_sleep_idx);
+            .expect("submit send-keys missing");
+        assert!(paste_idx < submit_sleep_idx);
         assert!(submit_sleep_idx < enter_idx);
+        assert!(cmd[enter_idx..].contains("Enter"));
     }
 
     #[test]
@@ -394,6 +405,35 @@ mod tests {
         let cfg = test_config();
         let cmd = agent_send_prompt_command("my-task", "it's broken", &cfg);
         assert!(cmd.contains("it'\\''s broken"));
+    }
+
+    #[test]
+    fn agent_send_prompt_command_handles_multiline() {
+        let cfg = test_config();
+        let prompt = "Line 1\nLine 2\nLine 3";
+        let cmd = agent_send_prompt_command("my-task", prompt, &cfg);
+        // The full prompt lives inside a single tmux set-buffer argument, so
+        // delivery is one bracketed-paste block — newlines do not submit.
+        assert!(cmd.contains("'Line 1\nLine 2\nLine 3'"));
+        assert!(cmd.contains("paste-buffer -p"));
+    }
+
+    #[test]
+    fn agent_send_prompt_command_deletes_buffer_atomically_with_paste() {
+        // `paste-buffer -d` deletes the buffer as part of a successful paste so the
+        // prompt content does not linger in tmux's server-wide buffer list. We assert
+        // the `-d` flag is on the same `paste-buffer` invocation, not a separate
+        // `delete-buffer` call (which could leak the buffer if paste failed first).
+        let cfg = test_config();
+        let cmd = agent_send_prompt_command("my-task", "hi", &cfg);
+        assert!(
+            cmd.contains("paste-buffer -p -d"),
+            "expected paste-buffer to use -d for atomic delete-on-paste, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("delete-buffer"),
+            "separate delete-buffer call should be gone in favor of paste-buffer -d"
+        );
     }
 
     #[test]
