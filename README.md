@@ -1,6 +1,8 @@
 # Skulk
 
-Run multiple Claude Code agents in parallel on a remote server — or on your local machine. Each agent gets its own tmux session and git worktree — fully isolated, zero conflicts.
+Dead simple agent management over SSH.
+
+Skulk spins up [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents on a remote server — each in its own tmux session and git worktree, fully isolated, zero conflicts.
 
 ```
 $ skulk new auth-refactor "Refactor the auth middleware to use JWT"
@@ -25,16 +27,16 @@ Claude Code is great, but it works on one thing at a time. If you have a beefy d
 
 ## Requirements
 
-**Local machine:** OpenSSH client (not needed if running in localhost mode), Rust toolchain (to build Skulk)
+**Local machine:** macOS or Linux with an OpenSSH client.
 
-**Remote server:** SSH access with key-based auth. Skulk's `init` command will install everything else (tmux, git, Claude Code).
+**Remote server:** Debian-based Linux (Ubuntu, Debian, etc.) with SSH access and key-based auth. Skulk's `init` command installs everything else (tmux, git, Claude Code). Other distros may work but are not officially supported yet.
 
-**Localhost mode:** Set `host = "localhost"` in `.skulk/config.toml` to run commands directly via `sh -c` and skip SSH entirely. Useful when running Skulk on the same machine where agents will live (a dev box, a personal laptop, a server you're already SSH'd into).
+**Localhost mode:** Set `host = "localhost"` in `.skulk/config.toml` to run agents on the same machine without SSH.
 
 ## Install
 
 ```bash
-cargo install --path .
+curl -sSL https://raw.githubusercontent.com/frantufro/skulk/main/install.sh | sh
 ```
 
 Or build from source:
@@ -43,7 +45,6 @@ Or build from source:
 git clone https://github.com/frantufro/skulk.git
 cd skulk
 cargo build --release
-# Binary is at target/release/skulk
 ```
 
 ## Quick Start
