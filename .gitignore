@@ -20,8 +20,8 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# User-specific config
-.skulk/
+# User-specific secrets
+.skulk/.env
 
 # Claude Code — local-only files
 .claude/settings.local.json

@@ -1,0 +1,5 @@
+host = "bluebubble"
+session_prefix = "skulk-"
+base_path = "~/skulk"
+worktree_base = "~/skulk-worktrees"
+default_branch = "main"
