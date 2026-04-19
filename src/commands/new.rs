@@ -1,17 +1,43 @@
+use crate::commands::wait::mark_busy_command;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::{inventory_command, parse_inventory};
 use crate::ssh::Ssh;
 use crate::util::{PromptStatus, STARTUP_DELAY, shell_escape, validate_model, validate_name};
 
-/// Build the SSH command to create a git worktree for an agent.
+/// JSON for the worktree's `.claude/settings.local.json`.
+///
+/// Installs Claude Code `Stop` and `UserPromptSubmit` hooks that write an
+/// "idle" / "busy" marker to `~/.skulk/state/<session_name>` on the remote.
+/// `skulk wait` polls that file to detect when the agent finishes its turn.
+///
+/// The JSON uses only double quotes, so it can safely be wrapped in single
+/// quotes when passed through a shell `printf` (see [`agent_create_worktree_command`]).
+pub(crate) fn hooks_settings_json(session_name: &str) -> String {
+    format!(
+        r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"mkdir -p ~/.skulk/state && printf idle > ~/.skulk/state/{session_name}"}}]}}],"UserPromptSubmit":[{{"hooks":[{{"type":"command","command":"mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/{session_name}"}}]}}]}}}}"#
+    )
+}
+
+/// Build the SSH command to create a git worktree for an agent and install
+/// Claude Code hooks powering `skulk wait`.
+///
+/// Bundles worktree creation with hook installation in a single SSH round-trip
+/// so both succeed or fail together. The hook JSON is written to
+/// `<worktree>/.claude/settings.local.json`, where Claude Code picks it up on
+/// launch.
 pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
     let default_branch = &cfg.default_branch;
+    let session_name = format!("{session_prefix}{name}");
+    let hooks_json = hooks_settings_json(&session_name);
     format!(
-        "mkdir -p {worktree_base} && cd {base_path} && git worktree add -b {session_prefix}{name} {worktree_base}/{session_prefix}{name} {default_branch}"
+        "mkdir -p {worktree_base} && cd {base_path} && \
+         git worktree add -b {session_prefix}{name} {worktree_base}/{session_prefix}{name} {default_branch} && \
+         mkdir -p {worktree_base}/{session_prefix}{name}/.claude && \
+         printf '%s' '{hooks_json}' > {worktree_base}/{session_prefix}{name}/.claude/settings.local.json"
     )
 }
 
@@ -86,16 +112,25 @@ pub(crate) fn agent_create_tmux_command(
 /// so even in the rare race where the session dies between `has-session` and
 /// `paste-buffer` and the buffer leaks, the next attempt for the same agent
 /// overwrites it via `set-buffer`.
+///
+/// After the has-session check, writes `busy` to the idle marker (see
+/// [`mark_busy_command`]) so a `skulk wait` invoked right after this command
+/// returns sees `busy` instead of a stale `missing`/`idle` marker — the
+/// agent's own `UserPromptSubmit` hook fires asynchronously and can lag
+/// behind the paste.
 pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
-    let buffer = format!("skulk-prompt-{session_prefix}{name}");
+    let session_name = format!("{session_prefix}{name}");
+    let buffer = format!("skulk-prompt-{session_name}");
+    let mark_busy = mark_busy_command(&session_name);
     format!(
-        "sleep {STARTUP_DELAY} && tmux has-session -t {session_prefix}{name} && \
+        "sleep {STARTUP_DELAY} && tmux has-session -t {session_name} && \
+         {mark_busy} && \
          tmux set-buffer -b {buffer} -- '{escaped}' && \
-         tmux paste-buffer -p -d -t {session_prefix}{name} -b {buffer} && \
+         tmux paste-buffer -p -d -t {session_name} -b {buffer} && \
          sleep 0.1 && \
-         tmux send-keys -t {session_prefix}{name} Enter"
+         tmux send-keys -t {session_name} Enter"
     )
 }
 
@@ -263,6 +298,51 @@ mod tests {
     }
 
     #[test]
+    fn agent_create_worktree_command_installs_hooks_settings_file() {
+        let cfg = test_config();
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(
+            cmd.contains("~/test-project-worktrees/skulk-my-task/.claude"),
+            "expected .claude directory creation: {cmd}"
+        );
+        assert!(
+            cmd.contains("settings.local.json"),
+            "expected hooks settings file write: {cmd}"
+        );
+    }
+
+    #[test]
+    fn hooks_settings_json_includes_stop_hook_for_session() {
+        let json = hooks_settings_json("skulk-my-task");
+        assert!(json.contains("\"Stop\""), "missing Stop hook: {json}");
+        assert!(
+            json.contains("printf idle > ~/.skulk/state/skulk-my-task"),
+            "Stop command should write idle marker: {json}"
+        );
+    }
+
+    #[test]
+    fn hooks_settings_json_includes_user_prompt_submit_hook_for_session() {
+        let json = hooks_settings_json("skulk-my-task");
+        assert!(
+            json.contains("\"UserPromptSubmit\""),
+            "missing UserPromptSubmit hook: {json}"
+        );
+        assert!(
+            json.contains("printf busy > ~/.skulk/state/skulk-my-task"),
+            "UserPromptSubmit command should write busy marker: {json}"
+        );
+    }
+
+    #[test]
+    fn hooks_settings_json_contains_no_single_quotes() {
+        // The JSON is wrapped in single quotes for shell echo, so it must not
+        // contain any single quotes of its own.
+        let json = hooks_settings_json("skulk-my-task");
+        assert!(!json.contains('\''), "json must not contain ': {json}");
+    }
+
+    #[test]
     fn agent_create_tmux_command_with_remote_control_includes_flag() {
         let cfg = test_config();
         let cmd = agent_create_tmux_command("my-task", &cfg, true, None, None);
@@ -380,6 +460,20 @@ mod tests {
         assert!(cmd.contains("tmux paste-buffer -p"));
         assert!(cmd.contains("'fix the bug'"));
         assert!(cmd.contains("Enter"));
+    }
+
+    #[test]
+    fn agent_send_prompt_command_marks_busy_before_paste() {
+        let cfg = test_config();
+        let cmd = agent_send_prompt_command("my-task", "fix the bug", &cfg);
+        let busy_idx = cmd.find("printf busy").expect("busy marker write missing");
+        let paste_idx = cmd
+            .find("tmux paste-buffer")
+            .expect("paste-buffer step missing");
+        assert!(
+            busy_idx < paste_idx,
+            "busy marker must be written before paste: {cmd}"
+        );
     }
 
     #[test]

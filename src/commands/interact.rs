@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::commands::wait::mark_busy_command;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::ssh::Ssh;
@@ -85,17 +86,24 @@ pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
 /// Unlike `agent_send_prompt_command()` (in new.rs) which includes a startup delay,
 /// this targets an already-running agent -- no delay needed.
 ///
-/// Splits into two `tmux send-keys` calls with a short sleep in between: the first
-/// types the prompt text, the second submits with Enter. The gap defeats Claude
-/// Code's paste-detection, which otherwise swallows the trailing Enter as a
+/// The chain starts by writing `busy` to the idle marker (see
+/// [`mark_busy_command`]) so a subsequent `skulk wait` can't race past a
+/// stale `idle` marker while the agent's own `UserPromptSubmit` hook is
+/// still propagating. Then splits the actual send into two `tmux send-keys`
+/// calls with a short sleep in between: the first types the prompt text,
+/// the second submits with Enter. The gap defeats Claude Code's
+/// paste-detection, which otherwise swallows the trailing Enter as a
 /// newline inside the input box instead of submitting.
 pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
+    let session_name = format!("{session_prefix}{name}");
+    let mark_busy = mark_busy_command(&session_name);
     format!(
-        "tmux send-keys -t {session_prefix}{name} '{escaped}' && \
+        "{mark_busy} && \
+         tmux send-keys -t {session_name} '{escaped}' && \
          sleep 0.1 && \
-         tmux send-keys -t {session_prefix}{name} Enter"
+         tmux send-keys -t {session_name} Enter"
     )
 }
 
@@ -597,6 +605,20 @@ mod tests {
         let cmd = send_command("my-task", "fix the bug", &cfg);
         assert!(cmd.contains("tmux send-keys -t skulk-my-task 'fix the bug'"));
         assert!(cmd.contains("tmux send-keys -t skulk-my-task Enter"));
+    }
+
+    #[test]
+    fn send_command_marks_busy_before_typing() {
+        let cfg = test_config();
+        let cmd = send_command("my-task", "fix the bug", &cfg);
+        let busy_idx = cmd.find("printf busy").expect("busy marker write missing");
+        let type_idx = cmd
+            .find("'fix the bug'")
+            .expect("prompt typing step missing");
+        assert!(
+            busy_idx < type_idx,
+            "busy marker must be written before send-keys: {cmd}"
+        );
     }
 
     #[test]
