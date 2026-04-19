@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
@@ -13,14 +14,17 @@ use crate::util::validate_name;
 /// It contains either `idle` or `busy`. If the file doesn't exist yet
 /// (the agent has never processed a turn) the command prints `missing`.
 pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("cat ~/.skulk/state/{session_prefix}{name} 2>/dev/null || echo missing")
+    let agent = AgentRef::new(name, cfg);
+    format!(
+        "cat ~/.skulk/state/{} 2>/dev/null || echo missing",
+        agent.session_name()
+    )
 }
 
 /// Build the SSH command used to confirm the agent's tmux session exists.
 pub(crate) fn has_session_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux has-session -t {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!("tmux has-session -t {}", agent.session_name())
 }
 
 /// Build a shell snippet that atomically writes `busy` to the idle marker.
@@ -54,8 +58,8 @@ pub(crate) fn cmd_wait(
     timeout: Duration,
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
-    let session_prefix = &cfg.session_prefix;
     let host = &cfg.host;
+    let session_name = AgentRef::new(name, cfg).session_name();
 
     ssh.run(&has_session_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, host))?;
@@ -67,13 +71,13 @@ pub(crate) fn cmd_wait(
             .map_err(|e| classify_agent_error(name, e, host))?;
         let trimmed = state.trim();
         if trimmed == "idle" || trimmed == "missing" {
-            eprintln!("Agent {session_prefix}{name} is idle.");
+            eprintln!("Agent {session_name} is idle.");
             return Ok(());
         }
         if start.elapsed() >= timeout {
             return Err(SkulkError::Diagnostic {
                 message: format!(
-                    "Timed out after {}s waiting for {session_prefix}{name} to become idle.",
+                    "Timed out after {}s waiting for {session_name} to become idle.",
                     timeout.as_secs()
                 ),
                 suggestion: format!(
@@ -102,10 +106,8 @@ pub(crate) fn cmd_wait_all(
         return Ok(());
     }
     for session in &inv.sessions {
-        let name = session
-            .strip_prefix(&*cfg.session_prefix)
-            .unwrap_or(session);
-        cmd_wait(ssh, name, cfg, poll_interval, timeout)?;
+        let agent = AgentRef::from_qualified(session, cfg);
+        cmd_wait(ssh, agent.name(), cfg, poll_interval, timeout)?;
     }
     Ok(())
 }

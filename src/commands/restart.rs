@@ -1,3 +1,4 @@
+use crate::agent_ref::AgentRef;
 use crate::commands::new::agent_create_tmux_command;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
@@ -16,9 +17,10 @@ use crate::util::validate_name;
 pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
 
-    let session_prefix = &cfg.session_prefix;
-    let worktree_base = &cfg.worktree_base;
-    let session_name = format!("{session_prefix}{name}");
+    let agent = AgentRef::new(name, cfg);
+    let session_name = agent.session_name();
+    let branch = agent.branch_name();
+    let worktree = agent.worktree_path(cfg);
 
     let inv = fetch_inventory(ssh, cfg)?;
 
@@ -38,8 +40,8 @@ pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
 
     println!(
         "Agent '{name}' restarted.\n\
-         \x20 Branch: {session_prefix}{name}\n\
-         \x20 Worktree: {worktree_base}/{session_prefix}{name}\n\
+         \x20 Branch: {branch}\n\
+         \x20 Worktree: {worktree}\n\
          \x20 Mode: skip-permissions\n\
          \x20 Context: fresh (empty)\n\
          \n\

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::agent_ref::AgentRef;
 use crate::commands::prompt_source;
 use crate::commands::wait::mark_busy_command;
 use crate::config::{Config, DEFAULT_INIT_SCRIPT};
@@ -47,10 +48,9 @@ fn build_launch_sequence(
     model: Option<&str>,
     claude_args: Option<&str>,
 ) -> String {
-    let session_prefix = &cfg.session_prefix;
-    let worktree_base = &cfg.worktree_base;
-    let session = format!("{session_prefix}{name}");
-    let worktree = format!("{worktree_base}/{session}");
+    let agent = AgentRef::new(name, cfg);
+    let session = agent.session_name();
+    let worktree = agent.worktree_path(cfg);
     let init_script = cfg.init_script.as_deref().unwrap_or(DEFAULT_INIT_SCRIPT);
     let remote_control_flag = if remote_control {
         format!(" --remote-control {session}")
@@ -106,16 +106,18 @@ pub(crate) fn hooks_settings_json(session_name: &str) -> String {
 /// launch.
 pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
-    let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
     let default_branch = &cfg.default_branch;
-    let session_name = format!("{session_prefix}{name}");
+    let agent = AgentRef::new(name, cfg);
+    let session_name = agent.session_name();
+    let worktree = agent.worktree_path(cfg);
+    let branch = agent.branch_name();
     let hooks_json = hooks_settings_json(&session_name);
     format!(
         "mkdir -p {worktree_base} && cd {base_path} && \
-         git worktree add -b {session_prefix}{name} {worktree_base}/{session_prefix}{name} {default_branch} && \
-         mkdir -p {worktree_base}/{session_prefix}{name}/.claude && \
-         printf '%s' '{hooks_json}' > {worktree_base}/{session_prefix}{name}/.claude/settings.local.json"
+         git worktree add -b {branch} {worktree} {default_branch} && \
+         mkdir -p {worktree}/.claude && \
+         printf '%s' '{hooks_json}' > {worktree}/.claude/settings.local.json"
     )
 }
 
@@ -157,13 +159,14 @@ pub(crate) fn agent_create_tmux_command(
     model: Option<&str>,
     claude_args: Option<&str>,
 ) -> String {
-    let session_prefix = &cfg.session_prefix;
-    let worktree_base = &cfg.worktree_base;
+    let agent = AgentRef::new(name, cfg);
+    let session = agent.session_name();
+    let worktree = agent.worktree_path(cfg);
     let sequence = build_launch_sequence(name, cfg, remote_control, model, claude_args);
     let escaped = shell_escape(&sequence);
     format!(
-        "tmux new-session -d -s {session_prefix}{name} -c {worktree_base}/{session_prefix}{name} && \
-         tmux send-keys -t {session_prefix}{name} '{escaped}' C-m"
+        "tmux new-session -d -s {session} -c {worktree} && \
+         tmux send-keys -t {session} '{escaped}' C-m"
     )
 }
 
@@ -192,8 +195,7 @@ pub(crate) fn agent_create_tmux_command(
 /// behind the paste.
 pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
-    let session_prefix = &cfg.session_prefix;
-    let session_name = format!("{session_prefix}{name}");
+    let session_name = AgentRef::new(name, cfg).session_name();
     let buffer = format!("skulk-prompt-{session_name}");
     let mark_busy = mark_busy_command(&session_name);
     format!(
@@ -209,11 +211,10 @@ pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) 
 /// Build the SSH command to roll back a worktree creation (remove worktree + delete branch).
 pub(crate) fn agent_rollback_worktree_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
-    let session_prefix = &cfg.session_prefix;
-    let worktree_base = &cfg.worktree_base;
-    format!(
-        "cd {base_path} && git worktree remove --force {worktree_base}/{session_prefix}{name} && git branch -D {session_prefix}{name}"
-    )
+    let agent = AgentRef::new(name, cfg);
+    let worktree = agent.worktree_path(cfg);
+    let branch = agent.branch_name();
+    format!("cd {base_path} && git worktree remove --force {worktree} && git branch -D {branch}")
 }
 
 /// Create a new agent with worktree isolation and optional initial prompt.
@@ -251,22 +252,18 @@ pub(crate) fn cmd_new(
 ) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
     let host = &cfg.host;
-    let session_prefix = &cfg.session_prefix;
-    let worktree_base = &cfg.worktree_base;
+    let agent = AgentRef::new(name, cfg);
+    let session_name = agent.session_name();
+    let branch = agent.branch_name();
+    let worktree = agent.worktree_path(cfg);
 
     // Step 1: Resolve initial prompt (if any). clap `conflicts_with` on the CLI
     // enforces that both --github and --from can't be set; the unreachable arm
     // is a defensive guard for non-CLI callers.
     let prompt: Option<String> = match (github, from) {
         (None, None) => None,
-        (Some(id), None) => {
-            let branch = format!("{session_prefix}{name}");
-            Some(prompt_source::load_github_prompt(ssh, id, &branch, cfg)?)
-        }
-        (None, Some(path)) => {
-            let branch = format!("{session_prefix}{name}");
-            Some(prompt_source::load_file_prompt(path, &branch)?)
-        }
+        (Some(id), None) => Some(prompt_source::load_github_prompt(ssh, id, &branch, cfg)?),
+        (None, Some(path)) => Some(prompt_source::load_file_prompt(path, &branch)?),
         (Some(_), Some(_)) => unreachable!("--github and --from are mutually exclusive"),
     };
 
@@ -285,7 +282,6 @@ pub(crate) fn cmd_new(
 
     // Step 2: Fetch inventory and check uniqueness
     let inv = fetch_inventory(ssh, cfg).map_err(|e| classify_agent_error(name, e, host))?;
-    let session_name = format!("{session_prefix}{name}");
     let has_session = inv.sessions.contains(&session_name);
     let has_worktree = inv.worktrees.contains_key(&session_name);
     if has_session {
@@ -307,7 +303,7 @@ pub(crate) fn cmd_new(
     // Step 4: Upload local .env to worktree if present.
     // Non-fatal: if the copy fails, init.sh still runs but without the sourced vars.
     if let Some(env_file) = local_env_file {
-        let remote_env = format!("{worktree_base}/{session_prefix}{name}/.env");
+        let remote_env = format!("{worktree}/.env");
         if let Err(e) = ssh.upload_file(env_file, &remote_env) {
             eprintln!(
                 "Warning: failed to copy {} to agent worktree: {e}",
@@ -376,8 +372,8 @@ pub(crate) fn cmd_new(
 
     println!(
         "Agent '{name}' created.\n\
-         \x20 Branch: {session_prefix}{name}\n\
-         \x20 Worktree: {worktree_base}/{session_prefix}{name}\n\
+         \x20 Branch: {branch}\n\
+         \x20 Worktree: {worktree}\n\
          {permissions_line}{model_line}{extra_args_line}\n\
          {prompt_line}\n\
          \n\

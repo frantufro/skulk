@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::agent_ref::AgentRef;
 use crate::commands::destroy::{
     agent_destroy_branch_command, agent_destroy_session_command, agent_destroy_worktree_command,
 };
@@ -56,7 +57,6 @@ pub(crate) fn gc_find_orphans(inv: &AgentInventory) -> GcOrphans {
 }
 
 pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), SkulkError> {
-    let session_prefix = &cfg.session_prefix;
     let base_path = &cfg.base_path;
 
     // Fetch comprehensive inventory
@@ -77,9 +77,12 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
 
     // Clean up orphaned sessions
     for session in &orphans.sessions {
-        let name = session.strip_prefix(&**session_prefix).unwrap_or(session);
+        let agent = AgentRef::from_qualified(session, cfg);
         eprint!("  Killing orphaned session {session}... ");
-        if ssh.run(&agent_destroy_session_command(name, cfg)).is_ok() {
+        if ssh
+            .run(&agent_destroy_session_command(agent.name(), cfg))
+            .is_ok()
+        {
             eprintln!("done");
         } else {
             eprintln!("failed");
@@ -88,10 +91,14 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
 
     // Clean up orphaned worktrees (and their branches)
     for worktree in &orphans.worktrees {
-        let name = worktree.strip_prefix(&**session_prefix).unwrap_or(worktree);
+        let agent = AgentRef::from_qualified(worktree, cfg);
         eprint!("  Removing orphaned worktree {worktree}... ");
-        let wt_ok = ssh.run(&agent_destroy_worktree_command(name, cfg)).is_ok();
-        let br_ok = ssh.run(&agent_destroy_branch_command(name, cfg)).is_ok();
+        let wt_ok = ssh
+            .run(&agent_destroy_worktree_command(agent.name(), cfg))
+            .is_ok();
+        let br_ok = ssh
+            .run(&agent_destroy_branch_command(agent.name(), cfg))
+            .is_ok();
         if wt_ok && br_ok {
             eprintln!("done");
         } else {
@@ -101,9 +108,12 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
 
     // Clean up orphaned branches (no session or worktree)
     for branch in &orphans.branches {
-        let name = branch.strip_prefix(&**session_prefix).unwrap_or(branch);
+        let agent = AgentRef::from_qualified(branch, cfg);
         eprint!("  Deleting orphaned branch {branch}... ");
-        if ssh.run(&agent_destroy_branch_command(name, cfg)).is_ok() {
+        if ssh
+            .run(&agent_destroy_branch_command(agent.name(), cfg))
+            .is_ok()
+        {
             eprintln!("done");
         } else {
             eprintln!("failed");

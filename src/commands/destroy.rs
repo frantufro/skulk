@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::fetch_inventory;
@@ -8,23 +9,25 @@ use crate::util::validate_name;
 
 /// Build the SSH command to kill a tmux session for an agent.
 pub(crate) fn agent_destroy_session_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux kill-session -t {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!("tmux kill-session -t {}", agent.session_name())
 }
 
 /// Build the SSH command to remove an agent's git worktree.
 pub(crate) fn agent_destroy_worktree_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
-    let session_prefix = &cfg.session_prefix;
-    let worktree_base = &cfg.worktree_base;
-    format!("cd {base_path} && git worktree remove --force {worktree_base}/{session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!(
+        "cd {base_path} && git worktree remove --force {}",
+        agent.worktree_path(cfg)
+    )
 }
 
 /// Build the SSH command to delete an agent's git branch.
 pub(crate) fn agent_destroy_branch_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
-    let session_prefix = &cfg.session_prefix;
-    format!("cd {base_path} && git branch -D {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!("cd {base_path} && git branch -D {}", agent.branch_name())
 }
 
 /// Run the branch-delete SSH command and record the outcome.
@@ -59,11 +62,9 @@ pub(crate) fn cmd_destroy(
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
 
-    let session_prefix = &cfg.session_prefix;
-
     // Fetch inventory via shared probe
     let inv = fetch_inventory(ssh, cfg)?;
-    let session_name = format!("{session_prefix}{name}");
+    let session_name = AgentRef::new(name, cfg).session_name();
     let has_session = inv.sessions.contains(&session_name);
     let has_worktree = inv.worktrees.contains_key(&session_name);
     let has_branch = inv.branches.contains(&session_name);
@@ -122,25 +123,19 @@ pub(crate) fn cmd_destroy_all(
     cfg: &Config,
     confirm: &dyn Fn(&str) -> bool,
 ) -> Result<(), SkulkError> {
-    let session_prefix = &cfg.session_prefix;
     let inv = fetch_inventory(ssh, cfg)?;
 
-    // Build comprehensive agent name set
+    // Build comprehensive agent name set. Inventory entries are prefix-filtered
+    // upstream, so `AgentRef::from_qualified` always recovers a bare agent name.
     let mut name_set: HashSet<String> = HashSet::new();
     for s in &inv.sessions {
-        if let Some(name) = s.strip_prefix(&**session_prefix) {
-            name_set.insert(name.to_string());
-        }
+        name_set.insert(AgentRef::from_qualified(s, cfg).name().to_string());
     }
     for key in inv.worktrees.keys() {
-        if let Some(name) = key.strip_prefix(&**session_prefix) {
-            name_set.insert(name.to_string());
-        }
+        name_set.insert(AgentRef::from_qualified(key, cfg).name().to_string());
     }
     for b in &inv.branches {
-        if let Some(name) = b.strip_prefix(&**session_prefix) {
-            name_set.insert(name.to_string());
-        }
+        name_set.insert(AgentRef::from_qualified(b, cfg).name().to_string());
     }
     let mut agent_names: Vec<String> = name_set.into_iter().collect();
     agent_names.sort();
@@ -157,10 +152,11 @@ pub(crate) fn cmd_destroy_all(
 
     let mut warned_count: usize = 0;
     for name in &agent_names {
-        print!("Destroying {session_prefix}{name}... ");
+        let agent = AgentRef::new(name, cfg);
+        let session_name = agent.session_name();
+        print!("Destroying {session_name}... ");
         let _ = std::io::Write::flush(&mut std::io::stdout());
 
-        let session_name = format!("{session_prefix}{name}");
         let mut step_failed = false;
         if inv.sessions.contains(&session_name)
             && ssh.run(&agent_destroy_session_command(name, cfg)).is_err()
