@@ -286,7 +286,7 @@ fn run_init() -> Result<InitOutcome, SkulkError> {
     let cwd = std::env::current_dir()
         .map_err(|e| SkulkError::Validation(format!("Cannot determine current directory: {e}")))?;
     let config_path = config::config_path_in(&cwd);
-    let legacy_path = config::legacy_config_path_in(&cwd);
+    let legacy_path = cwd.join(".skulk.toml");
     let config_exists = config_path.is_file() || legacy_path.is_file();
 
     // SSH test closure
@@ -322,11 +322,8 @@ fn run_init() -> Result<InitOutcome, SkulkError> {
     );
     if legacy_path.is_file() {
         match std::fs::remove_file(&legacy_path) {
-            Ok(()) => eprintln!("  Removed legacy {}.", config::LEGACY_CONFIG_FILENAME),
-            Err(e) => eprintln!(
-                "  warning: failed to remove legacy {}: {e}",
-                config::LEGACY_CONFIG_FILENAME
-            ),
+            Ok(()) => eprintln!("  Removed legacy .skulk.toml."),
+            Err(e) => eprintln!("  warning: failed to remove legacy .skulk.toml: {e}"),
         }
     }
 

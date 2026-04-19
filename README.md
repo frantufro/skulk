@@ -161,12 +161,22 @@ skulk gc --dry-run
 | Command | Description |
 |---------|-------------|
 | `skulk init` | Interactive setup wizard — generates config and optionally provisions the remote server |
-| `skulk list` | List all running agents with status, uptime, and worktree path |
-| `skulk new <name> [prompt]` | Create a new agent with its own worktree; optionally send an initial prompt |
+| `skulk new <name>` | Create a new agent with its own worktree (`--from`, `--github`, `--model`, `--claude-args`) |
+| `skulk list` | List all agents with status, idle state, uptime, and worktree path |
+| `skulk status <name>` | Detailed single-agent view: status, commits ahead, files changed, uptime |
 | `skulk connect <name>` | Attach to an agent's live tmux session |
-| `skulk logs <name>` | View an agent's terminal output |
-| `skulk send <name> <prompt>` | Send a prompt to a running agent |
-| `skulk ship <name>` | Push the agent's branch and open a PR with a Claude-authored description (requires `gh` and `claude` on the remote) |
+| `skulk disconnect <name>` | Detach all clients from an agent's session |
+| `skulk logs <name>` | View an agent's terminal output (`-f` to follow, `-l` for scrollback) |
+| `skulk send <name> <prompt>` | Send a prompt to a running agent (`--from` to read from a file) |
+| `skulk diff <name>` | Show git diff against the default branch (`--stat`, `--name-only`) |
+| `skulk git-log <name>` | Show commits on the agent's branch not in the default branch |
+| `skulk transcript <name>` | Dump full tmux scrollback (`--output` to write to a file) |
+| `skulk push <name>` | Push the agent's branch to origin |
+| `skulk ship <name>` | Push and open a PR with a Claude-authored description |
+| `skulk wait <name>` | Block until the agent is idle (`--all` for all agents) |
+| `skulk archive <name>` | Kill tmux session but keep worktree and branch intact |
+| `skulk restart <name>` | Restart an archived or crashed agent in its existing worktree |
+| `skulk doctor` | Health check — verify SSH, tools, base clone, and worktree directory |
 | `skulk pull` | Update the base clone (`git pull --ff-only`) |
 | `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
 | `skulk destroy-all` | Destroy all agents at once |
@@ -176,7 +186,7 @@ skulk gc --dry-run
 
 Skulk runs an optional setup script inside each agent's tmux session before Claude starts — useful for `docker compose up`, migrations, dependency installs, mock services, etc.
 
-**Convention:** put the script at `.skulk/init.sh` in your repo. Override the path with `init_script = "scripts/setup-agent.sh"` in `.skulk.toml` if you prefer.
+**Convention:** put the script at `.skulk/init.sh` in your repo. Override the path with `init_script = "scripts/setup-agent.sh"` in `.skulk/config.toml` if you prefer.
 
 **Project env file:** `.skulk/.env` lives locally (gitignored — `skulk init` adds the entry automatically) and almost always contains secrets. On `skulk new`, Skulk copies it to the agent's worktree at `<worktree>/.env` so dotenv-aware project tooling picks it up, and Skulk also `source`s it before running `init.sh` so the script sees the same vars (e.g. `$DATABASE_URL` for migrations).
 
