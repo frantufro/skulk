@@ -27,6 +27,24 @@ pub(crate) fn agent_destroy_branch_command(name: &str, cfg: &Config) -> String {
     format!("cd {base_path} && git branch -D {session_prefix}{name}")
 }
 
+/// Run the branch-delete SSH command and record the outcome.
+///
+/// Used by both the `has_worktree` arm (worktree + branch cleanup) and the
+/// orphaned-branch arm (branch only), which share identical push logic.
+fn try_delete_branch<'a>(
+    ssh: &impl Ssh,
+    name: &str,
+    cfg: &Config,
+    cleaned: &mut Vec<&'a str>,
+    failed: &mut Vec<&'a str>,
+) {
+    if ssh.run(&agent_destroy_branch_command(name, cfg)).is_ok() {
+        cleaned.push("branch");
+    } else {
+        failed.push("branch");
+    }
+}
+
 /// Destroy a specific agent (kills session, removes worktree, deletes branch).
 ///
 /// Uses shared inventory to probe what exists.
@@ -76,18 +94,10 @@ pub(crate) fn cmd_destroy(
         } else {
             failed.push("worktree");
         }
-        if ssh.run(&agent_destroy_branch_command(name, cfg)).is_ok() {
-            cleaned.push("branch");
-        } else {
-            failed.push("branch");
-        }
+        try_delete_branch(ssh, name, cfg, &mut cleaned, &mut failed);
     } else if has_branch {
         // Orphaned branch (no worktree)
-        if ssh.run(&agent_destroy_branch_command(name, cfg)).is_ok() {
-            cleaned.push("branch");
-        } else {
-            failed.push("branch");
-        }
+        try_delete_branch(ssh, name, cfg, &mut cleaned, &mut failed);
     }
 
     if !cleaned.is_empty() {
