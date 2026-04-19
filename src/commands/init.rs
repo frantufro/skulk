@@ -38,6 +38,15 @@ pub(crate) struct InitAnswers {
     pub run_setup: bool,
 }
 
+/// Terminal state of an `init` run. `Aborted` means the user declined to
+/// continue (e.g. refused to reconfigure over an existing config, or gave up
+/// on SSH retries) — a normal exit, not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitOutcome {
+    Done,
+    Aborted,
+}
+
 // ── Git context detection ──────────────────────────────────────────────────
 
 /// Parse a repo name from a git remote URL.
@@ -102,7 +111,7 @@ pub(crate) fn run_wizard(
     config_exists: bool,
     color: bool,
     test_ssh: &dyn Fn(&str) -> Result<(), SkulkError>,
-) -> Result<InitAnswers, SkulkError> {
+) -> Result<Option<InitAnswers>, SkulkError> {
     // Step 1: Config already exists?
     if config_exists
         && !prompter.confirm(
@@ -113,14 +122,16 @@ pub(crate) fn run_wizard(
             false,
         )?
     {
-        return Err(SkulkError::InitAborted);
+        return Ok(None);
     }
 
     // Step 2: Determine repo URL and name
     let (repo_url, repo_name) = detect_repo_info(prompter, git_ctx, color)?;
 
     // Step 3: SSH host (required) + connectivity test
-    let host = prompt_and_test_ssh(prompter, color, test_ssh)?;
+    let Some(host) = prompt_and_test_ssh(prompter, color, test_ssh)? else {
+        return Ok(None);
+    };
 
     // Step 4: Session prefix
     let default_prefix = format!("{repo_name}-");
@@ -185,7 +196,7 @@ pub(crate) fn run_wizard(
         true,
     )?;
 
-    Ok(InitAnswers {
+    Ok(Some(InitAnswers {
         host,
         session_prefix,
         default_branch,
@@ -194,15 +205,17 @@ pub(crate) fn run_wizard(
         repo_url,
         repo_name,
         run_setup,
-    })
+    }))
 }
 
 /// Prompt for SSH host, validate, and test connectivity with retry.
+///
+/// Returns `Ok(None)` if the user aborts (declines to retry after SSH failure).
 fn prompt_and_test_ssh(
     prompter: &mut dyn Prompter,
     color: bool,
     test_ssh: &dyn Fn(&str) -> Result<(), SkulkError>,
-) -> Result<String, SkulkError> {
+) -> Result<Option<String>, SkulkError> {
     let host = loop {
         let input = prompter.prompt(&format!("\n{} SSH host: ", green("?", color)))?;
         if input.is_empty() {
@@ -220,12 +233,12 @@ fn prompt_and_test_ssh(
         match test_ssh(&host) {
             Ok(()) => {
                 eprintln!("  {} Connected to {host}", checkmark(color));
-                return Ok(host);
+                return Ok(Some(host));
             }
             Err(e) => {
                 eprintln!("  {} {e}", crossmark(color));
                 if !prompter.confirm("  Retry? [Y/n]", true)? {
-                    return Err(SkulkError::InitAborted);
+                    return Ok(None);
                 }
             }
         }
@@ -729,7 +742,9 @@ mod tests {
             false,
             &mock_ssh_test_ok,
         );
-        let answers = result.expect("wizard should succeed");
+        let answers = result
+            .expect("wizard should succeed")
+            .expect("wizard should not abort");
         assert_eq!(answers.host, "myserver");
         assert_eq!(answers.session_prefix, "my-project-");
         assert_eq!(answers.default_branch, "main");
@@ -755,7 +770,9 @@ mod tests {
             false,
             &mock_ssh_test_ok,
         );
-        let answers = result.expect("wizard should succeed");
+        let answers = result
+            .expect("wizard should succeed")
+            .expect("wizard should not abort");
         assert_eq!(answers.host, "myserver");
         assert_eq!(answers.session_prefix, "cool-app-");
         assert_eq!(answers.default_branch, "main");
@@ -773,7 +790,7 @@ mod tests {
             false,
             &mock_ssh_test_ok,
         );
-        assert!(matches!(result, Err(SkulkError::InitAborted)));
+        assert!(matches!(result, Ok(None)));
     }
 
     #[test]
@@ -792,7 +809,9 @@ mod tests {
             false,
             &mock_ssh_test_ok,
         );
-        let answers = result.expect("wizard should succeed");
+        let answers = result
+            .expect("wizard should succeed")
+            .expect("wizard should not abort");
         assert_eq!(answers.host, "newhost");
         assert_eq!(answers.session_prefix, "custom-");
         assert_eq!(answers.default_branch, "develop");
@@ -813,7 +832,9 @@ mod tests {
             false,
             &mock_ssh_test_ok,
         );
-        let answers = result.expect("wizard should succeed");
+        let answers = result
+            .expect("wizard should succeed")
+            .expect("wizard should not abort");
         assert_eq!(answers.session_prefix, "my-project-");
         assert_eq!(answers.default_branch, "main");
     }
@@ -857,7 +878,7 @@ mod tests {
             false,
             &mock_ssh_test_fail,
         );
-        assert!(matches!(result, Err(SkulkError::InitAborted)));
+        assert!(matches!(result, Ok(None)));
     }
 
     #[test]
@@ -877,7 +898,9 @@ mod tests {
             "n",         // skip setup
         ]);
         let result = run_wizard(&mut prompter, &ctx, false, false, &mock_ssh_test_ok);
-        let answers = result.expect("wizard should succeed after retry");
+        let answers = result
+            .expect("wizard should succeed after retry")
+            .expect("wizard should not abort");
         assert_eq!(answers.repo_name, "good-name");
     }
 
