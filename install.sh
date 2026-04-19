@@ -16,7 +16,13 @@ esac
 
 # Detect architecture
 case "$(uname -m)" in
-  x86_64)          ARCH="x86_64" ;;
+  x86_64)
+    if [ "$OS" = "apple-darwin" ]; then
+      echo "x86_64 macOS is not supported. Use an Apple Silicon Mac or build from source." >&2
+      exit 1
+    fi
+    ARCH="x86_64"
+    ;;
   arm64|aarch64)   ARCH="aarch64" ;;
   *)
     echo "Unsupported architecture: $(uname -m)" >&2
