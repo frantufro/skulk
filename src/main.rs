@@ -72,11 +72,15 @@ pub(crate) enum Commands {
         #[arg(long)]
         remote_control: bool,
         /// Model name passed through to Claude Code as `--model <name>`
-        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`).
+        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`). Restricted to
+        /// `[A-Za-z0-9._-]` — shell metacharacters are rejected.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
-        /// Arbitrary extra flags appended verbatim to the Claude Code launch command
-        /// (e.g. `"--allowed-tools Bash(gh pr:*)"`). Escaped for safe transit through tmux.
+        /// Extra flags appended to the Claude Code launch command. The string is
+        /// typed into the remote shell by tmux, so shell metacharacters (`$`,
+        /// backticks, `;`, `(`, `)`, globs, whitespace) are re-evaluated by that
+        /// shell. Pre-quote any value that must reach Claude literally, e.g.
+        /// `--claude-args "--allowed-tools 'Bash(gh pr:*)'"`.
         #[arg(long, value_name = "ARGS")]
         claude_args: Option<String>,
     },

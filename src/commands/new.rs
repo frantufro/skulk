@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::{inventory_command, parse_inventory};
 use crate::ssh::Ssh;
-use crate::util::{PromptStatus, STARTUP_DELAY, shell_escape, validate_name};
+use crate::util::{PromptStatus, STARTUP_DELAY, shell_escape, validate_model, validate_name};
 
 /// Build the SSH command to create a git worktree for an agent.
 pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String {
@@ -29,10 +29,17 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
 ///
 /// When `model` is provided, Claude is launched with `--model <name>` so the
 /// agent runs on a specific model (e.g. `opus`, `sonnet`, `claude-opus-4-7`).
+/// The caller must pre-validate the value with `validate_model`; we only
+/// escape for the outer single-quoted `send-keys` argument here.
 ///
 /// When `claude_args` is provided, the raw string is appended to the Claude
-/// command line verbatim (after shell-escaping for the surrounding single
-/// quotes), allowing pass-through of arbitrary Claude Code flags.
+/// command line. IMPORTANT: `tmux send-keys` *types* this string into the
+/// remote shell, which then re-parses it — shell metacharacters (`$`,
+/// `` ` ``, `;`, `(`, `)`, globs, unquoted whitespace) are re-evaluated by
+/// that shell. Callers must pre-quote values that must reach Claude
+/// literally (e.g. `--allowed-tools 'Bash(gh pr:*)'` — note the inner
+/// single quotes). `shell_escape` here only protects the outer `send-keys`
+/// quoting, not the inner shell.
 pub(crate) fn agent_create_tmux_command(
     name: &str,
     cfg: &Config,
@@ -117,8 +124,11 @@ pub(crate) fn cmd_new(
     let session_prefix = &cfg.session_prefix;
     let worktree_base = &cfg.worktree_base;
 
-    // Step 0: Validate name
+    // Step 0: Validate name and (if provided) model
     validate_name(name)?;
+    if let Some(m) = model {
+        validate_model(m)?;
+    }
 
     // Step 1: Check base clone exists
     match ssh.run(&format!("test -d {base_path}/.git && echo exists")) {
@@ -321,6 +331,26 @@ mod tests {
     }
 
     #[test]
+    fn agent_create_tmux_command_claude_args_shell_metacharacters_pass_through_literally() {
+        // Pins intentional design: the outer single-quote wrap keeps metacharacters
+        // literal for the SSH + send-keys layer. The string is then typed into the
+        // inner tmux shell which DOES re-evaluate them — callers pre-quote for that
+        // shell themselves (documented on the flag and in README).
+        let cfg = test_config();
+        let cmd = agent_create_tmux_command(
+            "my-task",
+            &cfg,
+            false,
+            None,
+            Some("--flag $(whoami) `id` ; true"),
+        );
+        assert!(
+            cmd.contains("$(whoami)") && cmd.contains("`id`") && cmd.contains("; true"),
+            "metacharacters must survive the outer layer verbatim; got: {cmd}"
+        );
+    }
+
+    #[test]
     fn agent_create_tmux_command_model_and_claude_args_combine() {
         let cfg = test_config();
         let cmd =
@@ -449,6 +479,32 @@ mod tests {
         assert!(
             tmux_call.contains("--model opus"),
             "tmux launch command should include --model opus, got: {tmux_call}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_rejects_invalid_model_before_ssh() {
+        let cfg = test_config();
+        // No SSH responses queued — validation must fail before any SSH call.
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_new(
+            &ssh,
+            "test",
+            None,
+            false,
+            Some("opus; rm -rf /"),
+            None,
+            &cfg,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SkulkError::Validation(msg) => assert!(msg.contains("Invalid character")),
+            other => panic!("expected Validation, got: {other}"),
+        }
+        assert!(
+            ssh.calls().is_empty(),
+            "validation must short-circuit before any SSH call, got: {:?}",
+            ssh.calls()
         );
     }
 
