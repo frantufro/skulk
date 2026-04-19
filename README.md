@@ -1,8 +1,8 @@
 # Skulk
 
-Dead simple agent management over SSH.
+Dead simple agent management over SSH. For humans and agents alike.
 
-Skulk spins up [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents on a remote server — each in its own tmux session and git worktree, fully isolated, zero conflicts.
+Skulk spins up [Claude Code](https://docs.claude.com/en/docs/claude-code) agents on a remote server — each in its own tmux session and git worktree, fully isolated, zero conflicts.
 
 ```
 $ skulk new auth-refactor "Refactor the auth middleware to use JWT"
@@ -14,9 +14,9 @@ Created agent 'fix-pagination' on dev-server.
 Prompt delivered to skulk-fix-pagination.
 
 $ skulk list
-NAME                 STATUS     UPTIME       WORKTREE
-auth-refactor        running    3m           ~/myproject-worktrees/skulk-auth-refactor
-fix-pagination       running    1m           ~/myproject-worktrees/skulk-fix-pagination
+NAME                 STATUS     UPTIME        WORKTREE
+auth-refactor        detached   3m            ~/myproject-worktrees/skulk-auth-refactor
+fix-pagination       idle       1m            ~/myproject-worktrees/skulk-fix-pagination
 ```
 
 Two agents. Two branches. Two worktrees. Running simultaneously on one machine.
@@ -24,6 +24,8 @@ Two agents. Two branches. Two worktrees. Running simultaneously on one machine.
 ## Why
 
 Claude Code is great, but it works on one thing at a time. If you have a beefy dev server sitting around, Skulk lets you fan out: spin up five agents on five different tasks and check back when they're done. Each agent works in its own git worktree, so there are no merge conflicts mid-work.
+
+Skulk is built for humans and AI agents. Use it as a regular CLI, wire it into scripts, or let an orchestrator agent drive it via the [Claude Code plugin](#claude-code-plugin). One Claude session can spin up, monitor, and ship work from a fleet of remote agents running in parallel.
 
 ## Requirements
 
@@ -45,12 +47,12 @@ Or via Homebrew (macOS and Linux):
 brew install frantufro/tap/skulk
 ```
 
-Or build from source:
+Or build and install from source:
 
 ```bash
 git clone https://github.com/frantufro/skulk.git
 cd skulk
-cargo build --release
+cargo install --path .
 ```
 
 ## Quick Start
@@ -97,11 +99,17 @@ skulk new fix-bug "Fix the null pointer exception in UserService.java"
 # Create an agent without a prompt (starts Claude Code, you connect and interact manually)
 skulk new explore
 
-# Create an agent reachable from the Claude Code mobile/web app
-skulk new mobile-task --remote-control "Fix the login bug"
+# Load the prompt from a local task file
+skulk new big-feature --from ./tasks/refactor.md
+
+# Load the prompt from a GitHub issue on the current repo
+skulk new fix-123 --github 123
 
 # Spin up an agent on a specific model
 skulk new big-refactor --model opus "Untangle the auth middleware"
+
+# Create an agent reachable from the Claude Code mobile/web app
+skulk new mobile-task --remote-control "Fix the login bug"
 
 # Pass arbitrary extra flags through to Claude Code.
 # Note the inner single quotes around Bash(...): --claude-args is typed into
@@ -110,9 +118,7 @@ skulk new big-refactor --model opus "Untangle the auth middleware"
 skulk new scoped --claude-args "--allowed-tools 'Bash(gh pr:*)'" "Triage open PRs"
 ```
 
-By default Skulk launches Claude Code **without** `--remote-control`. Skulk's own commands (`connect`, `logs`, `send`, `disconnect`) talk to the agent through tmux directly and don't need it, and leaving it on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills long-running agents. Opt in with `--remote-control` when you want to drive an agent from your phone.
-
-> **Heads-up:** agents launched with `--remote-control` currently die after **~20 minutes of inactivity** due to the upstream bug above. This is acceptable for interactive mobile-app use (you're driving the agent), but don't use `--remote-control` for long autonomous tasks — omit the flag and drive with `skulk send` / `skulk connect` instead.
+By default Skulk launches Claude Code **without** `--remote-control`. Skulk's own commands (`connect`, `logs`, `send`) talk to the agent through tmux directly, and leaving `--remote-control` on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 minutes of inactivity. Only opt in when you want to drive an agent from the Claude Code mobile/web app, and don't use it for long autonomous tasks.
 
 ### 3. Monitor and interact
 
@@ -173,7 +179,7 @@ skulk gc --dry-run
 | `skulk transcript <name>` | Dump full tmux scrollback (`--output` to write to a file) |
 | `skulk push <name>` | Push the agent's branch to origin |
 | `skulk ship <name>` | Push and open a PR with a Claude-authored description |
-| `skulk wait <name>` | Block until the agent is idle (`--all` for all agents) |
+| `skulk wait <name>` | Block until the agent is idle (`--all` for all agents, `--timeout <secs>` to cap the wait) |
 | `skulk archive <name>` | Kill tmux session but keep worktree and branch intact |
 | `skulk restart <name>` | Restart an archived or crashed agent in its existing worktree |
 | `skulk doctor` | Health check — verify SSH, tools, base clone, and worktree directory |
@@ -265,13 +271,20 @@ skulk new -bad-name-      # invalid (leading/trailing hyphens)
 | Flag | Scope | Description |
 |------|-------|-------------|
 | `--no-color` | Global | Disable colored output (also respects `NO_COLOR` env var) |
+| `--from <FILE>` | `new`, `send` | Load the prompt from a local text file instead of the positional argument |
+| `--github <ISSUE_ID>` | `new` | Load the prompt from a GitHub issue (title, body, comments) via `gh` on the remote. Mutually exclusive with `--from`. |
 | `--remote-control` | `new` | Launch Claude with `--remote-control` so the agent is accessible from the Claude Code mobile/web app. Off by default because of an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 min of inactivity — see Quick Start |
 | `--model <NAME>` | `new` | Pass `--model <name>` through to Claude Code (e.g. `opus`, `sonnet`, `claude-opus-4-7`). Restricted to `[A-Za-z0-9._-]`. |
 | `--claude-args <ARGS>` | `new` | Extra flags appended to the Claude Code launch command. Typed into the remote shell by tmux, so shell metacharacters are re-evaluated — pre-quote for the inner shell (e.g. `--claude-args "--allowed-tools 'Bash(gh pr:*)'"`). |
-| `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
-| `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
+| `--stat` | `diff` | Summary of changed files (insertions/deletions), mutually exclusive with `--name-only` |
+| `--name-only` | `diff` | Paths of changed files only |
 | `--follow`, `-f` | `logs` | Stream output in real time |
 | `--lines`, `-l` | `logs` | Number of scrollback lines to show |
+| `--output <FILE>`, `-o` | `transcript` | Write transcript to this file instead of stdout |
+| `--all` | `wait` | Wait for every running agent instead of one |
+| `--timeout <SECS>` | `wait` | Maximum seconds to wait before giving up (default: 1800; applies per agent with `--all`) |
+| `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
+| `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
 | `--dry-run` | `gc` | Preview what would be cleaned |
 
 ## Error Handling
@@ -286,42 +299,10 @@ Skulk gives you actionable diagnostics instead of raw SSH errors:
 
 Destructive operations (`destroy`, `destroy-all`) require confirmation unless `--force` is passed. If agent creation fails partway through (e.g., tmux session can't start), the worktree is automatically rolled back.
 
-## Development
-
-```bash
-cargo fmt                                        # Format
-cargo clippy -- -D warnings -W clippy::pedantic  # Lint (zero warnings)
-cargo test                                       # Run all tests
-```
-
-The codebase is organized into focused modules, each with co-located tests:
-
-```
-src/
-├── main.rs          CLI definition and command dispatch
-├── io.rs            System boundary (real SSH, stdin) — excluded from coverage
-├── error.rs         SkulkError enum and SSH error classification
-├── ssh.rs           Ssh trait (injectable for testing)
-├── config.rs        Config struct and .skulk/config.toml loading
-├── util.rs          Validation, shell escaping, shared helpers
-├── display.rs       Session types, table formatting, GC summary
-├── inventory.rs     Single-roundtrip remote state gathering
-├── testutil.rs      MockSsh and test builders (test-only)
-└── commands/
-    ├── init.rs      Interactive setup wizard and remote provisioning
-    ├── list.rs      Agent listing and status display
-    ├── new.rs       Agent creation with worktree isolation
-    ├── pull.rs      Base clone updates
-    ├── destroy.rs   Agent teardown (single and bulk)
-    ├── interact.rs  Connect, logs, and send
-    └── gc.rs        Orphan detection and cleanup
-```
-
-Everything is tested through an injectable `Ssh` trait with a `MockSsh` test double — no real SSH calls in the test suite.
-
 ## Contributing
 
-Contributions are welcome. Please make sure `cargo fmt`, `cargo clippy -- -D warnings -W clippy::pedantic`, and `cargo test` all pass before submitting a PR.
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+ground rules, project layout, and release workflow.
 
 ## License
 
