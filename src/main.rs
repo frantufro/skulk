@@ -5,6 +5,7 @@ mod error;
 mod inventory;
 mod io;
 mod ssh;
+mod timings;
 mod util;
 
 #[cfg(test)]
@@ -18,33 +19,7 @@ use commands::{destroy, gc, interact, list, new, pull, restart, ship, wait};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
-
-/// Tunable timing parameters threaded through `run()`.
-///
-/// Kept as a struct so adding a new timing doesn't touch every call site.
-/// Tests construct `Timings::zero()` to skip real sleeps; production uses
-/// `Timings::production()`.
-pub(crate) struct Timings {
-    pub send_verify_delay: Duration,
-    pub wait_poll_interval: Duration,
-}
-
-impl Timings {
-    pub fn production() -> Self {
-        Self {
-            send_verify_delay: Duration::from_millis(500),
-            wait_poll_interval: Duration::from_millis(500),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn zero() -> Self {
-        Self {
-            send_verify_delay: Duration::ZERO,
-            wait_poll_interval: Duration::ZERO,
-        }
-    }
-}
+use timings::Timings;
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
