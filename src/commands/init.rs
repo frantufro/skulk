@@ -427,9 +427,9 @@ pub(crate) fn parse_setup_status(output: &str) -> HashMap<String, String> {
 /// Build the SSH command to install a tool via apt (Debian/Ubuntu).
 pub(crate) fn setup_install_command(tool: &str) -> String {
     match tool {
-        "tmux" => "sudo apt-get update -qq && sudo apt-get install -y -qq tmux".to_string(),
-        "git" => "sudo apt-get update -qq && sudo apt-get install -y -qq git".to_string(),
-        "gh" => "sudo apt-get update -qq && sudo apt-get install -y -qq gh".to_string(),
+        "tmux" | "git" | "gh" => {
+            format!("sudo apt-get update -qq && sudo apt-get install -y -qq {tool}")
+        }
         "claude" => "curl -fsSL https://claude.ai/install.sh | sh".to_string(),
         _ => format!("echo 'Unknown tool: {tool}'"),
     }
