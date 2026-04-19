@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use crate::commands::wait::mark_busy_command;
+use crate::commands::destroy::agent_destroy_session_command;
+use crate::commands::wait::{has_session_command, mark_busy_command};
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::ssh::Ssh;
@@ -73,12 +74,13 @@ pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -
 
 /// Build the SSH command to archive an agent -- kill its tmux session only.
 ///
-/// Unlike `agent_destroy_session_command` (in destroy.rs), this is the full
-/// archive operation: the worktree and branch are left intact on purpose, so
-/// the agent's work can be reviewed or resumed later.
+/// Archive is the full operation: the worktree and branch are left intact on
+/// purpose, so the agent's work can be reviewed or resumed later. Delegates to
+/// [`agent_destroy_session_command`] because the shell command is identical;
+/// the semantic distinction ("archive" vs "destroy") lives at the `cmd_*`
+/// orchestration layer, not in the single-session kill command.
 pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux kill-session -t {session_prefix}{name}")
+    agent_destroy_session_command(name, cfg)
 }
 
 /// Build the SSH command to send a prompt to a running agent (no startup delay).
@@ -167,8 +169,7 @@ pub(crate) fn cmd_connect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
     // Pre-check that the session exists before launching interactive SSH,
     // because ssh_interactive replaces the process and tmux errors don't
     // propagate as non-zero exit codes in non-interactive contexts.
-    let check = format!("tmux has-session -t {session_prefix}{name}");
-    ssh.run(&check)
+    ssh.run(&has_session_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     let cmd = connect_command(name, cfg);
     let status = ssh.interactive(&cmd)?;

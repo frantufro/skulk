@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use crate::commands::prompt_source;
 use crate::commands::wait::mark_busy_command;
 use crate::config::{Config, DEFAULT_INIT_SCRIPT};
-use crate::error::SkulkError;
-use crate::inventory::{inventory_command, parse_inventory};
+use crate::error::{SkulkError, classify_agent_error};
+use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
-use crate::util::{shell_escape, validate_model, validate_name};
+use crate::util::{check_base_clone, shell_escape, validate_model, validate_name};
 
 const STARTUP_DELAY: u32 = 5;
 
@@ -277,18 +277,14 @@ pub(crate) fn cmd_new(
     }
 
     // Step 1: Check base clone exists
-    match ssh.run(&format!("test -d {base_path}/.git && echo exists")) {
-        Ok(_) => {}
-        Err(SkulkError::SshFailed(_)) => {
-            return Err(SkulkError::Validation(format!(
-                "Base clone not found at {base_path} on {host}. Run `skulk pull` or clone manually."
-            )));
-        }
-        Err(e) => return Err(e),
-    }
+    check_base_clone(ssh, cfg, || {
+        format!(
+            "Base clone not found at {base_path} on {host}. Run `skulk pull` or clone manually."
+        )
+    })?;
 
     // Step 2: Fetch inventory and check uniqueness
-    let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
+    let inv = fetch_inventory(ssh, cfg).map_err(|e| classify_agent_error(name, e, host))?;
     let session_name = format!("{session_prefix}{name}");
     let has_session = inv.sessions.contains(&session_name);
     let has_worktree = inv.worktrees.contains_key(&session_name);

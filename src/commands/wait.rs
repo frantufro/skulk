@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
-use crate::inventory::{inventory_command, parse_inventory};
+use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
 
@@ -18,7 +18,7 @@ pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
 }
 
 /// Build the SSH command used to confirm the agent's tmux session exists.
-fn has_session_command(name: &str, cfg: &Config) -> String {
+pub(crate) fn has_session_command(name: &str, cfg: &Config) -> String {
     let session_prefix = &cfg.session_prefix;
     format!("tmux has-session -t {session_prefix}{name}")
 }
@@ -96,7 +96,7 @@ pub(crate) fn cmd_wait_all(
     poll_interval: Duration,
     timeout: Duration,
 ) -> Result<(), SkulkError> {
-    let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
+    let inv = fetch_inventory(ssh, cfg)?;
     if inv.sessions.is_empty() {
         eprintln!("No running agents.");
         return Ok(());

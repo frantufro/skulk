@@ -1,7 +1,7 @@
 use crate::commands::new::agent_create_tmux_command;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
-use crate::inventory::{inventory_command, parse_inventory};
+use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
 
@@ -20,7 +20,7 @@ pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
     let worktree_base = &cfg.worktree_base;
     let session_name = format!("{session_prefix}{name}");
 
-    let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
+    let inv = fetch_inventory(ssh, cfg)?;
 
     if inv.sessions.contains(&session_name) {
         return Err(SkulkError::Validation(format!(
