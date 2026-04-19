@@ -120,8 +120,9 @@ pub(crate) fn cmd_new(
     }
     if has_worktree {
         return Err(SkulkError::Validation(format!(
-            "Agent '{name}' has a leftover worktree but no running session.\n  \
-             Clean it up with: `skulk destroy {name}` or `skulk gc`"
+            "Agent '{name}' already has a worktree (archived or crashed).\n  \
+             Resume it: `skulk restart {name}`\n  \
+             Or wipe it: `skulk destroy {name}`"
         )));
     }
 
@@ -351,9 +352,9 @@ mod tests {
     }
 
     #[test]
-    fn cmd_new_orphaned_worktree_suggests_destroy() {
+    fn cmd_new_existing_worktree_suggests_restart_or_destroy() {
         let cfg = test_config();
-        // No session, but worktree exists (zombie state)
+        // No session, but worktree exists -- archived agent or crashed `new`.
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_inventory(
@@ -366,6 +367,10 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SkulkError::Validation(msg) => {
+                assert!(
+                    msg.contains("skulk restart zombie"),
+                    "should suggest restart: {msg}"
+                );
                 assert!(
                     msg.contains("skulk destroy zombie"),
                     "should suggest destroy: {msg}"
