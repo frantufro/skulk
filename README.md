@@ -205,6 +205,23 @@ Skulk runs an optional setup script inside each agent's tmux session before Clau
 
 `skulk init` writes `.skulk/init.sh.example` — rename it to `.skulk/init.sh` and customize to enable.
 
+## Claude Code Plugin
+
+Skulk ships a Claude Code plugin that teaches Claude how to drive skulk
+directly. Once installed, you can ask Claude things like "spin up three
+agents on these tasks" or "check on the running agents" and it'll run
+the right skulk commands for you.
+
+Install via the plugin marketplace from inside Claude Code:
+
+```
+/plugin marketplace add frantufro/claude-plugins
+/plugin install skulk@frantufro-plugins
+```
+
+The plugin contributes a `skulk-agent-management` skill that covers the
+full agent lifecycle (create, monitor, interact, review, ship, clean up).
+
 ## How It Works
 
 ```
