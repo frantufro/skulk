@@ -66,23 +66,23 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     // Parse tmux sessions
     let tmux_raw = extract_section(raw, "__TMUX_START__\n", "\n__TMUX_END__");
     let tmux_output = if tmux_raw.lines().any(is_tmux_no_server) {
-        String::new()
+        ""
     } else {
         tmux_raw
     };
-    let mut sessions: Vec<Session> = parse_sessions(&tmux_output)
+    let mut sessions: Vec<Session> = parse_sessions(tmux_output)
         .into_iter()
         .filter(|s| s.name.starts_with(&*cfg.session_prefix))
         .collect();
 
     // Parse worktree map
     let worktrees_raw = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
-    let worktree_map = get_worktree_map(&worktrees_raw, cfg);
+    let worktree_map = get_worktree_map(worktrees_raw, cfg);
 
     // Parse Stop-hook state files — optional; empty when the wait infrastructure
     // hasn't run yet.
     let state_raw = extract_section(raw, "__STATE_START__\n", "\n__STATE_END__");
-    let state_map = parse_state_map(&state_raw);
+    let state_map = parse_state_map(state_raw);
 
     // Join worktree paths and compute idle state for each live session
     for session in &mut sessions {

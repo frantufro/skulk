@@ -6,7 +6,16 @@ use crate::config::{Config, DEFAULT_INIT_SCRIPT};
 use crate::error::SkulkError;
 use crate::inventory::{inventory_command, parse_inventory};
 use crate::ssh::Ssh;
-use crate::util::{PromptStatus, STARTUP_DELAY, shell_escape, validate_model, validate_name};
+use crate::util::{shell_escape, validate_model, validate_name};
+
+const STARTUP_DELAY: u32 = 5;
+
+/// Result of delivering a prompt to a newly-created agent.
+enum PromptStatus {
+    Delivered,
+    Failed,
+    NotSent,
+}
 
 /// Resolve the local `.skulk/.env` path for the current project, if it exists.
 ///
