@@ -26,26 +26,34 @@ pub(crate) const DESCRIPTION_PROMPT: &str = "Read the git diff on stdin and writ
 /// Build the SSH command that generates the PR description and opens the PR.
 ///
 /// One round-trip: pipes `git diff` into `claude -p`, splits the resulting file
-/// into title (line 1) and body (line 3+), then invokes `gh pr create`. The
-/// temp directory is removed regardless of success or failure so the remote
-/// stays clean across repeated ship attempts.
+/// into title (line 1) and body (line 3+), validates both are present and the
+/// title isn't a code fence, then invokes `gh pr create`. The temp directory
+/// is removed on any exit (success, failure, abort) via an `EXIT` trap.
+///
+/// `set -o pipefail` ensures a `git diff` failure (e.g. unknown revision) is
+/// surfaced rather than masked by `claude -p` exiting 0 on empty stdin.
+/// `set -e` aborts immediately on any failed step. Both require bash, zsh,
+/// ksh, or POSIX-2024 dash -- universal on developer servers.
 pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let session_prefix = &cfg.session_prefix;
     let default_branch = &cfg.default_branch;
     let prompt = DESCRIPTION_PROMPT;
     format!(
-        "cd {base_path} && \
-         T=$(mktemp -d) && \
-         git diff {default_branch}...{session_prefix}{name} | claude -p '{prompt}' > \"$T/desc\" && \
-         head -n 1 \"$T/desc\" > \"$T/title\" && \
-         tail -n +3 \"$T/desc\" > \"$T/body\" && \
+        "set -e; set -o pipefail; \
+         cd {base_path}; \
+         T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; \
+         git diff {default_branch}...{session_prefix}{name} | claude -p '{prompt}' > \"$T/desc\"; \
+         head -n 1 \"$T/desc\" > \"$T/title\"; \
+         tail -n +3 \"$T/desc\" > \"$T/body\"; \
+         [ -s \"$T/title\" ] || {{ echo 'claude returned no title' >&2; exit 1; }}; \
+         [ -s \"$T/body\" ] || {{ echo 'claude returned no body' >&2; exit 1; }}; \
+         [ \"$(head -c 3 \"$T/title\")\" != '```' ] || {{ echo 'claude returned a code-fenced title' >&2; exit 1; }}; \
          gh pr create \
            --base {default_branch} \
            --head {session_prefix}{name} \
            --title \"$(cat \"$T/title\")\" \
-           --body-file \"$T/body\" ; \
-         RC=$? ; rm -rf \"$T\" ; exit $RC"
+           --body-file \"$T/body\""
     )
 }
 
@@ -109,10 +117,29 @@ mod tests {
     // ── ship_command ──────────────────────────────────────────────────────
 
     #[test]
-    fn ship_command_starts_in_base_path() {
+    fn ship_command_runs_in_base_path() {
         let cfg = test_config();
         let cmd = ship_command("feat", &cfg);
-        assert!(cmd.starts_with(&format!("cd {}", cfg.base_path)));
+        assert!(cmd.contains(&format!("cd {}", cfg.base_path)));
+    }
+
+    #[test]
+    fn ship_command_sets_pipefail() {
+        // Without pipefail, a failing `git diff` is masked by claude exiting 0
+        // on empty stdin, producing a hallucinated PR description.
+        let cfg = test_config();
+        let cmd = ship_command("feat", &cfg);
+        assert!(
+            cmd.contains("set -o pipefail"),
+            "ship_command must set pipefail: {cmd}"
+        );
+    }
+
+    #[test]
+    fn ship_command_uses_set_e_for_fail_fast() {
+        let cfg = test_config();
+        let cmd = ship_command("feat", &cfg);
+        assert!(cmd.contains("set -e"), "ship_command must set -e: {cmd}");
     }
 
     #[test]
@@ -150,19 +177,50 @@ mod tests {
     }
 
     #[test]
-    fn ship_command_cleans_up_temp_dir() {
+    fn ship_command_cleans_up_temp_dir_via_exit_trap() {
+        // EXIT trap fires on success, failure, and `set -e` aborts -- so
+        // cleanup always runs without needing to capture exit codes manually.
         let cfg = test_config();
         let cmd = ship_command("feat", &cfg);
-        assert!(cmd.contains("rm -rf"));
+        assert!(
+            cmd.contains("trap 'rm -rf \"$T\"' EXIT"),
+            "ship_command must register an EXIT trap to clean up: {cmd}"
+        );
     }
 
     #[test]
-    fn ship_command_exits_with_gh_pr_create_status() {
+    fn ship_command_aborts_on_empty_title() {
+        // Guards against `claude -p` returning malformed output (one-line
+        // response, empty file, etc.) that would otherwise produce a PR with
+        // an empty title.
         let cfg = test_config();
         let cmd = ship_command("feat", &cfg);
-        // Capture the gh exit code before cleanup so failures aren't masked.
-        assert!(cmd.contains("RC=$?"));
-        assert!(cmd.contains("exit $RC"));
+        assert!(
+            cmd.contains("[ -s \"$T/title\" ]"),
+            "ship_command must validate title file is non-empty: {cmd}"
+        );
+    }
+
+    #[test]
+    fn ship_command_aborts_on_empty_body() {
+        let cfg = test_config();
+        let cmd = ship_command("feat", &cfg);
+        assert!(
+            cmd.contains("[ -s \"$T/body\" ]"),
+            "ship_command must validate body file is non-empty: {cmd}"
+        );
+    }
+
+    #[test]
+    fn ship_command_rejects_code_fenced_title() {
+        // Claude sometimes wraps output in ```markdown fences despite the
+        // prompt's instructions; a fenced title would land verbatim in the PR.
+        let cfg = test_config();
+        let cmd = ship_command("feat", &cfg);
+        assert!(
+            cmd.contains("'```'"),
+            "ship_command must reject titles starting with code fences: {cmd}"
+        );
     }
 
     #[test]
