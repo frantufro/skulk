@@ -18,7 +18,7 @@ pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
 }
 
 /// Build the SSH command used to confirm the agent's tmux session exists.
-fn has_session_command(name: &str, cfg: &Config) -> String {
+pub(crate) fn has_session_command(name: &str, cfg: &Config) -> String {
     let session_prefix = &cfg.session_prefix;
     format!("tmux has-session -t {session_prefix}{name}")
 }
