@@ -302,6 +302,37 @@ pub(crate) enum Commands {
     },
 }
 
+impl Commands {
+    /// CLI-facing name of the subcommand, used to tag dispatch errors in `run()`.
+    ///
+    /// Kept colocated with `Commands` (rather than derived in `run()`) so adding
+    /// a new variant touches only this impl plus the dispatch match arm — not a
+    /// parallel string table that can silently drift.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Commands::Init => "init",
+            Commands::List => "list",
+            Commands::Pull { .. } => "pull",
+            Commands::New { .. } => "new",
+            Commands::Destroy { .. } => "destroy",
+            Commands::DestroyAll { .. } => "destroy-all",
+            Commands::Gc { .. } => "gc",
+            Commands::Connect { .. } => "connect",
+            Commands::Diff { .. } => "diff",
+            Commands::Disconnect { .. } => "disconnect",
+            Commands::Logs { .. } => "logs",
+            Commands::Send { .. } => "send",
+            Commands::Push { .. } => "push",
+            Commands::Archive { .. } => "archive",
+            Commands::Restart { .. } => "restart",
+            Commands::GitLog { .. } => "git-log",
+            Commands::Ship { .. } => "ship",
+            Commands::Transcript { .. } => "transcript",
+            Commands::Wait { .. } => "wait",
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -320,27 +351,7 @@ pub(crate) fn run(
     confirm: &dyn Fn(&str) -> bool,
     timings: &Timings,
 ) -> Result<(), (String, SkulkError)> {
-    let cmd_name = match &cli.command {
-        Commands::Init => unreachable!("Init is handled before config loading"),
-        Commands::List => "list",
-        Commands::Pull { .. } => "pull",
-        Commands::New { .. } => "new",
-        Commands::Destroy { .. } => "destroy",
-        Commands::DestroyAll { .. } => "destroy-all",
-        Commands::Gc { .. } => "gc",
-        Commands::Connect { .. } => "connect",
-        Commands::Diff { .. } => "diff",
-        Commands::Disconnect { .. } => "disconnect",
-        Commands::Logs { .. } => "logs",
-        Commands::Send { .. } => "send",
-        Commands::Push { .. } => "push",
-        Commands::Archive { .. } => "archive",
-        Commands::Restart { .. } => "restart",
-        Commands::GitLog { .. } => "git-log",
-        Commands::Ship { .. } => "ship",
-        Commands::Transcript { .. } => "transcript",
-        Commands::Wait { .. } => "wait",
-    };
+    let cmd_name = cli.command.name();
 
     let result = match cli.command {
         Commands::Init => unreachable!(),
