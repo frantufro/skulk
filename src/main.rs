@@ -296,6 +296,9 @@ pub(crate) enum Commands {
         /// Wait for every running agent on the host
         #[arg(long, conflicts_with = "name")]
         all: bool,
+        /// Maximum seconds to wait before giving up (applies per agent with --all)
+        #[arg(long, value_name = "SECS", default_value_t = 1800)]
+        timeout: u64,
     },
 }
 
@@ -410,15 +413,16 @@ pub(crate) fn run(
         Commands::Transcript { name, output } => {
             interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
         }
-        Commands::Wait { name, all } => {
+        Commands::Wait { name, all, timeout } => {
+            let timeout = Duration::from_secs(timeout);
             if all {
-                wait::cmd_wait_all(ssh, cfg, timings.wait_poll_interval)
+                wait::cmd_wait_all(ssh, cfg, timings.wait_poll_interval, timeout)
             } else {
                 // clap's `required_unless_present = "all"` makes `None` unreachable,
                 // but we return a validation error rather than panic to keep the
                 // contract type-safe instead of trusting clap's runtime invariant.
                 match name {
-                    Some(n) => wait::cmd_wait(ssh, &n, cfg, timings.wait_poll_interval),
+                    Some(n) => wait::cmd_wait(ssh, &n, cfg, timings.wait_poll_interval, timeout),
                     None => Err(SkulkError::Validation(
                         "must specify an agent name or --all".into(),
                     )),
@@ -874,6 +878,7 @@ mod tests {
             command: Commands::Wait {
                 name: Some("test".into()),
                 all: false,
+                timeout: 1800,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
@@ -888,6 +893,7 @@ mod tests {
             command: Commands::Wait {
                 name: None,
                 all: true,
+                timeout: 1800,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
