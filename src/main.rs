@@ -5,6 +5,7 @@ mod error;
 mod inventory;
 mod io;
 mod ssh;
+mod timings;
 mod util;
 
 #[cfg(test)]
@@ -14,37 +15,11 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, gc, interact, list, new, prompt_source, pull, restart, ship, wait};
+use commands::{destroy, gc, interact, list, new, pull, restart, ship, wait};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
-
-/// Tunable timing parameters threaded through `run()`.
-///
-/// Kept as a struct so adding a new timing doesn't touch every call site.
-/// Tests construct `Timings::zero()` to skip real sleeps; production uses
-/// `Timings::production()`.
-pub(crate) struct Timings {
-    pub send_verify_delay: Duration,
-    pub wait_poll_interval: Duration,
-}
-
-impl Timings {
-    pub fn production() -> Self {
-        Self {
-            send_verify_delay: Duration::from_millis(500),
-            wait_poll_interval: Duration::from_millis(500),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn zero() -> Self {
-        Self {
-            send_verify_delay: Duration::ZERO,
-            wait_poll_interval: Duration::ZERO,
-        }
-    }
-}
+use timings::Timings;
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -302,6 +277,37 @@ pub(crate) enum Commands {
     },
 }
 
+impl Commands {
+    /// CLI-facing name of the subcommand, used to tag dispatch errors in `run()`.
+    ///
+    /// Kept colocated with `Commands` (rather than derived in `run()`) so adding
+    /// a new variant touches only this impl plus the dispatch match arm — not a
+    /// parallel string table that can silently drift.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Commands::Init => "init",
+            Commands::List => "list",
+            Commands::Pull { .. } => "pull",
+            Commands::New { .. } => "new",
+            Commands::Destroy { .. } => "destroy",
+            Commands::DestroyAll { .. } => "destroy-all",
+            Commands::Gc { .. } => "gc",
+            Commands::Connect { .. } => "connect",
+            Commands::Diff { .. } => "diff",
+            Commands::Disconnect { .. } => "disconnect",
+            Commands::Logs { .. } => "logs",
+            Commands::Send { .. } => "send",
+            Commands::Push { .. } => "push",
+            Commands::Archive { .. } => "archive",
+            Commands::Restart { .. } => "restart",
+            Commands::GitLog { .. } => "git-log",
+            Commands::Ship { .. } => "ship",
+            Commands::Transcript { .. } => "transcript",
+            Commands::Wait { .. } => "wait",
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -320,27 +326,7 @@ pub(crate) fn run(
     confirm: &dyn Fn(&str) -> bool,
     timings: &Timings,
 ) -> Result<(), (String, SkulkError)> {
-    let cmd_name = match &cli.command {
-        Commands::Init => unreachable!("Init is handled before config loading"),
-        Commands::List => "list",
-        Commands::Pull { .. } => "pull",
-        Commands::New { .. } => "new",
-        Commands::Destroy { .. } => "destroy",
-        Commands::DestroyAll { .. } => "destroy-all",
-        Commands::Gc { .. } => "gc",
-        Commands::Connect { .. } => "connect",
-        Commands::Diff { .. } => "diff",
-        Commands::Disconnect { .. } => "disconnect",
-        Commands::Logs { .. } => "logs",
-        Commands::Send { .. } => "send",
-        Commands::Push { .. } => "push",
-        Commands::Archive { .. } => "archive",
-        Commands::Restart { .. } => "restart",
-        Commands::GitLog { .. } => "git-log",
-        Commands::Ship { .. } => "ship",
-        Commands::Transcript { .. } => "transcript",
-        Commands::Wait { .. } => "wait",
-    };
+    let cmd_name = cli.command.name();
 
     let result = match cli.command {
         Commands::Init => unreachable!(),
@@ -354,32 +340,12 @@ pub(crate) fn run(
             model,
             claude_args,
         } => {
-            let prompt = match (github.as_deref(), from.as_deref()) {
-                (None, None) => None,
-                (Some(id), None) => {
-                    let branch = format!("{}{name}", cfg.session_prefix);
-                    match prompt_source::load_github_prompt(ssh, id, &branch, cfg) {
-                        Ok(p) => Some(p),
-                        Err(e) => return Err(("new".to_string(), e)),
-                    }
-                }
-                (None, Some(path)) => {
-                    let branch = format!("{}{name}", cfg.session_prefix);
-                    match prompt_source::load_file_prompt(path, &branch) {
-                        Ok(p) => Some(p),
-                        Err(e) => return Err(("new".to_string(), e)),
-                    }
-                }
-                (Some(_), Some(_)) => {
-                    // clap `conflicts_with` enforces this is unreachable via CLI parsing.
-                    unreachable!("--github and --from are mutually exclusive")
-                }
-            };
             let env_file = new::resolve_local_env_file(cfg);
             new::cmd_new(
                 ssh,
                 &name,
-                prompt.as_deref(),
+                github.as_deref(),
+                from.as_deref(),
                 remote_control,
                 model.as_deref(),
                 claude_args.as_deref(),
