@@ -1,3 +1,4 @@
+use crate::agent_ref::AgentRef;
 use crate::commands::interact::push_command;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
@@ -36,14 +37,14 @@ pub(crate) const DESCRIPTION_PROMPT: &str = "Read the git diff on stdin and writ
 /// ksh, or POSIX-2024 dash -- universal on developer servers.
 pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
-    let session_prefix = &cfg.session_prefix;
     let default_branch = &cfg.default_branch;
+    let branch = AgentRef::new(name, cfg).branch_name();
     let prompt = DESCRIPTION_PROMPT;
     format!(
         "set -e; set -o pipefail; \
          cd {base_path}; \
          T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; \
-         git diff {default_branch}...{session_prefix}{name} | claude -p '{prompt}' > \"$T/desc\"; \
+         git diff {default_branch}...{branch} | claude -p '{prompt}' > \"$T/desc\"; \
          head -n 1 \"$T/desc\" > \"$T/title\"; \
          tail -n +3 \"$T/desc\" > \"$T/body\"; \
          [ -s \"$T/title\" ] || {{ echo 'claude returned no title' >&2; exit 1; }}; \
@@ -51,7 +52,7 @@ pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
          [ \"$(head -c 3 \"$T/title\")\" != '```' ] || {{ echo 'claude returned a code-fenced title' >&2; exit 1; }}; \
          gh pr create \
            --base {default_branch} \
-           --head {session_prefix}{name} \
+           --head {branch} \
            --title \"$(cat \"$T/title\")\" \
            --body-file \"$T/body\""
     )
@@ -68,7 +69,7 @@ pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
 pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
     let host = &cfg.host;
-    let session_prefix = &cfg.session_prefix;
+    let agent = AgentRef::new(name, cfg);
 
     ssh.run(&precheck_command()).map_err(|e| match e {
         SkulkError::SshFailed(_) => SkulkError::Diagnostic {
@@ -90,7 +91,7 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     if !output.is_empty() {
         println!("{output}");
     }
-    eprintln!("Opened PR for {session_prefix}{name}.");
+    eprintln!("Opened PR for {}.", agent.branch_name());
     Ok(())
 }
 

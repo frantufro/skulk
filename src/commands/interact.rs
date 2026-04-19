@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::agent_ref::AgentRef;
 use crate::commands::destroy::agent_destroy_session_command;
 use crate::commands::wait::{has_session_command, mark_busy_command};
 use crate::config::Config;
@@ -20,56 +21,68 @@ pub(crate) enum DiffFormat {
 
 /// Build the SSH command to attach to an agent's live tmux session.
 pub(crate) fn connect_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux attach-session -t {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!("tmux attach-session -t {}", agent.session_name())
 }
 
 /// Build the SSH command to detach all clients from an agent's tmux session.
 pub(crate) fn disconnect_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux detach-client -s {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!("tmux detach-client -s {}", agent.session_name())
 }
 
 /// Build the SSH command to diff an agent's branch against the default branch.
 pub(crate) fn diff_command(name: &str, format: DiffFormat, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let default_branch = &cfg.default_branch;
-    let session_prefix = &cfg.session_prefix;
+    let agent = AgentRef::new(name, cfg);
     let extra = match format {
         DiffFormat::Default => "",
         DiffFormat::Stat => " --stat",
         DiffFormat::NameOnly => " --name-only",
     };
-    format!("cd {base_path} && git diff{extra} {default_branch}...{session_prefix}{name}")
+    format!(
+        "cd {base_path} && git diff{extra} {default_branch}...{}",
+        agent.branch_name()
+    )
 }
 
 /// Build the SSH command to push an agent's branch to `origin` with upstream tracking.
 pub(crate) fn push_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
-    let session_prefix = &cfg.session_prefix;
-    format!("cd {base_path} && git push -u origin {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!(
+        "cd {base_path} && git push -u origin {}",
+        agent.branch_name()
+    )
 }
 
 /// Build the SSH command to show `git log` of an agent's branch against the default branch.
 pub(crate) fn git_log_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let default_branch = &cfg.default_branch;
-    let session_prefix = &cfg.session_prefix;
-    format!("cd {base_path} && git log {default_branch}..{session_prefix}{name} --oneline")
+    let agent = AgentRef::new(name, cfg);
+    format!(
+        "cd {base_path} && git log {default_branch}..{} --oneline",
+        agent.branch_name()
+    )
 }
 
 /// Build the SSH command to capture the visible pane content of an agent's tmux session.
 ///
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
 pub(crate) fn capture_pane_command(name: &str, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux capture-pane -p -t {session_prefix}{name}")
+    let agent = AgentRef::new(name, cfg);
+    format!("tmux capture-pane -p -t {}", agent.session_name())
 }
 
 /// Build the SSH command to capture N lines of scrollback from an agent's tmux session.
 pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -> String {
-    let session_prefix = &cfg.session_prefix;
-    format!("tmux capture-pane -p -t {session_prefix}{name} -S -{lines}")
+    let agent = AgentRef::new(name, cfg);
+    format!(
+        "tmux capture-pane -p -t {} -S -{lines}",
+        agent.session_name()
+    )
 }
 
 /// Build the SSH command to archive an agent -- kill its tmux session only.
@@ -98,8 +111,7 @@ pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
 /// newline inside the input box instead of submitting.
 pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
-    let session_prefix = &cfg.session_prefix;
-    let session_name = format!("{session_prefix}{name}");
+    let session_name = AgentRef::new(name, cfg).session_name();
     let mark_busy = mark_busy_command(&session_name);
     format!(
         "{mark_busy} && \
@@ -127,14 +139,16 @@ pub(crate) fn cmd_diff(
 /// Push an agent's branch to `origin` with upstream tracking.
 pub(crate) fn cmd_push(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
-    let session_prefix = &cfg.session_prefix;
     let output = ssh
         .run(&push_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     if !output.is_empty() {
         print!("{output}");
     }
-    eprintln!("Pushed {session_prefix}{name} to origin.");
+    eprintln!(
+        "Pushed {} to origin.",
+        AgentRef::new(name, cfg).branch_name()
+    );
     Ok(())
 }
 
@@ -155,17 +169,19 @@ pub(crate) fn cmd_git_log(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
 /// keeps running -- only the attached clients are kicked off.
 pub(crate) fn cmd_disconnect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
-    let session_prefix = &cfg.session_prefix;
     ssh.run(&disconnect_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
-    eprintln!("Detached all clients from {session_prefix}{name}.");
+    eprintln!(
+        "Detached all clients from {}.",
+        AgentRef::new(name, cfg).session_name()
+    );
     Ok(())
 }
 
 /// Attach to an agent's live tmux session via interactive SSH.
 pub(crate) fn cmd_connect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
-    let session_prefix = &cfg.session_prefix;
+    let session_name = AgentRef::new(name, cfg).session_name();
     // Pre-check that the session exists before launching interactive SSH,
     // because ssh_interactive replaces the process and tmux errors don't
     // propagate as non-zero exit codes in non-interactive contexts.
@@ -174,9 +190,9 @@ pub(crate) fn cmd_connect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
     let cmd = connect_command(name, cfg);
     let status = ssh.interactive(&cmd)?;
     if status.success() {
-        eprintln!("Detached from {session_prefix}{name}.");
+        eprintln!("Detached from {session_name}.");
     } else {
-        eprintln!("Connection to {session_prefix}{name} ended (non-zero exit).");
+        eprintln!("Connection to {session_name} ended (non-zero exit).");
     }
     Ok(())
 }
@@ -269,7 +285,7 @@ pub(crate) fn cmd_send(
     verify_delay: Duration,
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
-    let session_prefix = &cfg.session_prefix;
+    let session_name = AgentRef::new(name, cfg).session_name();
     let host = &cfg.host;
     let before = ssh
         .run(&capture_pane_command(name, cfg))
@@ -280,11 +296,11 @@ pub(crate) fn cmd_send(
     match ssh.run(&capture_pane_command(name, cfg)) {
         Ok(after) if after == before => {
             eprintln!(
-                "Warning: Prompt sent to {session_prefix}{name} but delivery could not be confirmed."
+                "Warning: Prompt sent to {session_name} but delivery could not be confirmed."
             );
         }
         Ok(_) => {
-            eprintln!("Prompt delivered to {session_prefix}{name}.");
+            eprintln!("Prompt delivered to {session_name}.");
         }
         Err(_) => {
             eprintln!("Warning: Prompt sent, but post-send verification failed.");

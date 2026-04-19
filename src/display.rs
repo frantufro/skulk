@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::inventory::{AgentState, GcOrphans, Session};
 
@@ -105,7 +106,8 @@ pub(crate) fn format_sessions_table_with_color(
     }
 
     for s in sessions {
-        let display_name = s.name.strip_prefix(&*cfg.session_prefix).unwrap_or(&s.name);
+        let agent = AgentRef::from_qualified(&s.name, cfg);
+        let display_name = agent.name();
         let status_raw = match s.state {
             AgentState::Attached => "attached",
             AgentState::Detached => "detached",
