@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::{destroy, doctor, gc, interact, list, new, pull, restart, ship, wait};
+use commands::{
+    destroy, doctor, gc, interact, list, new, prompt_source, pull, restart, ship, wait,
+};
 use config::Config;
 use error::SkulkError;
 use ssh::Ssh;
@@ -196,12 +198,22 @@ pub(crate) enum Commands {
     /// Send a prompt to a running agent
     ///
     /// Delivers the prompt text to the agent's Claude Code instance
-    /// and verifies delivery via pane content comparison.
+    /// and verifies delivery via pane content comparison. Pass the prompt
+    /// positionally, or use `--from <file>` to load contents from a local
+    /// text file (useful for multi-line follow-ups or code snippets).
     Send {
         /// Agent name
         name: String,
-        /// The prompt text to send
-        prompt: String,
+        /// The prompt text to send (omit when using --from)
+        #[arg(required_unless_present = "from")]
+        prompt: Option<String>,
+        /// Load prompt text from a local file
+        ///
+        /// Reads the file locally and sends its contents verbatim — no
+        /// task-assignment wrapper. Trailing newlines are trimmed; internal
+        /// whitespace is preserved.
+        #[arg(long, value_name = "FILE", conflicts_with = "prompt")]
+        from: Option<std::path::PathBuf>,
     },
 
     /// Push an agent's branch to `origin`
@@ -386,8 +398,23 @@ pub(crate) fn run(
             follow,
             lines,
         } => interact::cmd_logs(ssh, &name, follow, lines, cfg),
-        Commands::Send { name, prompt } => {
-            interact::cmd_send(ssh, &name, &prompt, cfg, timings.send_verify_delay)
+        Commands::Send { name, prompt, from } => {
+            // clap's `required_unless_present`/`conflicts_with` make None+None
+            // and Some+Some unreachable from the CLI, but we surface a
+            // Validation error rather than panic to keep the contract
+            // type-safe for non-CLI callers (mirrors the Wait arm above).
+            let resolved = match (prompt, from) {
+                (None, Some(path)) => prompt_source::load_file_raw(&path),
+                (Some(p), None) => Ok(p),
+                (Some(_), Some(_)) => Err(SkulkError::Validation(
+                    "--from conflicts with positional prompt; pass only one".into(),
+                )),
+                (None, None) => Err(SkulkError::Validation(
+                    "must provide prompt text or --from <file>".into(),
+                )),
+            };
+            resolved
+                .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
@@ -748,10 +775,89 @@ mod tests {
             no_color: true,
             command: Commands::Send {
                 name: "test".into(),
-                prompt: "fix bug".into(),
+                prompt: Some("fix bug".into()),
+                from: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn send_accepts_from_flag() {
+        let cli = Cli::try_parse_from(["skulk", "send", "agent", "--from", "/tmp/follow-up.txt"])
+            .expect("parsing --from should succeed");
+        match cli.command {
+            Commands::Send { prompt, from, .. } => {
+                assert!(prompt.is_none());
+                assert_eq!(
+                    from.as_deref().and_then(|p| p.to_str()),
+                    Some("/tmp/follow-up.txt")
+                );
+            }
+            _ => panic!("expected Commands::Send"),
+        }
+    }
+
+    #[test]
+    fn send_prompt_and_from_are_mutually_exclusive() {
+        let result = Cli::try_parse_from(["skulk", "send", "agent", "fix bug", "--from", "/tmp/x"]);
+        assert!(
+            result.is_err(),
+            "expected clap conflict error when both prompt and --from are passed"
+        );
+    }
+
+    #[test]
+    fn send_requires_prompt_or_from() {
+        let result = Cli::try_parse_from(["skulk", "send", "agent"]);
+        assert!(
+            result.is_err(),
+            "expected clap error when neither prompt nor --from is provided"
+        );
+    }
+
+    #[test]
+    fn run_dispatches_send_with_from_flag() {
+        use std::io::Write;
+        let cfg = test_config();
+        let tmp = std::env::temp_dir().join("skulk_main_send_from_test.txt");
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        writeln!(f, "Take another look at PR #42.").unwrap();
+
+        let ssh = MockSsh::new(vec![Ok("old pane".into()), ssh_ok(), Ok("new pane".into())]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Send {
+                name: "test".into(),
+                prompt: None,
+                from: Some(tmp.clone()),
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_send_propagates_missing_file_error() {
+        let cfg = test_config();
+        // No SSH calls expected: the file read fails before we touch the wire.
+        let ssh = MockSsh::new(vec![]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Send {
+                name: "test".into(),
+                prompt: None,
+                from: Some(std::path::PathBuf::from(
+                    "/nonexistent/skulk_send_absent.txt",
+                )),
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        assert!(result.is_err());
+        let (cmd, err) = result.unwrap_err();
+        assert_eq!(cmd, "send");
+        assert!(matches!(err, SkulkError::Validation(_)));
     }
 
     #[test]

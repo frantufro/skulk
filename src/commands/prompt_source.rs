@@ -196,6 +196,29 @@ pub(crate) fn load_file_prompt(path: &Path, branch: &str) -> Result<String, Skul
     Ok(wrap_file_prompt(branch, contents.trim_end_matches('\n')))
 }
 
+/// Load a local text file and return its contents verbatim for delivery as a prompt.
+///
+/// Unlike [`load_file_prompt`], the contents are not wrapped in task-assignment
+/// boilerplate — the caller controls the full prompt. Used by `skulk send --from`
+/// so follow-up instructions or code snippets reach a running agent as written.
+/// Trailing newlines are trimmed (matching shell-style file reads) but all
+/// internal whitespace is preserved.
+pub(crate) fn load_file_raw(path: &Path) -> Result<String, SkulkError> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        SkulkError::Validation(format!(
+            "Failed to read prompt file {}: {e}",
+            path.display()
+        ))
+    })?;
+    if contents.trim().is_empty() {
+        return Err(SkulkError::Validation(format!(
+            "Prompt file {} is empty.",
+            path.display()
+        )));
+    }
+    Ok(contents.trim_end_matches('\n').to_string())
+}
+
 /// Fetch a GitHub issue from the remote and wrap it into an agent prompt.
 pub(crate) fn load_github_prompt(
     ssh: &impl Ssh,
@@ -502,6 +525,58 @@ mod tests {
     fn load_file_prompt_empty_file_errors() {
         let path = make_tmp_file("empty.txt", "   \n\n  ");
         let result = load_file_prompt(&path, "skulk-t");
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("empty"));
+        });
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── load_file_raw ──────────────────────────────────────────────────
+
+    #[test]
+    fn load_file_raw_returns_contents_verbatim() {
+        let path = make_tmp_file("raw_verbatim.txt", "Keep reviewing PR #42.");
+        let out = load_file_raw(&path).unwrap();
+        assert_eq!(out, "Keep reviewing PR #42.");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_file_raw_trims_trailing_newlines_only() {
+        let path = make_tmp_file("raw_trailing.txt", "line 1\n  line 2  \n\n\n");
+        let out = load_file_raw(&path).unwrap();
+        assert_eq!(out, "line 1\n  line 2  ");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_file_raw_preserves_internal_whitespace() {
+        let path = make_tmp_file("raw_internal.txt", "a\n\nb\n\t  c\n");
+        let out = load_file_raw(&path).unwrap();
+        assert_eq!(out, "a\n\nb\n\t  c");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_file_raw_does_not_add_wrapper() {
+        let path = make_tmp_file("raw_no_wrapper.txt", "just this.");
+        let out = load_file_raw(&path).unwrap();
+        assert!(!out.contains("dedicated git worktree"));
+        assert!(!out.contains("ask me clarifying questions"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_file_raw_missing_file_errors() {
+        let path = std::path::PathBuf::from("/nonexistent/skulk_raw_absent.txt");
+        let err = load_file_raw(&path).unwrap_err();
+        assert!(matches!(err, SkulkError::Validation(_)));
+    }
+
+    #[test]
+    fn load_file_raw_empty_file_errors() {
+        let path = make_tmp_file("raw_empty.txt", "   \n\n  ");
+        let result = load_file_raw(&path);
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("empty"));
         });
