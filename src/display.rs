@@ -32,6 +32,10 @@ pub(crate) fn crossmark(color: bool) -> &'static str {
     }
 }
 
+pub(crate) fn warnmark(color: bool) -> &'static str {
+    if color { "\x1b[33m!\x1b[0m" } else { "[warn]" }
+}
+
 pub(crate) fn bold(text: &str, color: bool) -> String {
     if color {
         format!("{BOLD}{text}{RESET}")
