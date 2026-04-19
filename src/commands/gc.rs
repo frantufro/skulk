@@ -6,7 +6,7 @@ use crate::commands::destroy::{
 use crate::config::Config;
 use crate::display::{GcOrphans, format_gc_summary};
 use crate::error::SkulkError;
-use crate::inventory::{AgentInventory, inventory_command, parse_inventory};
+use crate::inventory::{AgentInventory, fetch_inventory};
 use crate::ssh::Ssh;
 
 /// Analyze an `AgentInventory` and find orphaned resources.
@@ -60,8 +60,7 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     let base_path = &cfg.base_path;
 
     // Fetch comprehensive inventory
-    let raw = ssh.run(&inventory_command(cfg))?;
-    let inv = parse_inventory(&raw, cfg);
+    let inv = fetch_inventory(ssh, cfg)?;
 
     // Find orphans
     let orphans = gc_find_orphans(&inv);

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::error::SkulkError;
-use crate::inventory::{inventory_command, parse_inventory};
+use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
 
@@ -62,7 +62,7 @@ pub(crate) fn cmd_destroy(
     let session_prefix = &cfg.session_prefix;
 
     // Fetch inventory via shared probe
-    let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
+    let inv = fetch_inventory(ssh, cfg)?;
     let session_name = format!("{session_prefix}{name}");
     let has_session = inv.sessions.contains(&session_name);
     let has_worktree = inv.worktrees.contains_key(&session_name);
@@ -123,7 +123,7 @@ pub(crate) fn cmd_destroy_all(
     confirm: &dyn Fn(&str) -> bool,
 ) -> Result<(), SkulkError> {
     let session_prefix = &cfg.session_prefix;
-    let inv = parse_inventory(&ssh.run(&inventory_command(cfg))?, cfg);
+    let inv = fetch_inventory(ssh, cfg)?;
 
     // Build comprehensive agent name set
     let mut name_set: HashSet<String> = HashSet::new();

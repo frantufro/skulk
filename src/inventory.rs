@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use crate::config::Config;
+use crate::error::SkulkError;
+use crate::ssh::Ssh;
 use crate::util::extract_section;
 
 /// Remote agent state gathered in a single SSH round-trip.
@@ -95,6 +97,16 @@ pub(crate) fn parse_inventory(raw: &str, cfg: &Config) -> AgentInventory {
         worktrees,
         branches,
     }
+}
+
+/// Round-trip helper: run the inventory probe over SSH and parse the result.
+///
+/// Most callers don't need the raw bytes — they just want an `AgentInventory`.
+/// Wraps the single-round-trip SSH call + parse so the same two-line idiom
+/// doesn't appear in every command module.
+pub(crate) fn fetch_inventory(ssh: &impl Ssh, cfg: &Config) -> Result<AgentInventory, SkulkError> {
+    let raw = ssh.run(&inventory_command(cfg))?;
+    Ok(parse_inventory(&raw, cfg))
 }
 
 #[cfg(test)]
