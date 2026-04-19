@@ -109,7 +109,7 @@ pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
     };
     if found.legacy {
         eprintln!(
-            "warning: {LEGACY_CONFIG_FILENAME} is deprecated — move it to {CONFIG_DIR}/{CONFIG_FILENAME} (`mkdir {CONFIG_DIR} && mv {LEGACY_CONFIG_FILENAME} {CONFIG_DIR}/{CONFIG_FILENAME}`)."
+            "warning: {LEGACY_CONFIG_FILENAME} is deprecated — move it to {CONFIG_DIR}/{CONFIG_FILENAME} (`mkdir -p {CONFIG_DIR} && mv {LEGACY_CONFIG_FILENAME} {CONFIG_DIR}/{CONFIG_FILENAME}`)."
         );
     }
     let content = std::fs::read_to_string(&found.path)

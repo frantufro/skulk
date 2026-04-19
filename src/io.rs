@@ -237,10 +237,13 @@ fn run_init() -> Result<(), SkulkError> {
         checkmark(color)
     );
     if legacy_path.is_file() {
-        eprintln!(
-            "  note: legacy {} still present. Remove it once you've verified the new config works.",
-            config::LEGACY_CONFIG_FILENAME
-        );
+        match std::fs::remove_file(&legacy_path) {
+            Ok(()) => eprintln!("  Removed legacy {}.", config::LEGACY_CONFIG_FILENAME),
+            Err(e) => eprintln!(
+                "  warning: failed to remove legacy {}: {e}",
+                config::LEGACY_CONFIG_FILENAME
+            ),
+        }
     }
 
     // Remote setup if requested
