@@ -206,6 +206,60 @@ pub(crate) fn mock_list_output(epoch: i64, tmux_lines: &str, worktrees: &[(&str,
     mock_list_output_with_state(epoch, tmux_lines, worktrees, &[])
 }
 
+/// Helper: build a mock `status_command` response.
+///
+/// Sections mirror the delimited layout emitted by `status_command`: epoch,
+/// tmux, worktrees porcelain, branch-exists probe, Stop-hook state mtime,
+/// rev-list count, and `git diff --stat` summary line.
+///
+/// `tmux_lines` is inserted verbatim so callers can also pass a `no server
+/// running…` line to exercise the stopped-agent path.
+pub(crate) fn mock_status_output(
+    epoch: i64,
+    tmux_lines: &str,
+    worktrees: &[(&str, &str)],
+    branch_exists: bool,
+    state_mtime: Option<i64>,
+    commits_ahead: Option<u32>,
+    diffstat_line: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("__EPOCH__{epoch}__EPOCH__\n"));
+    out.push_str("__TMUX_START__\n");
+    out.push_str(tmux_lines);
+    if !tmux_lines.is_empty() && !tmux_lines.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("__TMUX_END__\n");
+    out.push_str("__WORKTREES_START__\n");
+    for (branch, path) in worktrees {
+        out.push_str(&format!(
+            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n\n"
+        ));
+    }
+    out.push_str("__WORKTREES_END__\n");
+    out.push_str("__BRANCH_EXISTS_START__\n");
+    out.push_str(if branch_exists { "yes\n" } else { "no\n" });
+    out.push_str("__BRANCH_EXISTS_END__\n");
+    out.push_str("__STATE_START__\n");
+    if let Some(m) = state_mtime {
+        out.push_str(&format!("{m}\n"));
+    }
+    out.push_str("__STATE_END__\n");
+    out.push_str("__REVCOUNT_START__\n");
+    if let Some(c) = commits_ahead {
+        out.push_str(&format!("{c}\n"));
+    }
+    out.push_str("__REVCOUNT_END__\n");
+    out.push_str("__DIFFSTAT_START__\n");
+    out.push_str(diffstat_line);
+    if !diffstat_line.is_empty() && !diffstat_line.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("__DIFFSTAT_END__\n");
+    out
+}
+
 /// Helper: like [`mock_list_output`] but also injects Stop-hook state entries
 /// as `(session_name, mtime_epoch)` pairs.
 pub(crate) fn mock_list_output_with_state(

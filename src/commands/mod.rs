@@ -9,4 +9,5 @@ pub(crate) mod prompt_source;
 pub(crate) mod pull;
 pub(crate) mod restart;
 pub(crate) mod ship;
+pub(crate) mod status;
 pub(crate) mod wait;
