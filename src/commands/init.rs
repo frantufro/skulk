@@ -95,6 +95,30 @@ pub(crate) fn detect_git_context(run_local: &dyn Fn(&str) -> Result<String, Stri
     }
 }
 
+/// Prompt in a loop until the validator accepts the user's input.
+///
+/// The validator both transforms and validates — returning `Ok(value)` breaks
+/// the loop with that (possibly substituted) value, returning `Err(message)`
+/// prints the message with two-space indent and re-prompts. Letting the
+/// validator own the transform keeps empty-input default-substitution out of
+/// the helper.
+fn prompt_validated<F>(
+    prompter: &mut dyn Prompter,
+    message: &str,
+    validate: F,
+) -> Result<String, SkulkError>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    loop {
+        let input = prompter.prompt(message)?;
+        match validate(&input) {
+            Ok(value) => return Ok(value),
+            Err(e) => eprintln!("  {e}"),
+        }
+    }
+}
+
 // ── Wizard ─────────────────────────────────────────────────────────────────
 
 /// Run the interactive init wizard, collecting all user answers.
@@ -135,43 +159,41 @@ pub(crate) fn run_wizard(
 
     // Step 4: Session prefix
     let default_prefix = format!("{repo_name}-");
-    let session_prefix = loop {
-        let input = prompter.prompt(&format!(
+    let session_prefix = prompt_validated(
+        prompter,
+        &format!(
             "{} Session prefix {}: ",
             green("?", color),
             dim(&format!("[{default_prefix}]"), color)
-        ))?;
-        let value = if input.is_empty() {
-            default_prefix.clone()
-        } else {
-            input
-        };
-        if let Err(e) = validate_shell_safe(&value, "session_prefix") {
-            eprintln!("  {e}");
-            continue;
-        }
-        break value;
-    };
+        ),
+        |input| {
+            let value = if input.is_empty() {
+                default_prefix.clone()
+            } else {
+                input.to_string()
+            };
+            validate_shell_safe(&value, "session_prefix").map(|()| value)
+        },
+    )?;
 
     // Step 5: Default branch
     let detected_branch = git_ctx.default_branch.as_deref().unwrap_or("main");
-    let default_branch = loop {
-        let input = prompter.prompt(&format!(
+    let default_branch = prompt_validated(
+        prompter,
+        &format!(
             "{} Default branch {}: ",
             green("?", color),
             dim(&format!("[{detected_branch}]"), color)
-        ))?;
-        let value = if input.is_empty() {
-            detected_branch.to_string()
-        } else {
-            input
-        };
-        if let Err(e) = validate_shell_safe(&value, "default_branch") {
-            eprintln!("  {e}");
-            continue;
-        }
-        break value;
-    };
+        ),
+        |input| {
+            let value = if input.is_empty() {
+                detected_branch.to_string()
+            } else {
+                input.to_string()
+            };
+            validate_shell_safe(&value, "default_branch").map(|()| value)
+        },
+    )?;
 
     // Step 6: Derive paths
     let base_path = format!("~/{repo_name}");
@@ -216,18 +238,16 @@ fn prompt_and_test_ssh(
     color: bool,
     test_ssh: &dyn Fn(&str) -> Result<(), SkulkError>,
 ) -> Result<Option<String>, SkulkError> {
-    let host = loop {
-        let input = prompter.prompt(&format!("\n{} SSH host: ", green("?", color)))?;
-        if input.is_empty() {
-            eprintln!("  SSH host cannot be empty.");
-            continue;
-        }
-        if let Err(e) = validate_shell_safe(&input, "host") {
-            eprintln!("  {e}");
-            continue;
-        }
-        break input;
-    };
+    let host = prompt_validated(
+        prompter,
+        &format!("\n{} SSH host: ", green("?", color)),
+        |input| {
+            if input.is_empty() {
+                return Err("SSH host cannot be empty.".into());
+            }
+            validate_shell_safe(input, "host").map(|()| input.to_string())
+        },
+    )?;
 
     loop {
         match test_ssh(&host) {
@@ -256,14 +276,17 @@ fn detect_repo_info(
         url.clone()
     } else {
         eprintln!("  No git remote detected.");
-        loop {
-            let input = prompter.prompt(&format!("{} Git repo URL: ", green("?", color)))?;
-            if input.is_empty() {
-                eprintln!("  Repo URL cannot be empty.");
-                continue;
-            }
-            break input;
-        }
+        prompt_validated(
+            prompter,
+            &format!("{} Git repo URL: ", green("?", color)),
+            |input| {
+                if input.is_empty() {
+                    Err("Repo URL cannot be empty.".into())
+                } else {
+                    Ok(input.to_string())
+                }
+            },
+        )?
     };
 
     let repo_name = if let Some(ref name) = git_ctx.repo_name {
@@ -272,18 +295,16 @@ fn detect_repo_info(
         eprintln!("  Derived repo name: {}", bold(&parsed, color));
         parsed
     } else {
-        loop {
-            let input = prompter.prompt(&format!("{} Repo name: ", green("?", color)))?;
-            if input.is_empty() {
-                eprintln!("  Repo name cannot be empty.");
-                continue;
-            }
-            if let Err(e) = validate_shell_safe(&input, "repo_name") {
-                eprintln!("  {e}");
-                continue;
-            }
-            break input;
-        }
+        prompt_validated(
+            prompter,
+            &format!("{} Repo name: ", green("?", color)),
+            |input| {
+                if input.is_empty() {
+                    return Err("Repo name cannot be empty.".into());
+                }
+                validate_shell_safe(input, "repo_name").map(|()| input.to_string())
+            },
+        )?
     };
 
     // Validate repo_name even when auto-detected (it flows into shell commands and TOML)
