@@ -90,7 +90,11 @@ pub(crate) fn check_gh_available(ssh: &impl Ssh, cfg: &Config) -> Result<(), Sku
 // ── Issue fetch ────────────────────────────────────────────────────────────
 
 /// Build the SSH command that fetches an issue as JSON from the base repo on the remote.
-pub(crate) fn gh_issue_fetch_command(issue_id: &str, cfg: &Config) -> String {
+///
+/// Private to the module: callers must go through `load_github_prompt`, which validates
+/// `issue_id` first via `validate_issue_id`. Keeping this function private prevents a
+/// future caller from accidentally interpolating an unvalidated id into a shell string.
+fn gh_issue_fetch_command(issue_id: &str, cfg: &Config) -> String {
     format!(
         "cd {} && gh issue view {} --json title,body,comments",
         cfg.base_path, issue_id
@@ -100,7 +104,10 @@ pub(crate) fn gh_issue_fetch_command(issue_id: &str, cfg: &Config) -> String {
 /// Fetch a GitHub issue via `gh` on the remote and return the raw JSON.
 ///
 /// Translates "Could not resolve to an Issue" into a clean `NotFound` error.
-pub(crate) fn fetch_github_issue_raw(
+///
+/// Private to the module for the same reason as `gh_issue_fetch_command`: this is
+/// the only path that interpolates `issue_id` into a remote shell command.
+fn fetch_github_issue_raw(
     ssh: &impl Ssh,
     issue_id: &str,
     cfg: &Config,
@@ -457,7 +464,7 @@ mod tests {
         ]);
         let out = load_github_prompt(&ssh, "42", "skulk-x", &cfg).unwrap();
         assert!(out.contains("#42"));
-        assert!(out.contains("T"));
+        assert!(out.contains('T'));
         assert!(out.contains("skulk-x"));
     }
 

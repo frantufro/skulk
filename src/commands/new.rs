@@ -79,6 +79,13 @@ pub(crate) fn agent_create_tmux_command(
 /// in a `send-keys` call would otherwise submit a partial message to Claude Code.
 /// After the paste we sleep briefly then send Enter separately, which defeats
 /// Claude Code's paste-detection swallowing the trailing Enter as a newline.
+///
+/// `paste-buffer -d` deletes the buffer atomically with a successful paste, so a
+/// prompt containing sensitive context never lingers in tmux's server-wide buffer
+/// list. The buffer name is deterministic per agent (`skulk-prompt-<session>`),
+/// so even in the rare race where the session dies between `has-session` and
+/// `paste-buffer` and the buffer leaks, the next attempt for the same agent
+/// overwrites it via `set-buffer`.
 pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
@@ -86,8 +93,7 @@ pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) 
     format!(
         "sleep {STARTUP_DELAY} && tmux has-session -t {session_prefix}{name} && \
          tmux set-buffer -b {buffer} -- '{escaped}' && \
-         tmux paste-buffer -p -t {session_prefix}{name} -b {buffer} && \
-         tmux delete-buffer -b {buffer} && \
+         tmux paste-buffer -p -d -t {session_prefix}{name} -b {buffer} && \
          sleep 0.1 && \
          tmux send-keys -t {session_prefix}{name} Enter"
     )
@@ -413,15 +419,21 @@ mod tests {
     }
 
     #[test]
-    fn agent_send_prompt_command_deletes_buffer_after_paste() {
+    fn agent_send_prompt_command_deletes_buffer_atomically_with_paste() {
+        // `paste-buffer -d` deletes the buffer as part of a successful paste so the
+        // prompt content does not linger in tmux's server-wide buffer list. We assert
+        // the `-d` flag is on the same `paste-buffer` invocation, not a separate
+        // `delete-buffer` call (which could leak the buffer if paste failed first).
         let cfg = test_config();
         let cmd = agent_send_prompt_command("my-task", "hi", &cfg);
-        let paste_idx = cmd.find("paste-buffer").expect("paste step missing");
-        let delete_idx = cmd[paste_idx..]
-            .find("delete-buffer")
-            .map(|i| i + paste_idx)
-            .expect("delete-buffer step missing");
-        assert!(paste_idx < delete_idx);
+        assert!(
+            cmd.contains("paste-buffer -p -d"),
+            "expected paste-buffer to use -d for atomic delete-on-paste, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("delete-buffer"),
+            "separate delete-buffer call should be gone in favor of paste-buffer -d"
+        );
     }
 
     #[test]
