@@ -88,7 +88,7 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     for session in &mut sessions {
         session.worktree = worktree_map.get(&session.name).cloned();
         session.state = resolve_agent_state(
-            &session.state,
+            session.state,
             session.activity,
             state_map.get(&session.name).copied(),
         );

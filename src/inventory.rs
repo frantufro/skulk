@@ -23,7 +23,7 @@ pub(crate) struct AgentInventory {
 /// both when the Stop-hook marker is newer than the session's last activity,
 /// signalling that the agent has finished its turn and is awaiting input.
 /// `Stopped` means the tmux session is gone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentState {
     Attached,
     Detached,
@@ -77,16 +77,16 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
 /// `state_mtime >= activity`. When Claude resumes, new output bumps `activity`
 /// above `state_mtime` until the next turn ends.
 pub(crate) fn resolve_agent_state(
-    state: &AgentState,
+    state: AgentState,
     activity: i64,
     state_mtime: Option<i64>,
 ) -> AgentState {
-    if *state == AgentState::Stopped {
+    if state == AgentState::Stopped {
         return AgentState::Stopped;
     }
     match state_mtime {
         Some(m) if m >= activity => AgentState::Idle,
-        _ => state.clone(),
+        _ => state,
     }
 }
 
@@ -249,11 +249,11 @@ mod tests {
     #[test]
     fn resolve_agent_state_stopped_when_session_gone() {
         assert_eq!(
-            resolve_agent_state(&AgentState::Stopped, 0, None),
+            resolve_agent_state(AgentState::Stopped, 0, None),
             AgentState::Stopped
         );
         assert_eq!(
-            resolve_agent_state(&AgentState::Stopped, 1000, Some(2000)),
+            resolve_agent_state(AgentState::Stopped, 1000, Some(2000)),
             AgentState::Stopped
         );
     }
@@ -261,11 +261,11 @@ mod tests {
     #[test]
     fn resolve_agent_state_preserves_live_state_without_marker() {
         assert_eq!(
-            resolve_agent_state(&AgentState::Detached, 1000, None),
+            resolve_agent_state(AgentState::Detached, 1000, None),
             AgentState::Detached
         );
         assert_eq!(
-            resolve_agent_state(&AgentState::Attached, 1000, None),
+            resolve_agent_state(AgentState::Attached, 1000, None),
             AgentState::Attached
         );
     }
@@ -273,11 +273,11 @@ mod tests {
     #[test]
     fn resolve_agent_state_idle_when_mtime_ge_activity() {
         assert_eq!(
-            resolve_agent_state(&AgentState::Detached, 1000, Some(1000)),
+            resolve_agent_state(AgentState::Detached, 1000, Some(1000)),
             AgentState::Idle
         );
         assert_eq!(
-            resolve_agent_state(&AgentState::Attached, 1000, Some(1005)),
+            resolve_agent_state(AgentState::Attached, 1000, Some(1005)),
             AgentState::Idle
         );
     }
@@ -285,11 +285,11 @@ mod tests {
     #[test]
     fn resolve_agent_state_working_when_activity_after_mtime() {
         assert_eq!(
-            resolve_agent_state(&AgentState::Detached, 2000, Some(1000)),
+            resolve_agent_state(AgentState::Detached, 2000, Some(1000)),
             AgentState::Detached
         );
         assert_eq!(
-            resolve_agent_state(&AgentState::Attached, 2000, Some(1000)),
+            resolve_agent_state(AgentState::Attached, 2000, Some(1000)),
             AgentState::Attached
         );
     }
