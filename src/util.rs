@@ -2,17 +2,6 @@ use std::io::BufRead;
 
 use crate::error::SkulkError;
 
-pub(crate) const STARTUP_DELAY: u32 = 5;
-
-/// Check whether a host refers to the local machine.
-///
-/// When true, commands run locally via `sh -c` instead of over SSH.
-/// Exact-match only: aliases like `localhost.localdomain`, `[::1]`, or
-/// other 127.0.0.0/8 addresses are not recognized. Extend if users ask.
-pub(crate) fn is_localhost(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
 /// Validate a Claude model identifier: `[A-Za-z0-9._-]`, 1-64 chars.
 ///
 /// Matches the shape of real Claude model IDs (`opus`, `sonnet`,
@@ -82,13 +71,13 @@ pub(crate) fn shell_escape(input: &str) -> String {
 /// Extract a delimited section from raw SSH output.
 ///
 /// Returns the content between `start_marker` and `end_marker`, or an empty
-/// string if either marker is missing.
-pub(crate) fn extract_section(raw: &str, start_marker: &str, end_marker: &str) -> String {
-    let start = raw.find(start_marker).map(|i| i + start_marker.len());
-    let end = raw.find(end_marker);
-    match (start, end) {
-        (Some(s), Some(e)) if s < e => raw[s..e].to_string(),
-        _ => String::new(),
+/// slice if either marker is missing.
+pub(crate) fn extract_section<'a>(raw: &'a str, start: &str, end: &str) -> &'a str {
+    let s = raw.find(start).map(|i| i + start.len());
+    let e = raw.find(end);
+    match (s, e) {
+        (Some(s), Some(e)) if s < e => &raw[s..e],
+        _ => "",
     }
 }
 
@@ -105,70 +94,9 @@ pub(crate) fn confirm_from_reader<R: BufRead>(prompt: &str, reader: &mut R) -> b
     answer == "y" || answer == "yes"
 }
 
-/// Find the index in `new_lines` where new content begins, relative to `old_lines`.
-///
-/// Uses suffix-matching: finds the longest suffix of `old_lines` that appears as a
-/// contiguous subsequence in `new_lines`. Everything after that match is new content.
-/// Returns 0 if no overlap (show all), or `new_lines.len()` if nothing changed.
-///
-/// Complexity is O(n^2 * m) but bounded by the follow buffer size (200 lines).
-pub(crate) fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
-    if old_lines.is_empty() {
-        return 0;
-    }
-
-    // Try progressively shorter suffixes of old_lines
-    for start in 0..old_lines.len() {
-        let suffix = &old_lines[start..];
-        let suffix_len = suffix.len();
-
-        // Check if this suffix appears as a contiguous block in new_lines
-        if suffix_len <= new_lines.len() {
-            for new_start in 0..=new_lines.len() - suffix_len {
-                if new_lines[new_start..new_start + suffix_len] == *suffix {
-                    // Found match -- new content starts after the match
-                    return new_start + suffix_len;
-                }
-            }
-        }
-    }
-
-    // No overlap found -- all content is new
-    0
-}
-
-/// Result of delivering a prompt to a newly-created agent.
-pub(crate) enum PromptStatus {
-    Delivered,
-    Failed,
-    NotSent,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── is_localhost tests ───────────────────────────────────────────────
-
-    #[test]
-    fn is_localhost_name() {
-        assert!(is_localhost("localhost"));
-    }
-
-    #[test]
-    fn is_localhost_ipv4_loopback() {
-        assert!(is_localhost("127.0.0.1"));
-    }
-
-    #[test]
-    fn is_localhost_ipv6_loopback() {
-        assert!(is_localhost("::1"));
-    }
-
-    #[test]
-    fn is_localhost_remote_host() {
-        assert!(!is_localhost("myserver.example.com"));
-    }
 
     // ── validate_name tests ─────────────────────────────────────────────
 
@@ -376,66 +304,5 @@ mod tests {
     fn confirm_eof_returns_false() {
         let mut input = std::io::Cursor::new(b"");
         assert!(!confirm_from_reader("Delete?", &mut input));
-    }
-
-    // ── find_new_content_start tests ────────────────────────────────────
-
-    #[test]
-    fn find_new_content_start_partial_overlap() {
-        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let new = vec!["b".to_string(), "c".to_string(), "d".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 2);
-    }
-
-    #[test]
-    fn find_new_content_start_no_change() {
-        let old = vec!["a".to_string(), "b".to_string()];
-        let new = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 2);
-    }
-
-    #[test]
-    fn find_new_content_start_complete_change() {
-        let old = vec!["a".to_string(), "b".to_string()];
-        let new = vec!["x".to_string(), "y".to_string(), "z".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 0);
-    }
-
-    #[test]
-    fn find_new_content_start_empty_old() {
-        let old: Vec<String> = vec![];
-        let new = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 0);
-    }
-
-    #[test]
-    fn find_new_content_start_suffix_match_at_last_iteration() {
-        let old = vec!["x".to_string(), "y".to_string(), "a".to_string()];
-        let new = vec![
-            "b".to_string(),
-            "c".to_string(),
-            "a".to_string(),
-            "d".to_string(),
-        ];
-        assert_eq!(find_new_content_start(&old, &new), 3);
-    }
-
-    #[test]
-    fn find_new_content_start_empty_new() {
-        let old = vec!["a".to_string(), "b".to_string()];
-        let new: Vec<String> = vec![];
-        assert_eq!(find_new_content_start(&old, &new), 0);
-    }
-
-    #[test]
-    fn find_new_content_start_partial_match_not_contiguous() {
-        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let new = vec![
-            "a".to_string(),
-            "x".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ];
-        assert_eq!(find_new_content_start(&old, &new), 3);
     }
 }

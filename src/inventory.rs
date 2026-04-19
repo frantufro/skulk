@@ -79,7 +79,7 @@ pub(crate) fn parse_inventory(raw: &str, cfg: &Config) -> AgentInventory {
 
     // Worktrees: parse porcelain output between markers
     let worktrees_raw = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
-    let worktrees = get_worktree_map(&worktrees_raw, cfg);
+    let worktrees = get_worktree_map(worktrees_raw, cfg);
 
     // Branches: lines between markers, trimmed, filtered to session prefix
     let branches_raw = extract_section(raw, "__BRANCHES_START__\n", "\n__BRANCHES_END__");

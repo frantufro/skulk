@@ -23,8 +23,45 @@ use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
 use crate::ssh::Ssh;
-use crate::util::{confirm_from_reader, find_new_content_start, is_localhost, shell_escape};
+use crate::util::{confirm_from_reader, shell_escape};
 use crate::{Cli, Commands, run};
+
+/// Check whether a host refers to the local machine.
+///
+/// When true, commands run locally via `sh -c` instead of over SSH.
+/// Exact-match only: aliases like `localhost.localdomain`, `[::1]`, or
+/// other 127.0.0.0/8 addresses are not recognized. Extend if users ask.
+fn is_localhost(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Find the index in `new_lines` where new content begins, relative to `old_lines`.
+///
+/// Uses suffix-matching: finds the longest suffix of `old_lines` that appears as a
+/// contiguous subsequence in `new_lines`. Everything after that match is new content.
+/// Returns 0 if no overlap (show all), or `new_lines.len()` if nothing changed.
+///
+/// Complexity is O(n^2 * m) but bounded by the follow buffer size (200 lines).
+fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
+    if old_lines.is_empty() {
+        return 0;
+    }
+
+    for start in 0..old_lines.len() {
+        let suffix = &old_lines[start..];
+        let suffix_len = suffix.len();
+
+        if suffix_len <= new_lines.len() {
+            for new_start in 0..=new_lines.len() - suffix_len {
+                if new_lines[new_start..new_start + suffix_len] == *suffix {
+                    return new_start + suffix_len;
+                }
+            }
+        }
+    }
+
+    0
+}
 
 /// Read a yes/no confirmation from stdin.
 pub(crate) fn confirm(prompt: &str) -> bool {
@@ -394,5 +431,93 @@ pub(crate) fn main() {
     ) {
         eprintln!("skulk {cmd}: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_localhost tests ───────────────────────────────────────────────
+
+    #[test]
+    fn is_localhost_name() {
+        assert!(is_localhost("localhost"));
+    }
+
+    #[test]
+    fn is_localhost_ipv4_loopback() {
+        assert!(is_localhost("127.0.0.1"));
+    }
+
+    #[test]
+    fn is_localhost_ipv6_loopback() {
+        assert!(is_localhost("::1"));
+    }
+
+    #[test]
+    fn is_localhost_remote_host() {
+        assert!(!is_localhost("myserver.example.com"));
+    }
+
+    // ── find_new_content_start tests ────────────────────────────────────
+
+    #[test]
+    fn find_new_content_start_partial_overlap() {
+        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let new = vec!["b".to_string(), "c".to_string(), "d".to_string()];
+        assert_eq!(find_new_content_start(&old, &new), 2);
+    }
+
+    #[test]
+    fn find_new_content_start_no_change() {
+        let old = vec!["a".to_string(), "b".to_string()];
+        let new = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(find_new_content_start(&old, &new), 2);
+    }
+
+    #[test]
+    fn find_new_content_start_complete_change() {
+        let old = vec!["a".to_string(), "b".to_string()];
+        let new = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        assert_eq!(find_new_content_start(&old, &new), 0);
+    }
+
+    #[test]
+    fn find_new_content_start_empty_old() {
+        let old: Vec<String> = vec![];
+        let new = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(find_new_content_start(&old, &new), 0);
+    }
+
+    #[test]
+    fn find_new_content_start_suffix_match_at_last_iteration() {
+        let old = vec!["x".to_string(), "y".to_string(), "a".to_string()];
+        let new = vec![
+            "b".to_string(),
+            "c".to_string(),
+            "a".to_string(),
+            "d".to_string(),
+        ];
+        assert_eq!(find_new_content_start(&old, &new), 3);
+    }
+
+    #[test]
+    fn find_new_content_start_empty_new() {
+        let old = vec!["a".to_string(), "b".to_string()];
+        let new: Vec<String> = vec![];
+        assert_eq!(find_new_content_start(&old, &new), 0);
+    }
+
+    #[test]
+    fn find_new_content_start_partial_match_not_contiguous() {
+        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let new = vec![
+            "a".to_string(),
+            "x".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        assert_eq!(find_new_content_start(&old, &new), 3);
     }
 }
