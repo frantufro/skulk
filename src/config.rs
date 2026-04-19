@@ -2,13 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub(crate) const CONFIG_FILENAME: &str = ".skulk.toml";
+pub(crate) const CONFIG_DIR: &str = ".skulk";
+pub(crate) const CONFIG_FILENAME: &str = "config.toml";
+pub(crate) const LEGACY_CONFIG_FILENAME: &str = ".skulk.toml";
 
-/// Runtime configuration loaded from `.skulk.toml`.
+/// Runtime configuration loaded from `.skulk/config.toml`.
 ///
 /// All fields are mandatory. If no config file is found in the current
-/// directory or any parent, a sample file is generated in the current
-/// directory and the CLI exits with instructions to edit it.
+/// directory or any parent, the CLI exits with instructions to run
+/// `skulk init`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct Config {
     pub host: String,
@@ -29,7 +31,9 @@ fn default_branch() -> String {
 /// contain spaces, quotes, or other metacharacters.
 pub(crate) fn validate_shell_safe(value: &str, field: &str) -> Result<(), String> {
     if value.is_empty() {
-        return Err(format!("'{field}' cannot be empty in {CONFIG_FILENAME}"));
+        return Err(format!(
+            "'{field}' cannot be empty in {CONFIG_DIR}/{CONFIG_FILENAME}"
+        ));
     }
     for c in value.chars() {
         if !matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '/' | '.' | '-' | '_' | '~' | '+' | '@' | ':')
@@ -43,13 +47,42 @@ pub(crate) fn validate_shell_safe(value: &str, field: &str) -> Result<(), String
     Ok(())
 }
 
-/// Walks from `start` up to the filesystem root looking for `.skulk.toml`.
-fn find_config_file(start: &Path) -> Option<PathBuf> {
+/// Build the path to the config file under a project directory.
+pub(crate) fn config_path_in(dir: &Path) -> PathBuf {
+    dir.join(CONFIG_DIR).join(CONFIG_FILENAME)
+}
+
+/// Legacy config path (`.skulk.toml`) under a project directory.
+pub(crate) fn legacy_config_path_in(dir: &Path) -> PathBuf {
+    dir.join(LEGACY_CONFIG_FILENAME)
+}
+
+/// Located config file, tagged by whether it's the legacy `.skulk.toml`.
+struct FoundConfig {
+    path: PathBuf,
+    legacy: bool,
+}
+
+/// Walks from `start` up to the filesystem root looking for a config file.
+///
+/// Prefers `.skulk/config.toml`; falls back to the legacy `.skulk.toml` at the
+/// same directory level. The first directory with either wins.
+fn find_config_file(start: &Path) -> Option<FoundConfig> {
     let mut dir = start.to_path_buf();
     loop {
-        let candidate = dir.join(CONFIG_FILENAME);
+        let candidate = config_path_in(&dir);
         if candidate.is_file() {
-            return Some(candidate);
+            return Some(FoundConfig {
+                path: candidate,
+                legacy: false,
+            });
+        }
+        let legacy = legacy_config_path_in(&dir);
+        if legacy.is_file() {
+            return Some(FoundConfig {
+                path: legacy,
+                legacy: true,
+            });
         }
         if !dir.pop() {
             return None;
@@ -57,27 +90,32 @@ fn find_config_file(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Loads configuration from the nearest `.skulk.toml`.
+/// Loads configuration from the nearest `.skulk/config.toml` (or legacy
+/// `.skulk.toml` as a fallback).
 ///
-/// If no config file is found, generates a sample `.skulk.toml` in `start`
-/// and returns an error telling the user to edit it.
+/// When the legacy file is used, a deprecation warning is printed to stderr.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - No config file exists (after generating a sample)
+/// - No config file exists
 /// - The config file cannot be read
 /// - The config file has invalid TOML or missing fields
 pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
-    let Some(path) = find_config_file(start) else {
+    let Some(found) = find_config_file(start) else {
         return Err(format!(
-            "No {CONFIG_FILENAME} found. Run `skulk init` to set up this project."
+            "No {CONFIG_DIR}/{CONFIG_FILENAME} found. Run `skulk init` to set up this project."
         ));
     };
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    if found.legacy {
+        eprintln!(
+            "warning: {LEGACY_CONFIG_FILENAME} is deprecated — move it to {CONFIG_DIR}/{CONFIG_FILENAME} (`mkdir -p {CONFIG_DIR} && mv {LEGACY_CONFIG_FILENAME} {CONFIG_DIR}/{CONFIG_FILENAME}`)."
+        );
+    }
+    let content = std::fs::read_to_string(&found.path)
+        .map_err(|e| format!("failed to read {}: {e}", found.path.display()))?;
     let cfg: Config = toml::from_str(&content)
-        .map_err(|e| format!("invalid config in {}: {e}", path.display()))?;
+        .map_err(|e| format!("invalid config in {}: {e}", found.path.display()))?;
     validate_shell_safe(&cfg.host, "host")?;
     validate_shell_safe(&cfg.session_prefix, "session_prefix")?;
     validate_shell_safe(&cfg.base_path, "base_path")?;
@@ -159,10 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn config_load_reads_file_from_directory() {
+    fn config_load_reads_file_from_skulk_dir() {
         let dir = std::env::temp_dir().join("skulk_config_test2");
-        let _ = std::fs::create_dir_all(&dir);
-        let config_path = dir.join(CONFIG_FILENAME);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        let config_path = config_path_in(&dir);
         std::fs::write(&config_path, full_toml()).unwrap();
 
         let cfg = load_config(&dir).unwrap();
@@ -173,12 +212,59 @@ mod tests {
     }
 
     #[test]
+    fn config_load_falls_back_to_legacy_file() {
+        let dir = std::env::temp_dir().join("skulk_legacy_fallback_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy_path = legacy_config_path_in(&dir);
+        std::fs::write(&legacy_path, full_toml()).unwrap();
+
+        let cfg = load_config(&dir).unwrap();
+        assert_eq!(cfg.host, "mars");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_load_prefers_new_over_legacy() {
+        let dir = std::env::temp_dir().join("skulk_prefer_new_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(
+            config_path_in(&dir),
+            r#"
+                host = "new"
+                session_prefix = "s-"
+                base_path = "~/p"
+                worktree_base = "~/w"
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            legacy_config_path_in(&dir),
+            r#"
+                host = "legacy"
+                session_prefix = "s-"
+                base_path = "~/p"
+                worktree_base = "~/w"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_config(&dir).unwrap();
+        assert_eq!(cfg.host, "new");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn config_load_walks_up_to_parent() {
         let parent = std::env::temp_dir().join("skulk_parent_test2");
         let child = parent.join("subdir");
-        let _ = std::fs::create_dir_all(&child);
-        let config_path = parent.join(CONFIG_FILENAME);
-        std::fs::write(&config_path, full_toml()).unwrap();
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(parent.join(CONFIG_DIR)).unwrap();
+        std::fs::write(config_path_in(&parent), full_toml()).unwrap();
 
         let cfg = load_config(&child).unwrap();
         assert_eq!(cfg.host, "mars");
@@ -189,9 +275,9 @@ mod tests {
     #[test]
     fn config_load_errors_on_invalid_toml() {
         let dir = std::env::temp_dir().join("skulk_bad_toml_test2");
-        let _ = std::fs::create_dir_all(&dir);
-        let config_path = dir.join(CONFIG_FILENAME);
-        std::fs::write(&config_path, "not valid {{{").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(config_path_in(&dir), "not valid {{{").unwrap();
 
         let result = load_config(&dir);
         assert!(result.is_err());
@@ -242,8 +328,9 @@ mod tests {
     #[test]
     fn config_load_rejects_path_with_spaces() {
         let dir = std::env::temp_dir().join("skulk_shell_safe_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let config_path = dir.join(CONFIG_FILENAME);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        let config_path = config_path_in(&dir);
         std::fs::write(
             &config_path,
             r#"

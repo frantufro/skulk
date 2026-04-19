@@ -107,7 +107,7 @@ pub(crate) fn run_wizard(
     if config_exists
         && !prompter.confirm(
             &format!(
-                "  {} .skulk.toml already exists. Reconfigure?",
+                "  {} skulk config already exists. Reconfigure?",
                 dim("[y/N]", color)
             ),
             false,
@@ -281,7 +281,7 @@ fn detect_repo_info(
 
 // ── Config generation ──────────────────────────────────────────────────────
 
-/// Generate `.skulk.toml` content from wizard answers.
+/// Generate `.skulk/config.toml` content from wizard answers.
 ///
 /// Safety: values are interpolated into TOML double-quoted strings.
 /// This is safe because `validate_shell_safe` rejects `"`, `\`, and
