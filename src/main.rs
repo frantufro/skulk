@@ -673,17 +673,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -712,14 +702,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        let result = run(
-            cli,
-            &ssh,
-            &cfg,
-            &confirm_yes,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
         let _ = std::fs::remove_file(&tmp);
         assert!(result.is_ok());
     }
@@ -739,14 +722,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        let result = run(
-            cli,
-            &ssh,
-            &cfg,
-            &confirm_yes,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
         assert!(result.is_err());
         let (cmd, err) = result.unwrap_err();
         assert_eq!(cmd, "new");
@@ -842,17 +818,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -882,17 +848,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(
-            run(
-                cli,
-                &ssh,
-                &cfg,
-                &confirm_yes,
-                Duration::ZERO,
-                Duration::ZERO
-            )
-            .is_ok()
-        );
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
     }
 
     #[test]

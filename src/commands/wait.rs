@@ -23,6 +23,18 @@ fn has_session_command(name: &str, cfg: &Config) -> String {
     format!("tmux has-session -t {session_prefix}{name}")
 }
 
+/// Build a shell snippet that atomically writes `busy` to the idle marker.
+///
+/// Prepended to `tmux send-keys` chains in `cmd_send` and `cmd_new` so the
+/// marker is set before the prompt is delivered. This closes the race where
+/// `skulk wait`, invoked immediately after `skulk send`, could observe a
+/// stale `idle` (or `missing`) marker and return prematurely — the agent's
+/// own `UserPromptSubmit` hook fires asynchronously after Claude Code reads
+/// the terminal input, which can be milliseconds to seconds after send-keys.
+pub(crate) fn mark_busy_command(session_name: &str) -> String {
+    format!("mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/{session_name}")
+}
+
 /// Block until the named agent is idle (finished its current turn).
 ///
 /// Verifies the tmux session exists up front, then polls the idle marker
@@ -107,6 +119,15 @@ mod tests {
         let cfg = test_config();
         let cmd = has_session_command("my-task", &cfg);
         assert_eq!(cmd, "tmux has-session -t skulk-my-task");
+    }
+
+    #[test]
+    fn mark_busy_command_writes_busy_to_session_marker() {
+        let cmd = mark_busy_command("skulk-my-task");
+        assert_eq!(
+            cmd,
+            "mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/skulk-my-task"
+        );
     }
 
     #[test]

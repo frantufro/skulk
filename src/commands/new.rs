@@ -1,3 +1,4 @@
+use crate::commands::wait::mark_busy_command;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::{inventory_command, parse_inventory};
@@ -111,16 +112,25 @@ pub(crate) fn agent_create_tmux_command(
 /// so even in the rare race where the session dies between `has-session` and
 /// `paste-buffer` and the buffer leaks, the next attempt for the same agent
 /// overwrites it via `set-buffer`.
+///
+/// After the has-session check, writes `busy` to the idle marker (see
+/// [`mark_busy_command`]) so a `skulk wait` invoked right after this command
+/// returns sees `busy` instead of a stale `missing`/`idle` marker — the
+/// agent's own `UserPromptSubmit` hook fires asynchronously and can lag
+/// behind the paste.
 pub(crate) fn agent_send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_prefix = &cfg.session_prefix;
-    let buffer = format!("skulk-prompt-{session_prefix}{name}");
+    let session_name = format!("{session_prefix}{name}");
+    let buffer = format!("skulk-prompt-{session_name}");
+    let mark_busy = mark_busy_command(&session_name);
     format!(
-        "sleep {STARTUP_DELAY} && tmux has-session -t {session_prefix}{name} && \
+        "sleep {STARTUP_DELAY} && tmux has-session -t {session_name} && \
+         {mark_busy} && \
          tmux set-buffer -b {buffer} -- '{escaped}' && \
-         tmux paste-buffer -p -d -t {session_prefix}{name} -b {buffer} && \
+         tmux paste-buffer -p -d -t {session_name} -b {buffer} && \
          sleep 0.1 && \
-         tmux send-keys -t {session_prefix}{name} Enter"
+         tmux send-keys -t {session_name} Enter"
     )
 }
 
@@ -450,6 +460,20 @@ mod tests {
         assert!(cmd.contains("tmux paste-buffer -p"));
         assert!(cmd.contains("'fix the bug'"));
         assert!(cmd.contains("Enter"));
+    }
+
+    #[test]
+    fn agent_send_prompt_command_marks_busy_before_paste() {
+        let cfg = test_config();
+        let cmd = agent_send_prompt_command("my-task", "fix the bug", &cfg);
+        let busy_idx = cmd.find("printf busy").expect("busy marker write missing");
+        let paste_idx = cmd
+            .find("tmux paste-buffer")
+            .expect("paste-buffer step missing");
+        assert!(
+            busy_idx < paste_idx,
+            "busy marker must be written before paste: {cmd}"
+        );
     }
 
     #[test]
