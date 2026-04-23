@@ -23,9 +23,9 @@ Two agents. Two branches. Two worktrees. Running simultaneously on one machine.
 
 ## Why
 
-Claude Code is great, but it works on one thing at a time. If you have a beefy dev server sitting around, Skulk lets you fan out: spin up five agents on five different tasks and check back when they're done. Each agent works in its own git worktree, so there are no merge conflicts mid-work.
+I wanted my agents to keep working when my laptop is closed. Skulk runs them on a remote server in tmux sessions, each in its own git worktree. I check in from my laptop, or from my phone when the agent is launched with [`--remote-control`](#2-spin-up-agents), read the diffs, ship what's good.
 
-Skulk is built for humans and AI agents. Use it as a regular CLI, wire it into scripts, or let an orchestrator agent drive it via the [Claude Code plugin](#claude-code-plugin). One Claude session can spin up, monitor, and ship work from a fleet of remote agents running in parallel.
+Works as a CLI, in scripts, or driven by another Claude Code session through the [plugin](#claude-code-plugin).
 
 ## Requirements
 
