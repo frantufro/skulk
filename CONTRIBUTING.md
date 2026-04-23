@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in improving Skulk. The project is small enough
+Thanks for your interest in improving `skulk`. The project is small enough
 that a drive-by fix is welcome; the bar is green tests and clean lint.
 
 ## Ground rules
@@ -63,7 +63,7 @@ test double — no real SSH calls in the test suite. System-boundary code
 lives in `io.rs` and is excluded from coverage (`--ignore-filename-regex
 'io\.rs$'`).
 
-## Running Skulk against a real host
+## Running `skulk` against a real host
 
 The test suite doesn't talk to a real server, but you'll want one for
 end-to-end sanity checks. A localhost `.skulk/config.toml` works:

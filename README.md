@@ -1,8 +1,8 @@
-# Skulk
+# `skulk`
 
 Dead simple agent management over SSH. For humans and agents alike.
 
-Skulk spins up [Claude Code](https://docs.claude.com/en/docs/claude-code) agents on a remote server — each in its own tmux session and git worktree, fully isolated, zero conflicts.
+`skulk` spins up [Claude Code](https://docs.claude.com/en/docs/claude-code) agents on a remote server — each in its own tmux session and git worktree, fully isolated, zero conflicts.
 
 ```
 $ skulk new auth-refactor "Refactor the auth middleware to use JWT"
@@ -23,7 +23,7 @@ Two agents. Two branches. Two worktrees. Running simultaneously on one machine.
 
 ## Why
 
-I wanted my agents to keep working when my laptop is closed. Skulk runs them on a remote server in tmux sessions, each in its own git worktree. I check in from my laptop, or from my phone when the agent is launched with [`--remote-control`](#2-spin-up-agents), read the diffs, ship what's good.
+I wanted my agents to keep working when my laptop is closed. `skulk` runs them on a remote server in tmux sessions, each in its own git worktree. I check in from my laptop, or from my phone when the agent is launched with [`--remote-control`](#2-spin-up-agents), read the diffs, ship what's good.
 
 Works as a CLI, in scripts, or driven by another Claude Code session through the [plugin](#claude-code-plugin).
 
@@ -31,7 +31,7 @@ Works as a CLI, in scripts, or driven by another Claude Code session through the
 
 **Local machine:** macOS or Linux with an OpenSSH client.
 
-**Remote server:** Debian-based Linux (Ubuntu, Debian, etc.) with SSH access and key-based auth. Skulk's `init` command installs everything else (tmux, git, Claude Code). Other distros may work but are not officially supported yet.
+**Remote server:** Debian-based Linux (Ubuntu, Debian, etc.) with SSH access and key-based auth. `skulk init` installs everything else (tmux, git, Claude Code). Other distros may work but are not officially supported yet.
 
 **Localhost mode:** Set `host = "localhost"` in `.skulk/config.toml` to run agents on the same machine without SSH.
 
@@ -118,7 +118,7 @@ skulk new mobile-task --remote-control "Fix the login bug"
 skulk new scoped --claude-args "--allowed-tools 'Bash(gh pr:*)'" "Triage open PRs"
 ```
 
-By default Skulk launches Claude Code **without** `--remote-control`. Skulk's own commands (`connect`, `logs`, `send`) talk to the agent through tmux directly, and leaving `--remote-control` on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 minutes of inactivity. Only opt in when you want to drive an agent from the Claude Code mobile/web app, and don't use it for long autonomous tasks.
+By default `skulk` launches Claude Code **without** `--remote-control`. `skulk`'s own commands (`connect`, `logs`, `send`) talk to the agent through tmux directly, and leaving `--remote-control` on triggers an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 minutes of inactivity. Only opt in when you want to drive an agent from the Claude Code mobile/web app, and don't use it for long autonomous tasks.
 
 ### 3. Monitor and interact
 
@@ -228,11 +228,11 @@ skulk gc --dry-run
 
 ## Per-Agent Setup (Init Hook)
 
-Skulk runs an optional setup script inside each agent's tmux session before Claude starts — useful for `docker compose up`, migrations, dependency installs, mock services, etc.
+`skulk` runs an optional setup script inside each agent's tmux session before Claude starts — useful for `docker compose up`, migrations, dependency installs, mock services, etc.
 
 **Convention:** put the script at `.skulk/init.sh` in your repo. Override the path with `init_script = "scripts/setup-agent.sh"` in `.skulk/config.toml` if you prefer.
 
-**Project env file:** `.skulk/.env` lives locally (gitignored — `skulk init` adds the entry automatically) and almost always contains secrets. On `skulk new`, Skulk copies it to the agent's worktree at `<worktree>/.env` so dotenv-aware project tooling picks it up, and Skulk also `source`s it before running `init.sh` so both the script **and Claude itself** see the same vars (e.g. `$DATABASE_URL` for migrations, `$GITHUB_TOKEN` for tools Claude uses).
+**Project env file:** `.skulk/.env` lives locally (gitignored — `skulk init` adds the entry automatically) and almost always contains secrets. On `skulk new`, `skulk` copies it to the agent's worktree at `<worktree>/.env` so dotenv-aware project tooling picks it up, and `skulk` also `source`s it before running `init.sh` so both the script **and Claude itself** see the same vars (e.g. `$DATABASE_URL` for migrations, `$GITHUB_TOKEN` for tools Claude uses).
 
 > ⚠️ **Security:** shipping `.skulk/.env` sends your local secrets to the remote server. Review what's in it before running `skulk new`, especially on shared hosts.
 
@@ -251,10 +251,10 @@ Skulk runs an optional setup script inside each agent's tmux session before Clau
 
 ## Claude Code Plugin
 
-Skulk ships a Claude Code plugin that teaches Claude how to drive Skulk
+`skulk` ships a Claude Code plugin that teaches Claude how to drive `skulk`
 directly. Install it and your Claude Code session becomes an orchestrator:
 ask it to spin up agents on a list of tasks, check in on the fleet, review
-their diffs, and ship the ones that are ready — it'll run the right skulk
+their diffs, and ship the ones that are ready — it'll run the right `skulk`
 commands for you.
 
 Install via the plugin marketplace. Type these as slash commands inside a
@@ -329,7 +329,7 @@ skulk new -bad-name-      # invalid (leading/trailing hyphens)
 
 ## Error Handling
 
-Skulk classifies common SSH failures and surfaces actionable suggestions instead of raw stderr:
+`skulk` classifies common SSH failures and surfaces actionable suggestions instead of raw stderr:
 
 - **Connection refused / timed out** — check that SSH is running and reachable on the remote
 - **Could not resolve hostname** — check your `~/.ssh/config` or DNS
