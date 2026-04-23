@@ -126,6 +126,9 @@ By default Skulk launches Claude Code **without** `--remote-control`. Skulk's ow
 # See what's running
 skulk list
 
+# Detailed view of one agent (status, commits ahead, files changed, uptime)
+skulk status fix-bug
+
 # View an agent's terminal output
 skulk logs fix-bug
 
@@ -135,18 +138,46 @@ skulk logs fix-bug --follow
 # View scrollback history
 skulk logs fix-bug --lines 500
 
+# Review the work so far
+skulk diff fix-bug --stat      # summary of files changed
+skulk diff fix-bug             # full diff
+skulk git-log fix-bug          # commits on the agent's branch
+
 # Attach to an agent's live tmux session (interactive)
 skulk connect fix-bug
 # Detach with Ctrl+B then D
 
 # Send a follow-up prompt to a running agent
 skulk send fix-bug "Actually, also add a test for the edge case"
+
+# Or send a longer prompt from a file
+skulk send fix-bug --from ./followup.md
+
+# Block until the agent finishes its current turn (useful in scripts)
+skulk wait fix-bug
+skulk wait --all --timeout 600   # wait for every agent, cap at 10 min
 ```
 
-### 4. Pull changes and clean up
+### 4. Ship the work
 
 ```bash
-# Update the base clone on the remote
+# Push the agent's branch to origin
+skulk push fix-bug
+
+# Push and open a PR with a Claude-authored description
+skulk ship fix-bug
+```
+
+### 5. Pause, resume, clean up
+
+```bash
+# Archive an agent — kill its tmux session but keep the worktree and branch
+skulk archive fix-bug
+
+# Bring an archived or crashed agent back with a fresh Claude session
+skulk restart fix-bug
+
+# Update the base clone on the remote (fast-forward origin/main → base_path)
 skulk pull
 
 # Destroy a specific agent (session + worktree + branch)
@@ -166,27 +197,34 @@ skulk gc --dry-run
 
 | Command | Description |
 |---------|-------------|
+| **Setup** | |
 | `skulk init` | Interactive setup wizard — generates config and optionally provisions the remote server |
-| `skulk new <name>` | Create a new agent with its own worktree (`--from`, `--github`, `--model`, `--claude-args`) |
-| `skulk list` | List all agents with status, idle state, uptime, and worktree path |
+| `skulk doctor` | Health check — verify SSH, tools, base clone, and worktree directory |
+| `skulk pull` | Update the base clone (`git pull --ff-only`) |
+| **Create** | |
+| `skulk new <name>` | Create a new agent with its own worktree (`--from`, `--github`, `--model`, `--claude-args`, `--remote-control`) |
+| **Observe** | |
+| `skulk list` | List all agents with status, uptime, and worktree path |
 | `skulk status <name>` | Detailed single-agent view: status, commits ahead, files changed, uptime |
+| `skulk logs <name>` | View an agent's terminal output (`-f` to follow, `-l` for scrollback) |
+| `skulk wait <name>` | Block until the agent is idle (`--all` for all agents, `--timeout <secs>` to cap the wait) |
+| **Interact** | |
 | `skulk connect <name>` | Attach to an agent's live tmux session |
 | `skulk disconnect <name>` | Detach all clients from an agent's session |
-| `skulk logs <name>` | View an agent's terminal output (`-f` to follow, `-l` for scrollback) |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent (`--from` to read from a file) |
+| **Review** | |
 | `skulk diff <name>` | Show git diff against the default branch (`--stat`, `--name-only`) |
 | `skulk git-log <name>` | Show commits on the agent's branch not in the default branch |
 | `skulk transcript <name>` | Dump full tmux scrollback (`--output` to write to a file) |
+| **Ship** | |
 | `skulk push <name>` | Push the agent's branch to origin |
 | `skulk ship <name>` | Push and open a PR with a Claude-authored description |
-| `skulk wait <name>` | Block until the agent is idle (`--all` for all agents, `--timeout <secs>` to cap the wait) |
+| **Lifecycle** | |
 | `skulk archive <name>` | Kill tmux session but keep worktree and branch intact |
 | `skulk restart <name>` | Restart an archived or crashed agent in its existing worktree |
-| `skulk doctor` | Health check — verify SSH, tools, base clone, and worktree directory |
-| `skulk pull` | Update the base clone (`git pull --ff-only`) |
 | `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
 | `skulk destroy-all` | Destroy all agents at once |
-| `skulk gc` | Clean up orphaned sessions, worktrees, and branches |
+| `skulk gc` | Clean up orphaned tmux sessions, worktrees, and branches. Scoped to the project's `session_prefix`; preserves running and archived agents. |
 
 ## Per-Agent Setup (Init Hook)
 
@@ -194,7 +232,7 @@ Skulk runs an optional setup script inside each agent's tmux session before Clau
 
 **Convention:** put the script at `.skulk/init.sh` in your repo. Override the path with `init_script = "scripts/setup-agent.sh"` in `.skulk/config.toml` if you prefer.
 
-**Project env file:** `.skulk/.env` lives locally (gitignored — `skulk init` adds the entry automatically) and almost always contains secrets. On `skulk new`, Skulk copies it to the agent's worktree at `<worktree>/.env` so dotenv-aware project tooling picks it up, and Skulk also `source`s it before running `init.sh` so the script sees the same vars (e.g. `$DATABASE_URL` for migrations).
+**Project env file:** `.skulk/.env` lives locally (gitignored — `skulk init` adds the entry automatically) and almost always contains secrets. On `skulk new`, Skulk copies it to the agent's worktree at `<worktree>/.env` so dotenv-aware project tooling picks it up, and Skulk also `source`s it before running `init.sh` so both the script **and Claude itself** see the same vars (e.g. `$DATABASE_URL` for migrations, `$GITHUB_TOKEN` for tools Claude uses).
 
 > ⚠️ **Security:** shipping `.skulk/.env` sends your local secrets to the remote server. Review what's in it before running `skulk new`, especially on shared hosts.
 
@@ -203,8 +241,8 @@ Skulk runs an optional setup script inside each agent's tmux session before Clau
 | Variable | Example |
 |----------|---------|
 | `SKULK_AGENT_NAME` | `auth-refactor` |
-| `SKULK_SESSION` | `myproject-auth-refactor` |
-| `SKULK_BRANCH` | `myproject-auth-refactor` |
+| `SKULK_SESSION` | `my-project-auth-refactor` |
+| `SKULK_BRANCH` | `my-project-auth-refactor` |
 | `SKULK_WORKTREE` | absolute path to the worktree |
 
 **Failure handling — hard fail:** if `init.sh` exits non-zero, Claude does not start. The tmux session stays open with the error visible — run `skulk connect <name>` to investigate. For per-step opt-outs, use the usual shell idiom: `risky_command || true`.
@@ -213,12 +251,14 @@ Skulk runs an optional setup script inside each agent's tmux session before Clau
 
 ## Claude Code Plugin
 
-Skulk ships a Claude Code plugin that teaches Claude how to drive skulk
-directly. Once installed, you can ask Claude things like "spin up three
-agents on these tasks" or "check on the running agents" and it'll run
-the right skulk commands for you.
+Skulk ships a Claude Code plugin that teaches Claude how to drive Skulk
+directly. Install it and your Claude Code session becomes an orchestrator:
+ask it to spin up agents on a list of tasks, check in on the fleet, review
+their diffs, and ship the ones that are ready — it'll run the right skulk
+commands for you.
 
-Install via the plugin marketplace from inside Claude Code:
+Install via the plugin marketplace. Type these as slash commands inside a
+Claude Code session:
 
 ```
 /plugin marketplace add frantufro/claude-plugins
@@ -238,19 +278,19 @@ skulk init ──────SSH──►  Tests connectivity
                          Clones repo to base_path
                          Creates worktree_base directory
 
-skulk new auth ──SSH──►  git worktree add ~/worktrees/skulk-auth
-                         tmux new-session -d -s skulk-auth
+skulk new auth ──SSH──►  git worktree add <worktree_base>/<prefix>auth
+                         tmux new-session -d -s <prefix>auth
                          (starts claude in the worktree)
 
 skulk send auth ──SSH──► tmux send-keys "your prompt" Enter
-                         (verifies delivery via pane content diff)
+                         (captures pane before/after to verify delivery)
 
-skulk connect auth ──SSH──► tmux attach -t skulk-auth
+skulk connect auth ──SSH──► tmux attach -t <prefix>auth
                             (interactive terminal, Ctrl+B D to detach)
 
-skulk destroy auth ──SSH──► tmux kill-session -t skulk-auth
-                            git worktree remove skulk-auth
-                            git branch -D skulk-auth
+skulk destroy auth ──SSH──► tmux kill-session -t <prefix>auth
+                            git worktree remove <prefix>auth
+                            git branch -D <prefix>auth
 ```
 
 Each agent is a tmux session running Claude Code inside its own git worktree. Worktrees share the same `.git` directory as the base clone but have independent working trees and branches — so agents can edit files simultaneously without stepping on each other.
@@ -289,15 +329,18 @@ skulk new -bad-name-      # invalid (leading/trailing hyphens)
 
 ## Error Handling
 
-Skulk gives you actionable diagnostics instead of raw SSH errors:
+Skulk classifies common SSH failures and surfaces actionable suggestions instead of raw stderr:
 
-- **Connection refused** — check that SSH is running on the remote
+- **Connection refused / timed out** — check that SSH is running and reachable on the remote
+- **Could not resolve hostname** — check your `~/.ssh/config` or DNS
 - **Host key verification failed** — accept the host key first
-- **Permission denied** — check your SSH key or config
-- **Agent not found** — the named agent doesn't exist; use `skulk list` to see what's running
-- **Base clone missing** — run `skulk init` to set up the remote server
+- **Permission denied** — check your SSH key, agent, or `~/.ssh/config`
+- **Agent not found** — the named agent doesn't exist; run `skulk list` to see what's running
+- **Base clone missing / remote tools missing** — run `skulk init` to provision the remote, or `skulk doctor` to diagnose an existing setup
 
-Destructive operations (`destroy`, `destroy-all`) require confirmation unless `--force` is passed. If agent creation fails partway through (e.g., tmux session can't start), the worktree is automatically rolled back.
+Run `skulk doctor` any time for a full health check (SSH reachability, required tools on the remote, base clone, worktree directory).
+
+Destructive operations (`destroy`, `destroy-all`) require confirmation unless `--force` is passed. If agent creation fails partway through (e.g., tmux session can't start), the worktree is rolled back automatically.
 
 ## Contributing
 
