@@ -7,6 +7,7 @@ pub(crate) mod list;
 pub(crate) mod new;
 pub(crate) mod prompt_source;
 pub(crate) mod pull;
+pub(crate) mod replay;
 pub(crate) mod restart;
 pub(crate) mod ship;
 pub(crate) mod status;
