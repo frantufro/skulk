@@ -1,3 +1,4 @@
+pub(crate) mod completions;
 pub(crate) mod destroy;
 pub(crate) mod doctor;
 pub(crate) mod gc;

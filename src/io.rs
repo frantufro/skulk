@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 
 use clap::Parser;
 
+use crate::commands::completions;
 use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::commands::interact::logs_snapshot_deep_command;
 use crate::config::{self, Config, load_config};
@@ -402,6 +403,15 @@ pub(crate) fn main() {
                 eprintln!("skulk init: {e}");
                 std::process::exit(1);
             }
+        }
+        return;
+    }
+
+    // Completions are a pure static output — never touch config or SSH.
+    if let Commands::Completions { shell } = cli.command {
+        if let Err(e) = completions::cmd_completions(shell) {
+            eprintln!("skulk completions: {e}");
+            std::process::exit(1);
         }
         return;
     }

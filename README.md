@@ -225,6 +225,7 @@ skulk gc --dry-run
 | `skulk destroy <name>` | Destroy an agent (session, worktree, and branch) |
 | `skulk destroy-all` | Destroy all agents at once |
 | `skulk gc` | Clean up orphaned tmux sessions, worktrees, and branches. Scoped to the project's `session_prefix`; preserves running and archived agents. |
+| `skulk completions <shell>` | Print a shell completion script (`bash`, `zsh`, or `fish`) to stdout |
 
 ## Per-Agent Setup (Init Hook)
 
@@ -294,6 +295,32 @@ skulk destroy auth ──SSH──► tmux kill-session -t <prefix>auth
 ```
 
 Each agent is a tmux session running Claude Code inside its own git worktree. Worktrees share the same `.git` directory as the base clone but have independent working trees and branches — so agents can edit files simultaneously without stepping on each other.
+
+## Shell Completions
+
+Skulk ships tab completion for `bash`, `zsh`, and `fish`. Completions cover every subcommand and flag, and also tab-complete **live agent names** for commands that take one — `skulk destroy <Tab>` suggests the agents currently running on your remote.
+
+Pick your shell and source the output from your shell's config:
+
+**bash** — add to `~/.bashrc`:
+
+```bash
+source <(skulk completions bash)
+```
+
+**zsh** — add to `~/.zshrc` (after `compinit`):
+
+```zsh
+source <(skulk completions zsh)
+```
+
+**fish** — write once into fish's completions dir:
+
+```fish
+skulk completions fish > ~/.config/fish/completions/skulk.fish
+```
+
+Dynamic agent-name completion shells out to `skulk list` at Tab time. If `.skulk/config.toml` isn't set up yet, or the remote is unreachable, it silently returns nothing and falls back to static completion — so it's safe to source unconditionally.
 
 ## Agent Names
 
