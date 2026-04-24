@@ -170,6 +170,25 @@ pub(crate) fn agent_create_tmux_command(
     )
 }
 
+/// Build the SSH command to persist an agent's initial prompt to
+/// `~/.skulk/prompts/<session_name>.txt` on the remote so `skulk replay`
+/// can re-send the same task to a fresh agent.
+///
+/// Lives outside the worktree so it survives `skulk destroy` — a natural
+/// replay flow is "that run went off the rails, tear it down, try a different
+/// model on the same prompt".
+///
+/// Uses `printf '%s'` (not `echo`) so no trailing newline is added; the read
+/// path can return bytes verbatim. The prompt is POSIX-escaped so the outer
+/// SSH layer can transport it in a single-quoted shell argument.
+pub(crate) fn agent_persist_prompt_command(session_name: &str, prompt: &str) -> String {
+    let escaped = shell_escape(prompt);
+    format!(
+        "mkdir -p ~/.skulk/prompts && \
+         printf '%s' '{escaped}' > ~/.skulk/prompts/{session_name}.txt"
+    )
+}
+
 /// Build the SSH command to send an initial prompt to an agent after a startup delay.
 /// The sleep runs on the remote so it does not block the laptop CLI.
 /// Checks that the session is still alive after sleeping before attempting delivery,
@@ -229,21 +248,68 @@ pub(crate) fn agent_rollback_worktree_command(name: &str, cfg: &Config) -> Strin
 ///    - On failure: warn user, continue (init.sh runs without sourced vars)
 /// 7. Create tmux session with Claude Code (with `--remote-control` if requested)
 ///    - On failure: rollback worktree
-/// 8. Send prompt if provided
+/// 8. Persist the prompt to `~/.skulk/prompts/<session>.txt` for `skulk replay`
+///    - On failure: warn user, keep agent alive (replay just won't work)
+/// 9. Send prompt if provided
 ///    - On failure: warn user, keep agent alive
-/// 9. Print success output
+/// 10. Print success output
 //
 // Explicitly allow `too_many_arguments` / `too_many_lines`: `cmd_new` is the
 // top-level orchestrator for the `new` command, and each argument is a distinct
 // externally-supplied input required by one of the steps above. Grouping
 // them into a struct or splitting the function would hide the linear sequence
 // that makes this function easy to follow.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_new(
     ssh: &impl Ssh,
     name: &str,
     github: Option<&str>,
     from: Option<&Path>,
+    remote_control: bool,
+    model: Option<&str>,
+    claude_args: Option<&str>,
+    cfg: &Config,
+    local_env_file: Option<&Path>,
+) -> Result<(), SkulkError> {
+    let agent = AgentRef::new(name, cfg);
+    let branch = agent.branch_name();
+
+    // Step 1: Resolve initial prompt (if any). clap `conflicts_with` on the CLI
+    // enforces that both --github and --from can't be set; the unreachable arm
+    // is a defensive guard for non-CLI callers.
+    let prompt: Option<String> = match (github, from) {
+        (None, None) => None,
+        (Some(id), None) => Some(prompt_source::load_github_prompt(ssh, id, &branch, cfg)?),
+        (None, Some(path)) => Some(prompt_source::load_file_prompt(path, &branch)?),
+        (Some(_), Some(_)) => unreachable!("--github and --from are mutually exclusive"),
+    };
+
+    create_agent_with_prompt(
+        ssh,
+        name,
+        prompt.as_deref(),
+        remote_control,
+        model,
+        claude_args,
+        cfg,
+        local_env_file,
+    )
+}
+
+/// Shared creation pipeline: accepts a pre-resolved prompt string (already
+/// wrapped in whatever task-assignment boilerplate it needs) and runs every
+/// side-effecting step of `cmd_new` from name validation through to the
+/// final success banner.
+///
+/// Used by both `cmd_new` (after resolving `--github`/`--from`) and
+/// `cmd_replay` (with the prompt read back from the remote store). Exposed
+/// so `replay` can skip the `--github`/`--from` resolution — its input is
+/// already a fully-formed prompt.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn create_agent_with_prompt(
+    ssh: &impl Ssh,
+    name: &str,
+    prompt: Option<&str>,
     remote_control: bool,
     model: Option<&str>,
     claude_args: Option<&str>,
@@ -256,16 +322,6 @@ pub(crate) fn cmd_new(
     let session_name = agent.session_name();
     let branch = agent.branch_name();
     let worktree = agent.worktree_path(cfg);
-
-    // Step 1: Resolve initial prompt (if any). clap `conflicts_with` on the CLI
-    // enforces that both --github and --from can't be set; the unreachable arm
-    // is a defensive guard for non-CLI callers.
-    let prompt: Option<String> = match (github, from) {
-        (None, None) => None,
-        (Some(id), None) => Some(prompt_source::load_github_prompt(ssh, id, &branch, cfg)?),
-        (None, Some(path)) => Some(prompt_source::load_file_prompt(path, &branch)?),
-        (Some(_), Some(_)) => unreachable!("--github and --from are mutually exclusive"),
-    };
 
     // Step 2: Validate name and (if provided) model
     validate_name(name)?;
@@ -332,8 +388,18 @@ pub(crate) fn cmd_new(
         return Err(e);
     }
 
+    // Step 5.5: Persist the prompt so `skulk replay <name>` can re-run it.
+    // Non-fatal: the agent is already running; replay just won't work if this
+    // fails, which we tell the user about. Runs *before* send so the prompt is
+    // durable even if delivery fails.
+    if let Some(prompt_text) = prompt
+        && let Err(e) = ssh.run(&agent_persist_prompt_command(&session_name, prompt_text))
+    {
+        eprintln!("Warning: failed to persist prompt for replay on agent '{name}': {e}");
+    }
+
     // Step 6: Send prompt if provided
-    let prompt_status = if let Some(prompt_text) = prompt.as_deref() {
+    let prompt_status = if let Some(prompt_text) = prompt {
         if ssh
             .run(&agent_send_prompt_command(name, prompt_text, cfg))
             .is_ok()
@@ -644,6 +710,147 @@ mod tests {
         );
     }
 
+    // ── agent_persist_prompt_command ─────────────────────────────────────
+
+    #[test]
+    fn agent_persist_prompt_command_writes_under_prompts_dir() {
+        let cmd = agent_persist_prompt_command("skulk-my-task", "fix the bug");
+        assert!(
+            cmd.contains("mkdir -p ~/.skulk/prompts"),
+            "should create prompts dir first: {cmd}"
+        );
+        assert!(
+            cmd.contains("~/.skulk/prompts/skulk-my-task.txt"),
+            "target path should embed session name: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_persist_prompt_command_uses_printf_without_trailing_newline() {
+        // `printf '%s'` is intentional: the read side returns bytes verbatim,
+        // so any trailing newline introduced here would be fed back to Claude
+        // on replay. `echo` would add one — regression guard.
+        let cmd = agent_persist_prompt_command("skulk-my-task", "hi");
+        assert!(
+            cmd.contains("printf '%s'"),
+            "should use printf '%s' to avoid extra newline: {cmd}"
+        );
+        assert!(
+            !cmd.contains("echo '"),
+            "should not use echo (adds trailing newline): {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_persist_prompt_command_escapes_single_quotes() {
+        let cmd = agent_persist_prompt_command("skulk-t", "it's broken");
+        assert!(
+            cmd.contains("it'\\''s broken"),
+            "single quotes must be POSIX-escaped: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_persist_prompt_command_handles_multiline() {
+        let cmd = agent_persist_prompt_command("skulk-t", "line 1\nline 2");
+        // Newlines inside a POSIX single-quoted string are literal, so no
+        // special escaping is needed — just verify they survive as-is.
+        assert!(
+            cmd.contains("'line 1\nline 2'"),
+            "multiline prompt must pass through verbatim: {cmd}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_persists_prompt_after_tmux_create_before_send() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // persist prompt
+            ssh_ok(), // send prompt
+        ]);
+        let prompt_file = std::env::temp_dir().join("skulk_cmd_new_persists_prompt.txt");
+        std::fs::write(&prompt_file, "fix the bug").unwrap();
+        let result = cmd_new(
+            &ssh,
+            "task",
+            None,
+            Some(&prompt_file),
+            false,
+            None,
+            None,
+            &cfg,
+            None,
+        );
+        let _ = std::fs::remove_file(&prompt_file);
+        assert!(result.is_ok());
+        let calls = ssh.calls();
+        // Persist step lands between tmux-create (3) and send (5).
+        let persist_call = &calls[4];
+        assert!(
+            persist_call.contains("~/.skulk/prompts/skulk-task.txt"),
+            "persist step should target prompts dir, got: {persist_call}"
+        );
+        assert!(
+            persist_call.contains("printf '%s'"),
+            "persist step should use printf '%s', got: {persist_call}"
+        );
+        // send step follows.
+        assert!(
+            calls[5].contains("tmux paste-buffer"),
+            "send step should follow persist, got: {}",
+            calls[5]
+        );
+    }
+
+    #[test]
+    fn cmd_new_without_prompt_does_not_persist() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            ssh_ok(),
+        ]);
+        assert!(cmd_new(&ssh, "task", None, None, false, None, None, &cfg, None).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            !calls.iter().any(|c| c.contains("~/.skulk/prompts/")),
+            "no persist call expected when no prompt: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_persist_failure_does_not_abort() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),                                       // worktree
+            ssh_ok(),                                       // tmux create
+            Err(SkulkError::SshFailed("disk full".into())), // persist fails
+            ssh_ok(),                                       // send still runs
+        ]);
+        let prompt_file = std::env::temp_dir().join("skulk_cmd_new_persist_fail.txt");
+        std::fs::write(&prompt_file, "fix it").unwrap();
+        let result = cmd_new(
+            &ssh,
+            "task",
+            None,
+            Some(&prompt_file),
+            false,
+            None,
+            None,
+            &cfg,
+            None,
+        );
+        let _ = std::fs::remove_file(&prompt_file);
+        assert!(result.is_ok(), "persist failure must not abort cmd_new");
+    }
+
     #[test]
     fn agent_rollback_worktree_command_generates() {
         let cfg = test_config();
@@ -671,9 +878,10 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // persist prompt
+            ssh_ok(), // send prompt
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_succeeds_with_prompt.txt");
         std::fs::write(&prompt_file, "fix the bug").unwrap();
@@ -897,8 +1105,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // persist prompt
             Err(SkulkError::SshFailed("send-keys failed".into())),
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_prompt_delivery_fails.txt");

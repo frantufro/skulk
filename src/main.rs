@@ -17,7 +17,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    destroy, doctor, gc, interact, list, new, prompt_source, pull, restart, ship, status, wait,
+    destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart, ship, status,
+    wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -246,6 +247,32 @@ pub(crate) enum Commands {
         name: String,
     },
 
+    /// Re-run an agent's original prompt on a fresh agent
+    ///
+    /// Reads the prompt that was sent to `<name>` at creation time and starts
+    /// a new agent with the same task. The new name is auto-derived (e.g.
+    /// `<name>-2`) unless `--as <new>` is given. Use `--model` to retry on a
+    /// different model, or `--remote-control` / `--claude-args` to change the
+    /// launch flags. Requires the source agent to have been created with a
+    /// prompt (via `skulk new --from` or `--github`) — replays of
+    /// prompt-less agents error out.
+    Replay {
+        /// Source agent to replay
+        name: String,
+        /// Explicit name for the new agent (skips auto-derivation)
+        #[arg(long = "as", value_name = "NEW_NAME")]
+        new_name: Option<String>,
+        /// Launch the new agent with --remote-control
+        #[arg(long)]
+        remote_control: bool,
+        /// Model to pass to the new agent's Claude Code instance
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
+        /// Extra flags to append to the new agent's Claude launch
+        #[arg(long, value_name = "ARGS")]
+        claude_args: Option<String>,
+    },
+
     /// Show `git log` of commits on an agent's branch not in the default branch
     ///
     /// Runs `git log <default_branch>..<session_prefix><name> --oneline` on the remote.
@@ -332,6 +359,7 @@ impl Commands {
             Commands::Push { .. } => "push",
             Commands::Archive { .. } => "archive",
             Commands::Restart { .. } => "restart",
+            Commands::Replay { .. } => "replay",
             Commands::GitLog { .. } => "git-log",
             Commands::Ship { .. } => "ship",
             Commands::Status { .. } => "status",
@@ -430,6 +458,25 @@ pub(crate) fn run(
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
         Commands::Restart { name } => restart::cmd_restart(ssh, &name, cfg),
+        Commands::Replay {
+            name,
+            new_name,
+            remote_control,
+            model,
+            claude_args,
+        } => {
+            let env_file = new::resolve_local_env_file(cfg);
+            replay::cmd_replay(
+                ssh,
+                &name,
+                new_name.as_deref(),
+                remote_control,
+                model.as_deref(),
+                claude_args.as_deref(),
+                cfg,
+                env_file.as_deref(),
+            )
+        }
         Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
         Commands::Ship { name } => ship::cmd_ship(ssh, &name, cfg),
         Commands::Status { name } => status::cmd_status(ssh, &name, cfg),
@@ -680,9 +727,10 @@ mod tests {
             Ok(r#"{"title":"T","body":"B","comments":[]}"#.into()),
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // persist prompt
+            ssh_ok(), // send prompt
         ]);
         let cli = Cli {
             no_color: true,
@@ -709,9 +757,10 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // persist prompt
+            ssh_ok(), // send prompt
         ]);
         let cli = Cli {
             no_color: true,
@@ -916,6 +965,75 @@ mod tests {
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_replay() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("original prompt".into()),                  // read stored prompt
+            Ok(mock_inventory_single_agent("skulk-task")), // inv for name derivation
+            Ok("exists".into()),                           // base clone check
+            Ok(mock_inventory_single_agent("skulk-task")), // inv inside create
+            ssh_ok(),                                      // worktree
+            ssh_ok(),                                      // tmux create
+            ssh_ok(),                                      // persist prompt
+            ssh_ok(),                                      // send prompt
+        ]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Replay {
+                name: "task".into(),
+                new_name: None,
+                remote_control: false,
+                model: None,
+                claude_args: None,
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn replay_accepts_as_and_model_flags() {
+        let cli = Cli::try_parse_from([
+            "skulk", "replay", "task", "--as", "retry-v2", "--model", "sonnet",
+        ])
+        .expect("parsing --as and --model should succeed");
+        match cli.command {
+            Commands::Replay {
+                name,
+                new_name,
+                model,
+                ..
+            } => {
+                assert_eq!(name, "task");
+                assert_eq!(new_name.as_deref(), Some("retry-v2"));
+                assert_eq!(model.as_deref(), Some("sonnet"));
+            }
+            _ => panic!("expected Commands::Replay"),
+        }
+    }
+
+    #[test]
+    fn run_replay_surfaces_missing_prompt_as_notfound() {
+        let cfg = test_config();
+        // SSH returns non-zero (test -f fails) → read_stored_prompt maps to NotFound.
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("exit 1".into()))]);
+        let cli = Cli {
+            no_color: true,
+            command: Commands::Replay {
+                name: "task".into(),
+                new_name: None,
+                remote_control: false,
+                model: None,
+                claude_args: None,
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        assert!(result.is_err());
+        let (cmd, err) = result.unwrap_err();
+        assert_eq!(cmd, "replay");
+        assert!(matches!(err, SkulkError::NotFound(_)));
     }
 
     #[test]
