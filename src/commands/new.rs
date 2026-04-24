@@ -189,6 +189,22 @@ pub(crate) fn agent_persist_prompt_command(session_name: &str, prompt: &str) -> 
     )
 }
 
+/// Build the SSH command to clear any persisted prompt for a session.
+///
+/// Prompt files deliberately survive `skulk destroy` (see
+/// [`agent_persist_prompt_command`]). That means re-creating an agent with
+/// the same name but no prompt would leave the previous incarnation's prompt
+/// on disk, where `skulk replay <name>` would silently replay it against
+/// the unrelated new agent. `cmd_new` calls this whenever it creates an
+/// agent without a prompt so the stored file reflects the current
+/// incarnation.
+///
+/// Uses `rm -f` so a missing file (the common case — first-time creation) is
+/// not an error.
+pub(crate) fn agent_clear_prompt_command(session_name: &str) -> String {
+    format!("rm -f ~/.skulk/prompts/{session_name}.txt")
+}
+
 /// Build the SSH command to send an initial prompt to an agent after a startup delay.
 /// The sleep runs on the remote so it does not block the laptop CLI.
 /// Checks that the session is still alive after sleeping before attempting delivery,
@@ -388,14 +404,19 @@ pub(crate) fn create_agent_with_prompt(
         return Err(e);
     }
 
-    // Step 5.5: Persist the prompt so `skulk replay <name>` can re-run it.
-    // Non-fatal: the agent is already running; replay just won't work if this
-    // fails, which we tell the user about. Runs *before* send so the prompt is
-    // durable even if delivery fails.
-    if let Some(prompt_text) = prompt
-        && let Err(e) = ssh.run(&agent_persist_prompt_command(&session_name, prompt_text))
-    {
-        eprintln!("Warning: failed to persist prompt for replay on agent '{name}': {e}");
+    // Step 5.5: Update the persisted prompt file so `skulk replay <name>`
+    // reflects this incarnation. With a prompt we write it (for future
+    // replays); without one we wipe any file left over from a prior
+    // incarnation — otherwise `skulk replay` would silently serve the old
+    // prompt against an unrelated new agent. Runs *before* send so the
+    // prompt is durable even if delivery fails. Non-fatal either way: the
+    // agent is already running.
+    let update_cmd = match prompt {
+        Some(p) => agent_persist_prompt_command(&session_name, p),
+        None => agent_clear_prompt_command(&session_name),
+    };
+    if let Err(e) = ssh.run(&update_cmd) {
+        eprintln!("Warning: failed to update stored prompt for agent '{name}': {e}");
     }
 
     // Step 6: Send prompt if provided
@@ -807,19 +828,37 @@ mod tests {
     }
 
     #[test]
-    fn cmd_new_without_prompt_does_not_persist() {
+    fn cmd_new_without_prompt_clears_stored_prompt() {
+        // Prompt files deliberately survive `skulk destroy` so `skulk replay`
+        // keeps working after a teardown. The flip side: if you then create
+        // a same-named agent without a prompt, any file left from the prior
+        // incarnation would silently serve as its "original" prompt. cmd_new
+        // therefore issues a `rm -f` of the stored file when no prompt is
+        // given, so replay of the new incarnation correctly reports "no
+        // stored prompt".
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale prompt
         ]);
         assert!(cmd_new(&ssh, "task", None, None, false, None, None, &cfg, None).is_ok());
         let calls = ssh.calls();
+        let clear_call = calls
+            .iter()
+            .find(|c| c.contains("~/.skulk/prompts/skulk-task.txt"))
+            .unwrap_or_else(|| panic!("expected a clear call for the stored prompt: {calls:?}"));
         assert!(
-            !calls.iter().any(|c| c.contains("~/.skulk/prompts/")),
-            "no persist call expected when no prompt: {calls:?}"
+            clear_call.contains("rm -f"),
+            "clear step should use `rm -f` (missing file is the common case): {clear_call}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("printf") && c.contains("~/.skulk/prompts/")),
+            "no persist-prompt call expected when no prompt: {calls:?}"
         );
     }
 
@@ -866,8 +905,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ]);
         assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
     }
@@ -906,8 +946,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ]);
         assert!(cmd_new(&ssh, "test", None, None, true, None, None, &cfg, None).is_ok());
         // Fourth SSH call is the tmux-create command; verify the flag landed there.
@@ -924,8 +965,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ]);
         assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
         let tmux_call = &ssh.calls()[3];
@@ -941,8 +983,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ]);
         assert!(
             cmd_new(
@@ -997,8 +1040,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ]);
         assert!(
             cmd_new(
@@ -1236,7 +1280,8 @@ mod tests {
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
             ssh_ok(), // worktree
-            ssh_ok(), // tmux create + send-keys
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt (no prompt provided)
         ]);
         let env_path = std::path::PathBuf::from("/tmp/some/.skulk/.env");
         assert!(
@@ -1269,8 +1314,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ]);
         assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
         let calls = ssh.calls();
@@ -1288,6 +1334,7 @@ mod tests {
             Ok(mock_empty_inventory()),
             ssh_ok(), // worktree
             ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt
         ])
         .with_upload_responses(vec![Err(SkulkError::SshFailed("scp blew up".into()))]);
         let env_path = std::path::PathBuf::from("/tmp/.skulk/.env");
