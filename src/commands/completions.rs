@@ -193,6 +193,7 @@ end
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn bash_output_contains_static_and_dynamic_sections() {
@@ -282,5 +283,50 @@ mod tests {
         assert!(!AGENT_COMMANDS.contains(&"doctor"));
         assert!(!AGENT_COMMANDS.contains(&"pull"));
         assert!(!AGENT_COMMANDS.contains(&"completions"));
+    }
+
+    #[test]
+    fn every_agent_command_is_a_real_subcommand() {
+        // Guard against `AGENT_COMMANDS` drifting from the actual `Commands`
+        // enum. If someone renames `destroy` → `remove`, static completion
+        // keeps working (clap regenerates it) but the dynamic case arm would
+        // silently stop firing. This test catches that at `cargo test` time.
+        let cmd = Cli::command();
+        let real: std::collections::HashSet<String> = cmd
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .collect();
+        for entry in AGENT_COMMANDS {
+            assert!(
+                real.contains(*entry),
+                "AGENT_COMMANDS has stale entry '{entry}' — no such subcommand. \
+                 Did you rename or remove a command? Update AGENT_COMMANDS in completions.rs."
+            );
+        }
+    }
+
+    #[test]
+    fn completions_rejects_invalid_shell() {
+        // clap's ValueEnum should refuse anything outside {bash, zsh, fish}
+        // with a clear error pointing at possible values.
+        // Not using expect_err() because Cli doesn't impl Debug.
+        let err = match Cli::try_parse_from(["skulk", "completions", "powershell"]) {
+            Ok(_) => panic!("expected parse error for unsupported shell"),
+            Err(e) => e,
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("bash") && rendered.contains("zsh") && rendered.contains("fish"),
+            "error should list valid shells, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn completions_requires_shell_argument() {
+        let result = Cli::try_parse_from(["skulk", "completions"]);
+        assert!(
+            result.is_err(),
+            "expected clap error when no shell argument is provided"
+        );
     }
 }
