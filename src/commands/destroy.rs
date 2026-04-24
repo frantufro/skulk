@@ -30,6 +30,16 @@ pub(crate) fn agent_destroy_branch_command(name: &str, cfg: &Config) -> String {
     format!("cd {base_path} && git branch -D {}", agent.branch_name())
 }
 
+/// Build the SSH command to delete an agent's Stop-hook state file.
+///
+/// The file lives at `~/.skulk/state/<session_name>` and is written by the
+/// Claude Code `Stop` / `UserPromptSubmit` hooks (see `hooks_settings_json`).
+/// `rm -f` makes a missing file a no-op so callers fire this unconditionally.
+pub(crate) fn agent_destroy_state_file_command(name: &str, cfg: &Config) -> String {
+    let agent = AgentRef::new(name, cfg);
+    format!("rm -f ~/.skulk/state/{}", agent.session_name())
+}
+
 /// Run the branch-delete SSH command and record the outcome.
 ///
 /// Used by both the `has_worktree` arm (worktree + branch cleanup) and the
@@ -100,6 +110,11 @@ pub(crate) fn cmd_destroy(
         // Orphaned branch (no worktree)
         try_delete_branch(ssh, name, cfg, &mut cleaned, &mut failed);
     }
+
+    // Always reap the Stop-hook state marker. It's invisible plumbing for
+    // `skulk wait`, so we don't add it to `cleaned` / `failed`; `rm -f` makes
+    // a missing file a no-op anyway.
+    let _ = ssh.run(&agent_destroy_state_file_command(name, cfg));
 
     if !cleaned.is_empty() {
         println!("Destroyed agent '{name}' ({}).", cleaned.join(", "));
@@ -174,6 +189,11 @@ pub(crate) fn cmd_destroy_all(
             step_failed = true;
         }
 
+        // Reap the Stop-hook state marker for this agent. Fire-and-forget;
+        // `rm -f` makes missing files a no-op and state cleanup is invisible
+        // plumbing, not something worth surfacing in the summary.
+        let _ = ssh.run(&agent_destroy_state_file_command(name, cfg));
+
         if step_failed {
             println!("done (with warnings)");
             warned_count += 1;
@@ -222,6 +242,13 @@ mod tests {
         assert!(cmd.starts_with("cd ~/test-project"));
     }
 
+    #[test]
+    fn agent_destroy_state_file_command_generates_rm_f() {
+        let cfg = test_config();
+        let cmd = agent_destroy_state_file_command("my-task", &cfg);
+        assert_eq!(cmd, "rm -f ~/.skulk/state/skulk-my-task");
+    }
+
     fn confirm_yes(_: &str) -> bool {
         true
     }
@@ -235,11 +262,18 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory_single_agent("skulk-target")),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // kill session
+            ssh_ok(), // remove worktree
+            ssh_ok(), // delete branch
+            ssh_ok(), // rm state file
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
+        let calls = ssh.calls();
+        assert_eq!(
+            calls.last().unwrap(),
+            "rm -f ~/.skulk/state/skulk-target",
+            "last call should be the state-file rm, got: {calls:?}"
+        );
     }
 
     #[test]
@@ -264,9 +298,10 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory_single_agent("skulk-target")),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // kill session
+            ssh_ok(), // worktree remove
+            ssh_ok(), // branch delete
+            ssh_ok(), // rm state file
         ]);
         assert!(cmd_destroy(&ssh, "target", false, &cfg, &confirm_yes).is_ok());
     }
@@ -276,8 +311,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-partial"], &[], &["skulk-partial"])),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // kill session
+            ssh_ok(), // orphan-branch delete
+            ssh_ok(), // rm state file
         ]);
         assert!(cmd_destroy(&ssh, "partial", true, &cfg, &confirm_yes).is_ok());
     }
@@ -290,6 +326,7 @@ mod tests {
             ssh_err("kill-session failed"),
             ssh_ok(),
             ssh_ok(),
+            ssh_ok(), // rm state file still runs
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -302,6 +339,7 @@ mod tests {
             ssh_ok(),
             ssh_err("worktree remove failed"),
             ssh_ok(),
+            ssh_ok(), // rm state file still runs
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -314,6 +352,7 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
             ssh_err("branch delete failed"),
+            ssh_ok(), // rm state file still runs
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -326,6 +365,7 @@ mod tests {
             ssh_err("kill failed"),
             ssh_err("worktree failed"),
             ssh_err("branch failed"),
+            ssh_err("state rm failed"), // rm state file still attempted, failure ignored
         ]);
         assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
     }
@@ -335,7 +375,8 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-orphan"])),
-            ssh_ok(),
+            ssh_ok(), // branch delete
+            ssh_ok(), // rm state file
         ]);
         assert!(cmd_destroy(&ssh, "orphan", true, &cfg, &confirm_yes).is_ok());
     }
@@ -346,8 +387,31 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-orphan"])),
             ssh_err("branch delete failed"),
+            ssh_ok(), // rm state file still runs
         ]);
         assert!(cmd_destroy(&ssh, "orphan", true, &cfg, &confirm_yes).is_ok());
+    }
+
+    #[test]
+    fn cmd_destroy_issues_state_file_rm() {
+        // End-to-end check that the state-file rm is actually issued, not just
+        // that the test mock accepts an extra response.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+        ]);
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
+        assert!(
+            ssh.calls()
+                .iter()
+                .any(|c| c == "rm -f ~/.skulk/state/skulk-target"),
+            "expected rm of state file, got calls: {:?}",
+            ssh.calls()
+        );
     }
 
     #[test]
@@ -376,14 +440,29 @@ mod tests {
                 ],
                 &["skulk-alpha", "skulk-beta"],
             )),
+            // alpha: kill, wt, br, state rm
             ssh_ok(),
             ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            // beta: kill, wt, br, state rm
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
         ]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "rm -f ~/.skulk/state/skulk-alpha"),
+            "expected rm for alpha state file: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c == "rm -f ~/.skulk/state/skulk-beta"),
+            "expected rm for beta state file: {calls:?}"
+        );
     }
 
     #[test]
@@ -394,6 +473,7 @@ mod tests {
             ssh_err("session kill failed"),
             ssh_err("worktree remove failed"),
             ssh_err("branch delete failed"),
+            ssh_err("state rm failed"), // state rm still runs, failure ignored
         ]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
@@ -410,12 +490,16 @@ mod tests {
                 ],
                 &["skulk-alpha", "skulk-beta"],
             )),
+            // alpha: kill ok, wt ok, br ok, state rm ok
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
+            ssh_ok(),
+            // beta: kill fails, wt ok, br fails, state rm ok
             ssh_err("session kill failed"),
             ssh_ok(),
             ssh_err("branch delete failed"),
+            ssh_ok(),
         ]);
         assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
     }
