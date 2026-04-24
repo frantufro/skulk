@@ -1404,4 +1404,84 @@ mod tests {
             assert!(message.contains("refused"));
         });
     }
+
+    // ── --github partial-failure guarantees ────────────────────────────
+    //
+    // `load_github_prompt` runs before any mutating SSH call (worktree, tmux).
+    // If the gh availability check or issue fetch fails, cmd_new must return
+    // the error without creating any agent resources -- i.e., no cleanup is
+    // needed because no state was committed. These tests pin that invariant.
+
+    #[test]
+    fn cmd_new_github_gh_unavailable_creates_no_resources() {
+        let cfg = test_config();
+        // First SSH call is the gh availability probe; simulate gh missing.
+        let ssh = MockSsh::new(vec![Ok("SKULK_GH_MISSING".into())]);
+        let result = cmd_new(
+            &ssh,
+            "test",
+            Some("42"),
+            None,
+            false,
+            None,
+            None,
+            &cfg,
+            None,
+        );
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("not installed"));
+        });
+        // Only the gh availability check ran -- no worktree or tmux commands.
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 1, "only gh probe should have run: {calls:?}");
+        assert!(
+            !calls.iter().any(|c| c.contains("git worktree add")),
+            "worktree creation must not run: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("tmux new-session")),
+            "tmux creation must not run: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_new_github_issue_fetch_fails_creates_no_resources() {
+        let cfg = test_config();
+        // gh is available, but the issue fetch fails -- still returns before
+        // any mutating SSH call, so nothing to roll back.
+        let ssh = MockSsh::new(vec![
+            Ok("SKULK_GH_OK".into()),
+            Err(SkulkError::SshFailed(
+                "Could not resolve to an Issue with the number of 999.".into(),
+            )),
+        ]);
+        let result = cmd_new(
+            &ssh,
+            "test",
+            Some("999"),
+            None,
+            false,
+            None,
+            None,
+            &cfg,
+            None,
+        );
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("#999"));
+        });
+        let calls = ssh.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "only gh probe + fetch should have run: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("git worktree add")),
+            "worktree creation must not run: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("tmux new-session")),
+            "tmux creation must not run: {calls:?}"
+        );
+    }
 }
