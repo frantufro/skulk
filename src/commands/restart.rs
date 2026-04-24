@@ -273,6 +273,37 @@ mod tests {
     }
 
     #[test]
+    fn cmd_restart_threads_all_flags_into_single_tmux_call() {
+        // Regression guard against a positional swap of `model` and
+        // `claude_args` at the cmd_restart -> agent_create_tmux_command
+        // boundary: single-flag tests would still pass under a swap, so
+        // assert all three wires land in the same tmux invocation.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            ssh_ok(),
+        ]);
+        assert!(cmd_restart(&ssh, "task", true, Some("opus"), Some("--verbose"), &cfg).is_ok());
+        let tmux_call = &ssh.calls()[1];
+        assert!(
+            tmux_call.contains("--remote-control skulk-task"),
+            "combined launch should include --remote-control, got: {tmux_call}"
+        );
+        assert!(
+            tmux_call.contains("--model opus"),
+            "combined launch should include --model opus, got: {tmux_call}"
+        );
+        assert!(
+            tmux_call.contains("--verbose"),
+            "combined launch should include extra claude args, got: {tmux_call}"
+        );
+    }
+
+    #[test]
     fn cmd_restart_surfaces_tmux_failure() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
