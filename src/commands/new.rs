@@ -252,6 +252,19 @@ pub(crate) fn agent_rollback_worktree_command(name: &str, cfg: &Config) -> Strin
     format!("cd {base_path} && git worktree remove --force {worktree} && git branch -D {branch}")
 }
 
+/// Format the warning emitted when a post-tmux-failure rollback also fails.
+///
+/// Points the user at `skulk destroy <name>` (not `skulk gc`). A failed
+/// rollback leaves both the worktree and its branch intact — `gc_find_orphans`
+/// classifies that pair as an *archived* agent and refuses to reap it
+/// (see `gc.rs`), so advising `skulk gc` strands the user. `skulk destroy`
+/// re-fetches inventory and cleans worktree+branch together.
+pub(crate) fn format_rollback_failure_warning(name: &str) -> String {
+    format!(
+        "Warning: failed to roll back worktree for agent '{name}'. Retry with `skulk destroy {name}`."
+    )
+}
+
 /// Create a new agent with worktree isolation and optional initial prompt.
 ///
 /// Orchestration sequence:
@@ -397,9 +410,7 @@ pub(crate) fn create_agent_with_prompt(
             .run(&agent_rollback_worktree_command(name, cfg))
             .is_err()
         {
-            eprintln!(
-                "Warning: Failed to clean up worktree for agent '{name}'. Run `skulk gc` to clean up."
-            );
+            eprintln!("{}", format_rollback_failure_warning(name));
         }
         return Err(e);
     }
@@ -1141,6 +1152,37 @@ mod tests {
         assert_err!(result, SkulkError::SshFailed(msg) => {
             assert!(msg.contains("tmux creation failed"));
         });
+    }
+
+    // ── rollback-failure warning text ──────────────────────────────────
+    //
+    // A failed rollback leaves the worktree AND its branch intact. `skulk gc`
+    // treats that pair as an *archived* agent and refuses to touch it, so
+    // advising gc strands the user. These tests pin the corrected advice
+    // (`skulk destroy <name>`) so the misdirection can't silently return.
+    // Mirrors `format_partial_destroy_warning_points_at_destroy_not_gc`.
+
+    #[test]
+    fn format_rollback_failure_warning_points_at_destroy_not_gc() {
+        let msg = format_rollback_failure_warning("my-task");
+        assert!(msg.contains("my-task"), "should name the agent: {msg}");
+        assert!(
+            msg.contains("skulk destroy my-task"),
+            "must tell user to retry with skulk destroy: {msg}"
+        );
+        assert!(
+            !msg.contains("skulk gc"),
+            "must NOT suggest skulk gc (it won't clean worktree+branch state): {msg}"
+        );
+    }
+
+    #[test]
+    fn format_rollback_failure_warning_mentions_rollback_context() {
+        let msg = format_rollback_failure_warning("my-task");
+        assert!(
+            msg.to_lowercase().contains("roll back") || msg.to_lowercase().contains("rollback"),
+            "warning should explain it's a rollback failure: {msg}"
+        );
     }
 
     #[test]
