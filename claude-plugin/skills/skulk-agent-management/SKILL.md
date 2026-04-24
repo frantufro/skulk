@@ -144,13 +144,39 @@ skulk archive <name>
 
 # Restart an archived or crashed agent in its existing worktree
 skulk restart <name>
+
+# Restart with a different model or extra flags
+skulk restart <name> --model opus
+skulk restart <name> --claude-args "--allowed-tools Bash"
+skulk restart <name> --remote-control
 ```
 
 `restart` launches a fresh Claude session with empty context in the existing
 worktree. Use `skulk send` or `claude --continue` inside the session to
 resume prior work.
 
-### 7. Clean Up
+### 7. Replay an Agent's Task
+
+```bash
+# Re-run the original prompt on a fresh worktree (auto-names task-2, task-3, …)
+skulk replay <name>
+
+# Explicit new name
+skulk replay <name> --as retry-opus
+
+# Override the model for the replay
+skulk replay <name> --model opus
+
+# Combine: new name + different model
+skulk replay <name> --as retry-sonnet --model sonnet
+```
+
+`skulk replay` reads the prompt that was passed to `skulk new` (stored at
+`~/.skulk/prompts/<session>.txt` on the remote) and creates a fresh agent
+with the same task. Useful for benchmarking, retrying with a different model,
+or getting a second opinion.
+
+### 8. Clean Up
 
 ```bash
 # Destroy a specific agent (session + worktree + branch)
@@ -179,6 +205,9 @@ skulk doctor
 
 # Set up a new project for skulk
 skulk init
+
+# Generate shell tab-completion script
+skulk completions bash   # or zsh, fish
 ```
 
 ## Init Hook
@@ -214,6 +243,10 @@ skulk list
 
 ### Retry a task with a different model
 ```bash
+# Replay the original prompt on a fresh agent with a different model
+skulk replay slow-agent --as fast-agent --model sonnet
+
+# Or archive and start fresh manually
 skulk archive slow-agent
 skulk new fast-agent --model sonnet --from tasks/same-task.md
 ```
