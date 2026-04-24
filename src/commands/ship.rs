@@ -101,6 +101,31 @@ pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
     )
 }
 
+/// Wrap a post-push PR-creation failure with clear state recovery guidance.
+///
+/// By the time this is called, `git push -u origin <branch>` has already
+/// succeeded — the branch lives on the remote. We intentionally do NOT roll
+/// back the push: `git push origin --delete` is destructive, the user may
+/// want the pushed branch regardless (to share, or to try again later), and
+/// both the push and `gh pr create` are idempotent — retrying `skulk ship`
+/// is safe. The wrapped message tells the user exactly which state they're
+/// in so they can pick recovery (retry, manual PR, or ignore the push).
+pub(crate) fn format_post_push_pr_failure(
+    branch: &str,
+    name: &str,
+    original: &SkulkError,
+) -> SkulkError {
+    SkulkError::Diagnostic {
+        message: format!(
+            "Branch '{branch}' was pushed to origin, but `gh pr create` failed: {original}"
+        ),
+        suggestion: format!(
+            "The branch is already on the remote. Retry with `skulk ship {name}` (push is idempotent), \
+             or open the PR manually on GitHub."
+        ),
+    }
+}
+
 /// Push an agent's branch and open a PR with a Claude-authored description.
 ///
 /// Three SSH round-trips, in order:
@@ -109,10 +134,16 @@ pub(crate) fn ship_command(name: &str, cfg: &Config) -> String {
 ///   3. Generate the description via `claude -p` and open the PR via `gh pr create`.
 ///
 /// The PR URL printed by `gh pr create` is forwarded to stdout on success.
+///
+/// Partial-failure policy: if step 2 succeeds but step 3 fails, the branch
+/// stays on the remote (we do not roll back the push — see
+/// `format_post_push_pr_failure`). The returned error tells the user what
+/// state they're in and how to recover.
 pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
     let host = &cfg.host;
     let agent = AgentRef::new(name, cfg);
+    let branch = agent.branch_name();
 
     let missing = ssh.run(&precheck_command())?;
     if !missing.is_empty() {
@@ -122,14 +153,15 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     ssh.run(&push_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, host))?;
 
-    let output = ssh
-        .run(&ship_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, host))?;
+    let output = ssh.run(&ship_command(name, cfg)).map_err(|e| {
+        let classified = classify_agent_error(name, e, host);
+        format_post_push_pr_failure(&branch, name, &classified)
+    })?;
 
     if !output.is_empty() {
         println!("{output}");
     }
-    eprintln!("Opened PR for {}.", agent.branch_name());
+    eprintln!("Opened PR for {branch}.");
     Ok(())
 }
 
@@ -446,7 +478,10 @@ mod tests {
     }
 
     #[test]
-    fn cmd_ship_propagates_pr_creation_failure() {
+    fn cmd_ship_propagates_pr_creation_failure_with_push_context() {
+        // Partial-failure policy: push succeeded, PR creation failed. The user
+        // needs to know the branch is already pushed so they don't expect to
+        // start over -- retry is idempotent.
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(String::new()), // precheck OK
@@ -456,9 +491,92 @@ mod tests {
             )),
         ]);
         let result = cmd_ship(&ssh, "feat", &cfg);
-        assert_err!(result, SkulkError::SshFailed(msg) => {
-            assert!(msg.contains("already exists"));
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert!(
+                message.contains("skulk-feat") && message.contains("pushed"),
+                "must tell user the branch was pushed: {message}"
+            );
+            assert!(
+                message.contains("already exists"),
+                "must preserve the original gh error: {message}"
+            );
+            assert!(
+                suggestion.contains("skulk ship feat"),
+                "must suggest retry with skulk ship: {suggestion}"
+            );
+            assert!(
+                suggestion.to_lowercase().contains("idempotent")
+                    || suggestion.to_lowercase().contains("already on the remote"),
+                "must clarify why retry is safe: {suggestion}"
+            );
         });
+    }
+
+    #[test]
+    fn cmd_ship_does_not_roll_back_pushed_branch_on_pr_failure() {
+        // Partial-failure policy: we intentionally do NOT delete the remote
+        // branch when PR creation fails. `git push origin --delete` is
+        // destructive and the user may want the pushed branch regardless.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            ssh_ok(), // precheck
+            ssh_ok(), // push
+            Err(SkulkError::SshFailed("gh pr create failed".into())),
+        ]);
+        let _ = cmd_ship(&ssh, "feat", &cfg);
+        let calls = ssh.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "must not run any cleanup (e.g. push --delete) after PR failure: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("push") && c.contains("--delete")),
+            "must not roll back the push: {calls:?}"
+        );
+    }
+
+    // ── format_post_push_pr_failure ───────────────────────────────────────
+
+    #[test]
+    fn format_post_push_pr_failure_announces_pushed_state() {
+        let original = SkulkError::SshFailed("boom".into());
+        let err = format_post_push_pr_failure("skulk-feat", "feat", &original);
+        let SkulkError::Diagnostic {
+            message,
+            suggestion,
+        } = err
+        else {
+            panic!("expected Diagnostic");
+        };
+        assert!(message.contains("skulk-feat"));
+        assert!(message.contains("pushed"));
+        assert!(
+            message.contains("boom"),
+            "original error text must survive: {message}"
+        );
+        assert!(suggestion.contains("skulk ship feat"));
+    }
+
+    #[test]
+    fn format_post_push_pr_failure_preserves_diagnostic_body() {
+        // When classification already promoted the raw error to a Diagnostic
+        // (e.g. connection timeout during `gh pr create`), the underlying
+        // message must still surface so the user can diagnose.
+        let original = SkulkError::Diagnostic {
+            message: "Connection to testhost timed out.".into(),
+            suggestion: "Check your network connection.".into(),
+        };
+        let err = format_post_push_pr_failure("skulk-feat", "feat", &original);
+        let SkulkError::Diagnostic { message, .. } = err else {
+            panic!("expected Diagnostic");
+        };
+        assert!(
+            message.contains("timed out"),
+            "underlying diagnostic must appear in wrapped message: {message}"
+        );
     }
 
     #[test]

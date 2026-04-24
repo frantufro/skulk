@@ -1,4 +1,5 @@
 use crate::agent_ref::AgentRef;
+use crate::commands::destroy::agent_destroy_session_command;
 use crate::commands::new::agent_create_tmux_command;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
@@ -49,14 +50,26 @@ pub(crate) fn cmd_restart(
         )));
     }
 
-    ssh.run(&agent_create_tmux_command(
+    // Tmux creation is a two-step shell pipeline (`new-session && send-keys`).
+    // If `new-session` succeeds but `send-keys` fails, we leave an empty
+    // session that would block a subsequent restart with "already running".
+    // Best-effort kill on failure so retry stays clean; swallow the cleanup
+    // error (the original failure is the one the user needs to see).
+    if let Err(e) = ssh.run(&agent_create_tmux_command(
         name,
         cfg,
         remote_control,
         model,
         claude_args,
-    ))
-    .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    )) {
+        if ssh.run(&agent_destroy_session_command(name, cfg)).is_err() {
+            eprintln!(
+                "Warning: failed to clean up partial tmux session for agent '{name}'. \
+                 If `skulk restart {name}` reports 'already running', run `skulk destroy {name}` first."
+            );
+        }
+        return Err(classify_agent_error(name, e, &cfg.host));
+    }
 
     println!(
         "Agent '{name}' restarted.\n\
@@ -313,9 +326,64 @@ mod tests {
                 &["skulk-task"],
             )),
             Err(SkulkError::SshFailed("tmux: server not responding".into())),
+            // Cleanup kill-session attempt after tmux creation failed.
+            ssh_ok(),
         ]);
         let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
         assert!(matches!(result, Err(SkulkError::SshFailed(_))));
+    }
+
+    #[test]
+    fn cmd_restart_tmux_failure_kills_partial_session() {
+        // If tmux new-session succeeded but send-keys failed, we would leave an
+        // empty session that blocks a retry with "already running". Cleanup
+        // must attempt to kill the partial session so retry stays clean.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            Err(SkulkError::SshFailed("send-keys failed".into())),
+            ssh_ok(), // cleanup kill-session succeeds
+        ]);
+        let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
+        assert!(result.is_err());
+        let calls = ssh.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected inventory + tmux + cleanup: {calls:?}"
+        );
+        assert!(
+            calls[2].contains("tmux kill-session -t skulk-task"),
+            "cleanup must kill the partial session: {}",
+            calls[2]
+        );
+    }
+
+    #[test]
+    fn cmd_restart_tmux_failure_cleanup_failure_still_surfaces_original_error() {
+        // If the cleanup kill-session also fails, the ORIGINAL tmux error is
+        // what the user needs to see (the cleanup error is just noise).
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            Err(SkulkError::SshFailed("original send-keys failure".into())),
+            Err(SkulkError::SshFailed("cleanup also failed".into())),
+        ]);
+        let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
+        assert_err!(result, SkulkError::SshFailed(msg) => {
+            assert!(
+                msg.contains("original send-keys failure"),
+                "original error must surface, not cleanup error: {msg}"
+            );
+        });
     }
 
     #[test]
@@ -343,6 +411,9 @@ mod tests {
                 &["skulk-task"],
             )),
             Err(SkulkError::SshFailed("Connection timed out".into())),
+            // Cleanup attempt after tmux failure -- likely also times out in
+            // reality but we just need it to be consumed by the mock.
+            ssh_ok(),
         ]);
         let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
         assert_err!(result, SkulkError::Diagnostic { message, .. } => {

@@ -58,6 +58,33 @@ fn try_delete_branch<'a>(
     }
 }
 
+/// Format the warning message emitted when one or more `destroy` steps failed.
+///
+/// Points the user at `skulk destroy <name>` (not `skulk gc`): git refuses to
+/// delete a branch while its worktree is still checked out, so a worktree-
+/// remove failure guarantees the branch stays too — `skulk gc` classifies
+/// that state as an *archived* agent and refuses to touch it, leaving the
+/// user stuck. `skulk destroy <name>` re-fetches inventory and retries only
+/// the steps that still have work to do.
+pub(crate) fn format_partial_destroy_warning(name: &str, failed: &[&str]) -> String {
+    format!(
+        "Warning: failed to clean up {} for agent '{name}'. Retry with `skulk destroy {name}`.",
+        failed.join(", ")
+    )
+}
+
+/// Format the summary line printed by `destroy-all` when some agents had warnings.
+pub(crate) fn format_destroy_all_summary(clean_count: usize, warned_count: usize) -> String {
+    if warned_count == 0 {
+        format!("Destroyed {} agent(s).", clean_count + warned_count)
+    } else {
+        format!(
+            "Destroyed {clean_count} agent(s), {warned_count} with warnings. \
+             Retry with `skulk destroy-all` or `skulk destroy <name>` for individual agents."
+        )
+    }
+}
+
 /// Destroy a specific agent (kills session, removes worktree, deletes branch).
 ///
 /// Uses shared inventory to probe what exists.
@@ -120,10 +147,7 @@ pub(crate) fn cmd_destroy(
         println!("Destroyed agent '{name}' ({}).", cleaned.join(", "));
     }
     if !failed.is_empty() {
-        eprintln!(
-            "Warning: failed to clean up {} for agent '{name}'. Run `skulk gc` to retry.",
-            failed.join(", ")
-        );
+        eprintln!("{}", format_partial_destroy_warning(name, &failed));
     }
     Ok(())
 }
@@ -203,11 +227,7 @@ pub(crate) fn cmd_destroy_all(
     }
 
     let clean_count = agent_names.len() - warned_count;
-    if warned_count == 0 {
-        println!("Destroyed {} agent(s).", agent_names.len());
-    } else {
-        println!("Destroyed {clean_count} agent(s), {warned_count} with warnings.");
-    }
+    println!("{}", format_destroy_all_summary(clean_count, warned_count));
     Ok(())
 }
 
@@ -247,6 +267,52 @@ mod tests {
         let cfg = test_config();
         let cmd = agent_destroy_state_file_command("my-task", &cfg);
         assert_eq!(cmd, "rm -f ~/.skulk/state/skulk-my-task");
+    }
+
+    // ── partial-failure messaging ──────────────────────────────────────
+    //
+    // The original advice pointed users at `skulk gc`, but gc treats
+    // (worktree + branch) as an archived agent and refuses to touch it.
+    // When `git worktree remove` fails, the branch cannot be deleted
+    // either (git won't drop a checked-out branch), so the user ends up
+    // in exactly that gc-ignored state. These tests pin the corrected
+    // advice so it can't silently regress.
+
+    #[test]
+    fn format_partial_destroy_warning_points_at_destroy_not_gc() {
+        let msg = format_partial_destroy_warning("my-task", &["worktree", "branch"]);
+        assert!(
+            msg.contains("worktree, branch"),
+            "should list failed items: {msg}"
+        );
+        assert!(msg.contains("my-task"), "should name the agent: {msg}");
+        assert!(
+            msg.contains("skulk destroy my-task"),
+            "must tell user to retry with skulk destroy, got: {msg}"
+        );
+        assert!(
+            !msg.contains("skulk gc"),
+            "must NOT suggest skulk gc (it won't clean worktree+branch state): {msg}"
+        );
+    }
+
+    #[test]
+    fn format_destroy_all_summary_clean_run() {
+        assert_eq!(format_destroy_all_summary(3, 0), "Destroyed 3 agent(s).");
+    }
+
+    #[test]
+    fn format_destroy_all_summary_with_warnings_suggests_retry() {
+        let msg = format_destroy_all_summary(2, 1);
+        assert!(msg.contains("2 agent(s)"), "should count clean: {msg}");
+        assert!(
+            msg.contains("1 with warnings"),
+            "should count warnings: {msg}"
+        );
+        assert!(
+            msg.contains("skulk destroy-all") || msg.contains("skulk destroy"),
+            "must tell user how to retry: {msg}"
+        );
     }
 
     fn confirm_yes(_: &str) -> bool {
