@@ -519,9 +519,10 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory_single_agent("skulk-target")),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // kill session
+            ssh_ok(), // worktree remove
+            ssh_ok(), // branch delete
+            ssh_ok(), // rm state file
         ]);
         let cli = Cli {
             no_color: true,

@@ -2,13 +2,79 @@ use std::collections::HashSet;
 
 use crate::agent_ref::AgentRef;
 use crate::commands::destroy::{
-    agent_destroy_branch_command, agent_destroy_session_command, agent_destroy_worktree_command,
+    agent_destroy_branch_command, agent_destroy_session_command, agent_destroy_state_file_command,
+    agent_destroy_worktree_command,
 };
 use crate::config::Config;
 use crate::display::format_gc_summary;
 use crate::error::SkulkError;
 use crate::inventory::{AgentInventory, GcOrphans, fetch_inventory};
 use crate::ssh::Ssh;
+use crate::util::validate_name;
+
+/// Build the SSH command to list Stop-hook state files on the remote.
+///
+/// Emits one filename per line to stdout. A missing `~/.skulk/state/`
+/// directory is not an error — the `|| true` fallback makes the probe
+/// return an empty result, which the caller treats as "nothing to clean".
+pub(crate) fn list_state_files_command() -> String {
+    "ls ~/.skulk/state/ 2>/dev/null || true".to_string()
+}
+
+/// Remove `~/.skulk/state/<session>` markers whose owning tmux session no
+/// longer exists. Runs after orphan session/worktree/branch cleanup so that
+/// sessions just killed by gc are already considered "gone" here.
+///
+/// A filename is an orphan when:
+///   1. It starts with the configured `session_prefix`,
+///   2. the suffix is a valid agent name (defense against weird filenames
+///      landing unsanitized in a `rm -f` command), AND
+///   3. its session is not in the *surviving* set
+///      (`inv.sessions` minus `orphans.sessions`).
+///
+/// Cleanup is silent unless stale entries are found, so routine gc runs don't
+/// emit noise when the state dir is clean.
+fn cleanup_stale_state_files(
+    ssh: &impl Ssh,
+    inv: &AgentInventory,
+    orphans: &GcOrphans,
+    cfg: &Config,
+) {
+    let state_raw = ssh.run(&list_state_files_command()).unwrap_or_default();
+
+    let orphan_sess: HashSet<&str> = orphans.sessions.iter().map(String::as_str).collect();
+    let surviving: HashSet<&str> = inv
+        .sessions
+        .iter()
+        .map(String::as_str)
+        .filter(|s| !orphan_sess.contains(s))
+        .collect();
+
+    let stale: Vec<String> = state_raw
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.starts_with(&*cfg.session_prefix))
+        .filter(|s| {
+            let suffix = &s[cfg.session_prefix.len()..];
+            validate_name(suffix).is_ok()
+        })
+        .filter(|s| !surviving.contains(s))
+        .map(ToString::to_string)
+        .collect();
+
+    for name in &stale {
+        let agent = AgentRef::from_qualified(name, cfg);
+        eprint!("  Removing stale state file {name}... ");
+        if ssh
+            .run(&agent_destroy_state_file_command(agent.name(), cfg))
+            .is_ok()
+        {
+            eprintln!("done");
+        } else {
+            eprintln!("failed");
+        }
+    }
+}
 
 /// Analyze an `AgentInventory` and find orphaned resources.
 ///
@@ -65,11 +131,6 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     // Find orphans
     let orphans = gc_find_orphans(&inv);
 
-    if orphans.is_empty() {
-        println!("{}", format_gc_summary(&orphans, dry_run));
-        return Ok(());
-    }
-
     if dry_run {
         println!("{}", format_gc_summary(&orphans, true));
         return Ok(());
@@ -120,10 +181,20 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
         }
     }
 
-    // Also prune worktree references
-    let _ = ssh.run(&format!("cd {base_path} && git worktree prune"));
+    // Also prune worktree references (only meaningful after touching worktrees,
+    // but cheap enough to run whenever we had any orphans).
+    if !orphans.is_empty() {
+        let _ = ssh.run(&format!("cd {base_path} && git worktree prune"));
+    }
 
-    println!("\n{}", format_gc_summary(&orphans, false));
+    // Reap stale `~/.skulk/state/<session>` markers left behind by destroy/gc
+    // paths that predate state-file cleanup, or by tmux servers that died
+    // without the destroy path running. Runs even when no other orphans were
+    // found, since state files can leak independently of session/worktree state.
+    cleanup_stale_state_files(ssh, &inv, &orphans, cfg);
+
+    let prefix = if orphans.is_empty() { "" } else { "\n" };
+    println!("{prefix}{}", format_gc_summary(&orphans, false));
     Ok(())
 }
 
@@ -131,7 +202,8 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
 mod tests {
     use super::*;
     use crate::testutil::{
-        MockSsh, make_inventory, mock_inventory, mock_inventory_single_agent, ssh_ok, test_config,
+        MockSsh, make_inventory, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
+        ssh_ok, test_config,
     };
 
     #[test]
@@ -267,7 +339,11 @@ mod tests {
     #[test]
     fn cmd_gc_clean_state() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-healthy"))]);
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory_single_agent("skulk-healthy")),
+            // State dir empty -- nothing to reap.
+            Ok(String::new()),
+        ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
 
@@ -276,8 +352,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-ghost"], &[], &[])),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(),          // kill session
+            ssh_ok(),          // worktree prune
+            Ok(String::new()), // state ls -- empty
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -292,9 +369,10 @@ mod tests {
                 &[("skulk-stale", "/path/skulk-stale")],
                 &[],
             )),
-            ssh_ok(),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(),          // worktree remove
+            ssh_ok(),          // branch delete
+            ssh_ok(),          // worktree prune
+            Ok(String::new()), // state ls -- empty
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -302,20 +380,31 @@ mod tests {
     #[test]
     fn cmd_gc_archived_agent_preserved() {
         // End-to-end: gc must not touch an archived agent's worktree or branch.
-        // Only the inventory SSH call plus the bookkeeping `git worktree prune`
-        // should run; no destroy calls.
+        // Only the inventory probe plus the state-file listing should run; no
+        // destroy calls. (State listing is empty here -- see the companion
+        // `cmd_gc_archived_agent_state_file_reaped` test for the case where a
+        // state file does exist.)
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok(mock_inventory(
-            &[],
-            &[("skulk-archived", "/path/skulk-archived")],
-            &["skulk-archived"],
-        ))]);
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-archived", "/path/skulk-archived")],
+                &["skulk-archived"],
+            )),
+            Ok(String::new()), // state ls -- empty
+        ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
         assert_eq!(
-            ssh.calls().len(),
-            1,
-            "only the inventory call should have run, got: {:?}",
-            ssh.calls()
+            calls.len(),
+            2,
+            "expected only inventory + state ls, got: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("git worktree remove")
+                || c.contains("git branch -D")
+                || c.contains("tmux kill-session")),
+            "no destroy calls should run for an archived agent: {calls:?}"
         );
     }
 
@@ -324,8 +413,9 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-leftover"])),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(),          // branch delete
+            ssh_ok(),          // worktree prune
+            Ok(String::new()), // state ls -- empty
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -347,7 +437,8 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&["skulk-ghost"], &[], &[])),
             Err(SkulkError::SshFailed("kill-session failed".into())),
-            ssh_ok(),
+            ssh_ok(),          // worktree prune
+            Ok(String::new()), // state ls -- empty
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -362,8 +453,9 @@ mod tests {
                 &[],
             )),
             Err(SkulkError::SshFailed("worktree remove failed".into())),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(),          // branch delete
+            ssh_ok(),          // worktree prune
+            Ok(String::new()), // state ls -- empty
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
     }
@@ -374,8 +466,163 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(&[], &[], &["skulk-leftover"])),
             Err(SkulkError::SshFailed("branch delete failed".into())),
-            ssh_ok(),
+            ssh_ok(),          // worktree prune
+            Ok(String::new()), // state ls -- empty
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+    }
+
+    // ── State-file cleanup ──────────────────────────────────────────────
+
+    #[test]
+    fn list_state_files_command_uses_rm_f_semantics_for_missing_dir() {
+        // `|| true` guards against the dir not existing so gc doesn't error
+        // on a fresh host before any agent has been created.
+        let cmd = list_state_files_command();
+        assert!(cmd.contains("ls ~/.skulk/state/"), "got: {cmd}");
+        assert!(cmd.contains("|| true"), "got: {cmd}");
+    }
+
+    #[test]
+    fn cmd_gc_removes_stale_state_file_with_no_session() {
+        // State file exists for a session that isn't running and has no
+        // worktree/branch -- classic leak (hook fired, then destroy cleaned
+        // up everything but the marker on a pre-cleanup version of skulk).
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_empty_inventory()),
+            Ok("skulk-stale\n".to_string()), // state ls
+            ssh_ok(),                        // rm -f ~/.skulk/state/skulk-stale
+        ]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "rm -f ~/.skulk/state/skulk-stale"),
+            "expected rm of stale state file, got: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_gc_preserves_state_file_for_live_session() {
+        // Live healthy agent -- its state file must be preserved.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory_single_agent("skulk-live")),
+            Ok("skulk-live\n".to_string()), // state ls lists the live session
+        ]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("rm -f ~/.skulk/state/")),
+            "must not rm state file for live session: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_gc_reaps_state_for_killed_orphan_session() {
+        // Orphan session gets killed during gc; its state file should also be
+        // reaped (the session is no longer in the "surviving" set).
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(&["skulk-ghost"], &[], &[])),
+            ssh_ok(),                        // kill session
+            ssh_ok(),                        // worktree prune
+            Ok("skulk-ghost\n".to_string()), // state ls
+            ssh_ok(),                        // rm -f ~/.skulk/state/skulk-ghost
+        ]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "rm -f ~/.skulk/state/skulk-ghost"),
+            "expected rm of state file for killed orphan: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_gc_archived_agent_state_file_reaped() {
+        // Archived agent (no session, has worktree+branch): worktree/branch
+        // are preserved for `skulk restart`, but the state file is tied to
+        // the tmux session lifetime and is reaped. A fresh marker is written
+        // on the next turn after restart.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-archived", "/path/skulk-archived")],
+                &["skulk-archived"],
+            )),
+            Ok("skulk-archived\n".to_string()), // state ls
+            ssh_ok(),                           // rm -f ~/.skulk/state/skulk-archived
+        ]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "rm -f ~/.skulk/state/skulk-archived"),
+            "archived agent's state file should be reaped: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("git worktree remove") || c.contains("git branch -D")),
+            "archived worktree + branch must not be touched: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_gc_ignores_non_prefixed_state_entries() {
+        // Another tool could share `~/.skulk/state/`. Don't touch its files.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_empty_inventory()),
+            Ok("other-tool-data\nunrelated\n".to_string()),
+        ]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("rm -f ~/.skulk/state/")),
+            "must not rm entries outside our prefix: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_gc_ignores_state_entries_with_invalid_names() {
+        // Defense-in-depth: if something bizarre landed in the state dir
+        // (a file named `skulk-with spaces` or `skulk-rogue;rm`), we don't
+        // pass it to `rm`. `validate_name` rejects anything outside
+        // `[a-z0-9-]` so the suffix can't smuggle in shell metacharacters.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_empty_inventory()),
+            Ok("skulk-UPPER\nskulk-with space\nskulk-semi;colon\n".to_string()),
+        ]);
+        assert!(cmd_gc(&ssh, false, &cfg).is_ok());
+        let calls = ssh.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("rm -f ~/.skulk/state/")),
+            "must not rm invalid-named entries: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_gc_dry_run_skips_state_cleanup() {
+        // Dry run must be side-effect free: no state ls, no rm. The caller
+        // wants to see what *would* be touched, and (for now) state files
+        // aren't reported in the summary; skipping the probe entirely keeps
+        // dry-run fully observational.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
+        assert!(cmd_gc(&ssh, true, &cfg).is_ok());
+        assert_eq!(
+            ssh.calls().len(),
+            1,
+            "dry-run should only probe inventory, got: {:?}",
+            ssh.calls()
+        );
     }
 }
