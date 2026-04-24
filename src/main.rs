@@ -245,6 +245,23 @@ pub(crate) enum Commands {
     Restart {
         /// Agent name to restart
         name: String,
+        /// Launch Claude with --remote-control so the agent is reachable from the
+        /// Claude Code mobile/web app. Off by default because it triggers an upstream
+        /// idle-death bug; Skulk's own commands work via tmux directly.
+        #[arg(long)]
+        remote_control: bool,
+        /// Model name passed through to Claude Code as `--model <name>`
+        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`). Restricted to
+        /// `[A-Za-z0-9._-]` — shell metacharacters are rejected.
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
+        /// Extra flags appended to the Claude Code launch command. The string is
+        /// typed into the remote shell by tmux, so shell metacharacters (`$`,
+        /// backticks, `;`, `(`, `)`, globs, whitespace) are re-evaluated by that
+        /// shell. Pre-quote any value that must reach Claude literally, e.g.
+        /// `--claude-args "--allowed-tools 'Bash(gh pr:*)'"`.
+        #[arg(long, value_name = "ARGS")]
+        claude_args: Option<String>,
     },
 
     /// Re-run an agent's original prompt on a fresh agent
@@ -457,7 +474,19 @@ pub(crate) fn run(
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
-        Commands::Restart { name } => restart::cmd_restart(ssh, &name, cfg),
+        Commands::Restart {
+            name,
+            remote_control,
+            model,
+            claude_args,
+        } => restart::cmd_restart(
+            ssh,
+            &name,
+            remote_control,
+            model.as_deref(),
+            claude_args.as_deref(),
+            cfg,
+        ),
         Commands::Replay {
             name,
             new_name,
@@ -964,6 +993,9 @@ mod tests {
             no_color: true,
             command: Commands::Restart {
                 name: "test".into(),
+                remote_control: false,
+                model: None,
+                claude_args: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());

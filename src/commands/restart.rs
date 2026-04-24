@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
-use crate::util::validate_name;
+use crate::util::{validate_model, validate_name};
 
 /// Restart an agent in its existing worktree with a fresh Claude session.
 ///
@@ -14,8 +14,22 @@ use crate::util::validate_name;
 ///
 /// Errors cleanly if the agent is already running (nothing to restart) or if
 /// no worktree exists (nothing to restart *into* -- use `skulk new`).
-pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+///
+/// `remote_control`, `model`, and `claude_args` mirror the corresponding flags
+/// on `skulk new` — see [`agent_create_tmux_command`] for the caller's quoting
+/// responsibilities on `claude_args`.
+pub(crate) fn cmd_restart(
+    ssh: &impl Ssh,
+    name: &str,
+    remote_control: bool,
+    model: Option<&str>,
+    claude_args: Option<&str>,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
     validate_name(name)?;
+    if let Some(m) = model {
+        validate_model(m)?;
+    }
 
     let agent = AgentRef::new(name, cfg);
     let session_name = agent.session_name();
@@ -35,8 +49,14 @@ pub(crate) fn cmd_restart(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
         )));
     }
 
-    ssh.run(&agent_create_tmux_command(name, cfg, false, None, None))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    ssh.run(&agent_create_tmux_command(
+        name,
+        cfg,
+        remote_control,
+        model,
+        claude_args,
+    ))
+    .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
 
     println!(
         "Agent '{name}' restarted.\n\
@@ -73,7 +93,7 @@ mod tests {
             )),
             ssh_ok(),
         ]);
-        assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
+        assert!(cmd_restart(&ssh, "task", false, None, None, &cfg).is_ok());
     }
 
     #[test]
@@ -90,14 +110,14 @@ mod tests {
             )),
             ssh_ok(),
         ]);
-        assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
+        assert!(cmd_restart(&ssh, "task", false, None, None, &cfg).is_ok());
     }
 
     #[test]
     fn cmd_restart_rejects_invalid_name() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
-        let result = cmd_restart(&ssh, "../bad", &cfg);
+        let result = cmd_restart(&ssh, "../bad", false, None, None, &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
@@ -105,7 +125,7 @@ mod tests {
     fn cmd_restart_errors_when_session_already_running() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-task"))]);
-        let result = cmd_restart(&ssh, "task", &cfg);
+        let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("already running"));
             assert!(msg.contains("skulk connect"));
@@ -116,7 +136,7 @@ mod tests {
     fn cmd_restart_errors_when_no_worktree_exists() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
-        let result = cmd_restart(&ssh, "ghost", &cfg);
+        let result = cmd_restart(&ssh, "ghost", false, None, None, &cfg);
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("ghost"));
             assert!(msg.contains("skulk new"));
@@ -128,7 +148,7 @@ mod tests {
         // Dangling branch without its worktree -- restart has nothing to land in.
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_inventory(&[], &[], &["skulk-dangling"]))]);
-        let result = cmd_restart(&ssh, "dangling", &cfg);
+        let result = cmd_restart(&ssh, "dangling", false, None, None, &cfg);
         assert!(matches!(result, Err(SkulkError::NotFound(_))));
     }
 
@@ -143,7 +163,7 @@ mod tests {
             )),
             ssh_ok(),
         ]);
-        assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
+        assert!(cmd_restart(&ssh, "task", false, None, None, &cfg).is_ok());
         let tmux_call = &ssh.calls()[1];
         assert!(tmux_call.contains("tmux new-session -d -s skulk-task"));
         assert!(tmux_call.contains("-c ~/test-project-worktrees/skulk-task"));
@@ -151,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_restart_does_not_pass_remote_control_flag() {
+    fn cmd_restart_without_remote_control_flag_omits_flag() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(
@@ -161,11 +181,94 @@ mod tests {
             )),
             ssh_ok(),
         ]);
-        assert!(cmd_restart(&ssh, "task", &cfg).is_ok());
+        assert!(cmd_restart(&ssh, "task", false, None, None, &cfg).is_ok());
         let tmux_call = &ssh.calls()[1];
         assert!(
             !tmux_call.contains("--remote-control"),
-            "restart should not enable remote-control, got: {tmux_call}"
+            "restart should not enable remote-control by default, got: {tmux_call}"
+        );
+    }
+
+    #[test]
+    fn cmd_restart_with_remote_control_flag_passes_flag_through() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            ssh_ok(),
+        ]);
+        assert!(cmd_restart(&ssh, "task", true, None, None, &cfg).is_ok());
+        let tmux_call = &ssh.calls()[1];
+        assert!(
+            tmux_call.contains("--remote-control skulk-task"),
+            "tmux launch command should include --remote-control when flag is true, got: {tmux_call}"
+        );
+    }
+
+    #[test]
+    fn cmd_restart_with_model_flag_passes_flag_through() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            ssh_ok(),
+        ]);
+        assert!(cmd_restart(&ssh, "task", false, Some("opus"), None, &cfg).is_ok());
+        let tmux_call = &ssh.calls()[1];
+        assert!(
+            tmux_call.contains("--model opus"),
+            "tmux launch command should include --model opus, got: {tmux_call}"
+        );
+    }
+
+    #[test]
+    fn cmd_restart_rejects_invalid_model_before_ssh() {
+        let cfg = test_config();
+        // No SSH responses queued -- validation must fail before any SSH call.
+        let ssh = MockSsh::new(vec![]);
+        let result = cmd_restart(&ssh, "task", false, Some("opus; rm -rf /"), None, &cfg);
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("Invalid character"));
+        });
+        assert!(
+            ssh.calls().is_empty(),
+            "validation must short-circuit before any SSH call, got: {:?}",
+            ssh.calls()
+        );
+    }
+
+    #[test]
+    fn cmd_restart_with_claude_args_passes_args_through() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            ssh_ok(),
+        ]);
+        assert!(
+            cmd_restart(
+                &ssh,
+                "task",
+                false,
+                None,
+                Some("--allowed-tools Bash"),
+                &cfg
+            )
+            .is_ok()
+        );
+        let tmux_call = &ssh.calls()[1];
+        assert!(
+            tmux_call.contains("--allowed-tools Bash"),
+            "tmux launch command should include extra claude args, got: {tmux_call}"
         );
     }
 
@@ -180,7 +283,7 @@ mod tests {
             )),
             Err(SkulkError::SshFailed("tmux: server not responding".into())),
         ]);
-        let result = cmd_restart(&ssh, "task", &cfg);
+        let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
         assert!(matches!(result, Err(SkulkError::SshFailed(_))));
     }
 
@@ -191,7 +294,7 @@ mod tests {
             message: "Connection timed out.".into(),
             suggestion: "Check network.".into(),
         })]);
-        let result = cmd_restart(&ssh, "task", &cfg);
+        let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
         assert!(matches!(result, Err(SkulkError::Diagnostic { .. })));
     }
 
@@ -210,7 +313,7 @@ mod tests {
             )),
             Err(SkulkError::SshFailed("Connection timed out".into())),
         ]);
-        let result = cmd_restart(&ssh, "task", &cfg);
+        let result = cmd_restart(&ssh, "task", false, None, None, &cfg);
         assert_err!(result, SkulkError::Diagnostic { message, .. } => {
             assert!(message.to_lowercase().contains("timed out"));
         });
