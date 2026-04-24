@@ -544,8 +544,9 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(),
-            ssh_ok(),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // clear stale stored prompt (no prompt provided)
         ]);
         let cli = Cli {
             no_color: true,
