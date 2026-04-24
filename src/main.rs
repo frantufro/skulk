@@ -17,8 +17,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart, ship, status,
-    wait,
+    completions, destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart,
+    ship, status, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -333,6 +333,18 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "SECS", default_value_t = 1800)]
         timeout: u64,
     },
+
+    /// Print a shell completion script to stdout
+    ///
+    /// Source the output from your shell's config to enable tab completion
+    /// for subcommands, flags, and live agent names. Works without a
+    /// `.skulk/config.toml` — dynamic agent-name completion silently does
+    /// nothing until the config and remote are set up.
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: completions::CompletionShell,
+    },
 }
 
 impl Commands {
@@ -365,6 +377,7 @@ impl Commands {
             Commands::Status { .. } => "status",
             Commands::Transcript { .. } => "transcript",
             Commands::Wait { .. } => "wait",
+            Commands::Completions { .. } => "completions",
         }
     }
 }
@@ -390,7 +403,8 @@ pub(crate) fn run(
     let cmd_name = cli.command.name();
 
     let result = match cli.command {
-        Commands::Init => unreachable!(),
+        // Handled before `run()` in `io::main` — they don't load config or touch SSH.
+        Commands::Init | Commands::Completions { .. } => unreachable!(),
         Commands::Doctor => doctor::cmd_doctor(ssh, cfg),
         Commands::List => list::cmd_list(ssh, cfg),
         Commands::Pull { force } => pull::cmd_pull(ssh, force, cfg),
