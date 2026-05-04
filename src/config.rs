@@ -17,6 +17,13 @@ pub(crate) struct Config {
     pub worktree_base: String,
     #[serde(default = "default_branch")]
     pub default_branch: String,
+    /// Agent harness binary launched in the tmux session. Defaults to `"claude"`
+    /// (Claude Code). Set to `"opencode"` to use `OpenCode` instead — both share
+    /// the `--dangerously-skip-permissions` and `--model <name>` flags. Hooks
+    /// powering `skulk wait` are Claude Code–specific and are skipped for any
+    /// other harness; see `agent_create_worktree_command` in `commands::new`.
+    #[serde(default = "default_harness")]
+    pub harness: String,
     /// Path (relative to the worktree) to a setup script run before Claude launches.
     /// Defaults to `.skulk/init.sh` when absent. Both paths are optional — the
     /// agent just starts Claude directly if the script isn't present on disk.
@@ -31,6 +38,14 @@ pub(crate) struct Config {
 
 fn default_branch() -> String {
     "main".to_string()
+}
+
+/// Default harness binary when `harness` is absent in `config.toml`. Kept as a
+/// separate constant string so callers can compare against it cheaply.
+pub(crate) const DEFAULT_HARNESS: &str = "claude";
+
+fn default_harness() -> String {
+    DEFAULT_HARNESS.to_string()
 }
 
 /// Default path (relative to the worktree) for the init hook script when the
@@ -101,6 +116,7 @@ pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
     validate_shell_safe(&cfg.base_path, "base_path")?;
     validate_shell_safe(&cfg.worktree_base, "worktree_base")?;
     validate_shell_safe(&cfg.default_branch, "default_branch")?;
+    validate_shell_safe(&cfg.harness, "harness")?;
     if let Some(ref script) = cfg.init_script {
         validate_shell_safe(script, "init_script")?;
     }
@@ -196,6 +212,55 @@ mod tests {
         let result = load_config(&dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("init_script"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_harness_defaults_to_claude_when_absent() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.harness, "claude");
+    }
+
+    #[test]
+    fn config_harness_parses_when_set_to_opencode() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            harness = "opencode"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.harness, "opencode");
+    }
+
+    #[test]
+    fn config_load_rejects_unsafe_harness() {
+        let dir = std::env::temp_dir().join("skulk_harness_unsafe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(
+            config_path_in(&dir),
+            r#"
+                host = "x"
+                session_prefix = "a-"
+                base_path = "~/p"
+                worktree_base = "~/w"
+                harness = "claude; rm -rf /"
+            "#,
+        )
+        .unwrap();
+
+        let result = load_config(&dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("harness"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

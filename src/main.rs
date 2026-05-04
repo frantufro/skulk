@@ -1214,7 +1214,7 @@ mod tests {
         let cfg = test_config();
         // Single SSH roundtrip — all checks pass.
         let probe = "tmux:installed:tmux 3.3a\n\
-                     claude:installed:1.2.0\n\
+                     harness:installed:1.2.0\n\
                      gh:installed:gh version 2.40.1\n\
                      gh-auth:yes\n\
                      base:exists\n\

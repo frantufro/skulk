@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::agent_ref::AgentRef;
 use crate::commands::prompt_source;
 use crate::commands::wait::mark_busy_command;
-use crate::config::{Config, DEFAULT_INIT_SCRIPT};
+use crate::config::{Config, DEFAULT_HARNESS, DEFAULT_INIT_SCRIPT};
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
@@ -30,15 +30,20 @@ pub(crate) fn resolve_local_env_file(cfg: &Config) -> Option<PathBuf> {
 }
 
 /// Build the in-tmux launch sequence: export SKULK_* vars, optionally source
-/// `.env`, optionally run the init hook, then start Claude Code.
+/// `.env`, optionally run the init hook, then start the agent harness.
+///
+/// The harness binary is `cfg.harness` (default `"claude"`; set to `"opencode"`
+/// for `OpenCode`). Both share the `--dangerously-skip-permissions` and
+/// `--model <name>` flags, so no harness-specific logic is needed here.
 ///
 /// The init hook is gated on file existence (`[ -f {init_script} ]`), so a
-/// project without `.skulk/init.sh` starts Claude directly. When the hook
-/// exists and exits non-zero, Claude does not start — the shell returns to a
-/// prompt inside the tmux session so the user can `skulk connect` and inspect.
+/// project without `.skulk/init.sh` starts the harness directly. When the hook
+/// exists and exits non-zero, the harness does not start — the shell returns
+/// to a prompt inside the tmux session so the user can `skulk connect` and
+/// inspect.
 ///
 /// `remote_control`, `model`, and `claude_args` are threaded onto the final
-/// `claude` invocation the same way `agent_create_tmux_command` used to build
+/// harness invocation the same way `agent_create_tmux_command` used to build
 /// it before the init hook existed. See that function's docs for the caller's
 /// quoting responsibilities on `claude_args`.
 fn build_launch_sequence(
@@ -52,6 +57,7 @@ fn build_launch_sequence(
     let session = agent.session_name();
     let worktree = agent.worktree_path(cfg);
     let init_script = cfg.init_script.as_deref().unwrap_or(DEFAULT_INIT_SCRIPT);
+    let harness = &cfg.harness;
     let remote_control_flag = if remote_control {
         format!(" --remote-control {session}")
     } else {
@@ -69,17 +75,17 @@ fn build_launch_sequence(
         Some(args) if !args.is_empty() => format!(" {args}"),
         _ => String::new(),
     };
-    let claude_cmd = format!(
-        "claude --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}"
+    let harness_cmd = format!(
+        "{harness} --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}"
     );
     // Grouping `{ set -a; . ./.env; set +a; }` (not `&&`-chained) guarantees
     // `set +a` runs even if `.env` has a syntax error and sourcing fails —
     // otherwise the shell would stay in auto-export mode and leak locals
-    // defined by init.sh or claude into the environment.
+    // defined by init.sh or the harness into the environment.
     format!(
         "export SKULK_AGENT_NAME={name} SKULK_SESSION={session} SKULK_BRANCH={session} SKULK_WORKTREE={worktree}; \
          [ -f .env ] && {{ set -a; . ./.env; set +a; }}; \
-         if [ -f {init_script} ]; then bash {init_script} && {claude_cmd}; else {claude_cmd}; fi"
+         if [ -f {init_script} ]; then bash {init_script} && {harness_cmd}; else {harness_cmd}; fi"
     )
 }
 
@@ -97,13 +103,75 @@ pub(crate) fn hooks_settings_json(session_name: &str) -> String {
     )
 }
 
+/// TypeScript source for the worktree's `.opencode/plugins/skulk-state.ts`.
+///
+/// `OpenCode` plugins are loaded from `.opencode/plugins/` and can subscribe to
+/// session events. This plugin handles the `session.idle` event — the
+/// `OpenCode` equivalent of Claude Code's `Stop` hook — and writes the `idle`
+/// marker to `~/.skulk/state/<session_name>` so `skulk wait` can detect when
+/// the agent has finished its turn.
+///
+/// Known limitation: `OpenCode` has no clean equivalent of Claude Code's
+/// `UserPromptSubmit` event (upstream issue #573), so this plugin does not
+/// write the `busy` marker. `Skulk` itself writes `busy` from the send path
+/// (see [`crate::commands::wait::mark_busy_command`]), but a `skulk wait`
+/// invoked before any prompt has been sent will see the marker as missing
+/// and return immediately as idle.
+///
+/// The source uses only double quotes and no single quotes so it can safely
+/// be wrapped in single quotes for the outer shell `printf` invocation in
+/// [`agent_create_worktree_command`].
+pub(crate) fn opencode_plugin_source(session_name: &str) -> String {
+    // Note: this string is wrapped in single quotes by `printf '%s' '...'`,
+    // so it must contain no `'` characters. Use double-quoted JS strings
+    // throughout. Newlines inside the POSIX single-quoted argument are
+    // literal — fine for this multi-line source.
+    format!(
+        "// Skulk session-state plugin for OpenCode.\n\
+         // Writes \"idle\" to ~/.skulk/state/{session_name} on the session.idle event so\n\
+         // `skulk wait` can detect when the agent has finished its turn.\n\
+         //\n\
+         // Limitation: OpenCode has no UserPromptSubmit equivalent yet\n\
+         // (upstream issue #573), so this plugin does not write a \"busy\" marker.\n\
+         // Skulk writes busy from the send path; wait may return early if invoked\n\
+         // before any prompt has been sent.\n\
+         import {{ mkdirSync, writeFileSync }} from \"node:fs\";\n\
+         import {{ homedir }} from \"node:os\";\n\
+         import {{ join }} from \"node:path\";\n\
+         \n\
+         export const SkulkStatePlugin = async () => {{\n\
+         \x20 const stateDir = join(homedir(), \".skulk\", \"state\");\n\
+         \x20 const stateFile = join(stateDir, \"{session_name}\");\n\
+         \x20 return {{\n\
+         \x20   event: async ({{ event }}: {{ event: {{ type: string }} }}) => {{\n\
+         \x20     if (event.type === \"session.idle\") {{\n\
+         \x20       mkdirSync(stateDir, {{ recursive: true }});\n\
+         \x20       writeFileSync(stateFile, \"idle\");\n\
+         \x20     }}\n\
+         \x20   }},\n\
+         \x20 }};\n\
+         }};\n"
+    )
+}
+
 /// Build the SSH command to create a git worktree for an agent and install
-/// Claude Code hooks powering `skulk wait`.
+/// the harness-specific hook that powers `skulk wait`.
 ///
 /// Bundles worktree creation with hook installation in a single SSH round-trip
-/// so both succeed or fail together. The hook JSON is written to
-/// `<worktree>/.claude/settings.local.json`, where Claude Code picks it up on
-/// launch.
+/// so both succeed or fail together.
+///
+/// - **claude**: writes `<worktree>/.claude/settings.local.json` with `Stop`
+///   and `UserPromptSubmit` hooks (see [`hooks_settings_json`]).
+/// - **opencode**: writes `<worktree>/.opencode/plugins/skulk-state.ts`, a
+///   TypeScript plugin that subscribes to the `session.idle` event and writes
+///   the idle marker (see [`opencode_plugin_source`]). `OpenCode` has no
+///   equivalent of Claude Code's `UserPromptSubmit`, so the busy marker is
+///   only set by Skulk's own send path. `skulk wait` invoked before the agent
+///   has processed a turn therefore returns immediately as idle — acceptable
+///   for now per upstream `OpenCode` issue #573.
+///
+/// For any other harness no hook is installed; `skulk wait` will treat the
+/// missing marker file as idle and return immediately.
 pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let worktree_base = &cfg.worktree_base;
@@ -112,13 +180,29 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
     let session_name = agent.session_name();
     let worktree = agent.worktree_path(cfg);
     let branch = agent.branch_name();
-    let hooks_json = hooks_settings_json(&session_name);
-    format!(
+    let base = format!(
         "mkdir -p {worktree_base} && cd {base_path} && \
-         git worktree add -b {branch} {worktree} {default_branch} && \
-         mkdir -p {worktree}/.claude && \
-         printf '%s' '{hooks_json}' > {worktree}/.claude/settings.local.json"
-    )
+         git worktree add -b {branch} {worktree} {default_branch}"
+    );
+    match cfg.harness.as_str() {
+        DEFAULT_HARNESS => {
+            let hooks_json = hooks_settings_json(&session_name);
+            format!(
+                "{base} && \
+                 mkdir -p {worktree}/.claude && \
+                 printf '%s' '{hooks_json}' > {worktree}/.claude/settings.local.json"
+            )
+        }
+        "opencode" => {
+            let plugin_src = opencode_plugin_source(&session_name);
+            format!(
+                "{base} && \
+                 mkdir -p {worktree}/.opencode/plugins && \
+                 printf '%s' '{plugin_src}' > {worktree}/.opencode/plugins/skulk-state.ts"
+            )
+        }
+        _ => base,
+    }
 }
 
 /// Build the SSH command to create a tmux session and launch Claude Code for an agent.
@@ -462,6 +546,7 @@ pub(crate) fn create_agent_with_prompt(
         "  Mode: skip-permissions"
     };
 
+    let harness_line = format!("\n  Harness: {}", cfg.harness);
     let model_line = model.map(|m| format!("\n  Model: {m}")).unwrap_or_default();
     let extra_args_line = claude_args
         .filter(|s| !s.is_empty())
@@ -472,7 +557,7 @@ pub(crate) fn create_agent_with_prompt(
         "Agent '{name}' created.\n\
          \x20 Branch: {branch}\n\
          \x20 Worktree: {worktree}\n\
-         {permissions_line}{model_line}{extra_args_line}\n\
+         {permissions_line}{harness_line}{model_line}{extra_args_line}\n\
          {prompt_line}\n\
          \n\
          Next steps:\n\
@@ -513,6 +598,80 @@ mod tests {
         assert!(
             cmd.contains("settings.local.json"),
             "expected hooks settings file write: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_command_writes_opencode_plugin_for_opencode_harness() {
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(
+            cmd.contains("~/test-project-worktrees/skulk-my-task/.opencode/plugins"),
+            "expected .opencode/plugins directory creation: {cmd}"
+        );
+        assert!(
+            cmd.contains("skulk-state.ts"),
+            "expected plugin file write: {cmd}"
+        );
+        assert!(
+            !cmd.contains("settings.local.json"),
+            "claude-only hooks file must not appear for opencode harness: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_command_skips_hook_install_for_unknown_harness() {
+        // Unknown harness: bare worktree create only — `skulk wait` will
+        // treat the absent marker as idle.
+        let mut cfg = test_config();
+        cfg.harness = "custom-harness".into();
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(cmd.contains("git worktree add"));
+        assert!(
+            !cmd.contains(".claude") && !cmd.contains(".opencode"),
+            "no harness-specific hook scaffolding should appear: {cmd}"
+        );
+    }
+
+    #[test]
+    fn opencode_plugin_source_subscribes_to_session_idle() {
+        let src = opencode_plugin_source("skulk-my-task");
+        assert!(
+            src.contains("session.idle"),
+            "plugin should subscribe to session.idle: {src}"
+        );
+        assert!(
+            src.contains("~/.skulk/state/skulk-my-task") || src.contains("\"skulk-my-task\""),
+            "plugin should reference per-session state path: {src}"
+        );
+    }
+
+    #[test]
+    fn opencode_plugin_source_writes_idle_marker() {
+        let src = opencode_plugin_source("skulk-my-task");
+        assert!(
+            src.contains("\"idle\""),
+            "plugin should write the literal string \"idle\": {src}"
+        );
+    }
+
+    #[test]
+    fn opencode_plugin_source_contains_no_single_quotes() {
+        // The plugin source is wrapped in single quotes for shell printf, so
+        // it must not contain any single quotes of its own.
+        let src = opencode_plugin_source("skulk-my-task");
+        assert!(!src.contains('\''), "source must not contain ': {src}");
+    }
+
+    #[test]
+    fn opencode_plugin_source_documents_userpromptsubmit_limitation() {
+        // The plugin doesn't write a busy marker because OpenCode has no
+        // UserPromptSubmit equivalent yet. Future readers need to know.
+        let src = opencode_plugin_source("skulk-my-task");
+        assert!(
+            src.to_lowercase().contains("userpromptsubmit") || src.to_lowercase().contains("busy"),
+            "source should document the missing busy-marker limitation: {src}"
         );
     }
 
@@ -1310,6 +1469,38 @@ mod tests {
         assert!(
             seq.contains("else claude --dangerously-skip-permissions"),
             "expected unconditional claude launch in else branch: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_uses_opencode_when_harness_is_opencode() {
+        // The configured harness is interpolated as the binary name in both
+        // branches of the init-hook `if`. Both harnesses share
+        // `--dangerously-skip-permissions`, so only the binary name changes.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains("opencode --dangerously-skip-permissions"),
+            "expected opencode launch line: {seq}"
+        );
+        assert!(
+            !seq.contains("claude --dangerously-skip-permissions"),
+            "claude binary must not appear when harness is opencode: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_threads_flags_through_opencode() {
+        // Regression guard: --remote-control, --model, and claude_args must
+        // attach to the configured harness binary, not to a hard-coded
+        // `claude`.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let seq = build_launch_sequence("my-task", &cfg, true, Some("opus"), Some("--verbose"));
+        assert!(
+            seq.contains("opencode --dangerously-skip-permissions --remote-control skulk-my-task --model opus --verbose"),
+            "expected all flags chained onto opencode: {seq}"
         );
     }
 
