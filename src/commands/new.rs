@@ -568,10 +568,16 @@ pub(crate) fn create_agent_with_prompt(
         PromptStatus::NotSent => "  Prompt: none (idle, waiting for input)".to_string(),
     };
 
-    let permissions_line = if remote_control {
-        "  Mode: remote-control (skip-permissions)"
-    } else {
-        "  Mode: skip-permissions"
+    // For Claude, --dangerously-skip-permissions and --remote-control land on
+    // the launch line. For OpenCode, neither flag exists on the TUI: permission
+    // is granted via opencode.json, and --remote-control is silently dropped
+    // (with a stderr warning) by build_launch_sequence. The banner reflects
+    // what actually took effect, not what the user asked for.
+    let is_claude = cfg.harness == DEFAULT_HARNESS;
+    let permissions_line = match (is_claude, remote_control) {
+        (true, true) => "  Mode: remote-control (skip-permissions)".to_string(),
+        (true, false) => "  Mode: skip-permissions".to_string(),
+        (false, _) => "  Mode: permission-allow (via opencode.json)".to_string(),
     };
 
     let harness_line = format!("\n  Harness: {}", cfg.harness);

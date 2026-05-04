@@ -1,7 +1,7 @@
 use crate::agent_ref::AgentRef;
 use crate::commands::destroy::agent_destroy_session_command;
 use crate::commands::new::agent_create_tmux_command;
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_HARNESS};
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
@@ -71,17 +71,28 @@ pub(crate) fn cmd_restart(
         return Err(classify_agent_error(name, e, &cfg.host));
     }
 
+    // Mirrors the Mode-line logic in `cmd_new`: for OpenCode the
+    // skip-permissions / remote-control flags don't apply (permission is
+    // granted via opencode.json; --remote-control is silently dropped).
+    let mode_line = match (cfg.harness == DEFAULT_HARNESS, remote_control) {
+        (true, true) => "  Mode: remote-control (skip-permissions)",
+        (true, false) => "  Mode: skip-permissions",
+        (false, _) => "  Mode: permission-allow (via opencode.json)",
+    };
+
     println!(
         "Agent '{name}' restarted.\n\
          \x20 Branch: {branch}\n\
          \x20 Worktree: {worktree}\n\
-         \x20 Mode: skip-permissions\n\
+         {mode_line}\n\
+         \x20 Harness: {harness}\n\
          \x20 Context: fresh (empty)\n\
          \n\
          Next steps:\n\
          \x20 skulk connect {name}    # attach to session\n\
          \x20 skulk send {name} \"...\" # send a prompt\n\
-         \x20 skulk archive {name}    # stop without losing work"
+         \x20 skulk archive {name}    # stop without losing work",
+        harness = cfg.harness
     );
 
     Ok(())
