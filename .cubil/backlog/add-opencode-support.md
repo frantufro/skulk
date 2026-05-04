@@ -1,4 +1,10 @@
 ---
+created: 2026-05-04
+---
+
+# Add OpenCode support
+
+---
 status: READY
 ---
 
