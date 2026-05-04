@@ -29,9 +29,11 @@ pub(crate) fn check_base_clone(
 /// Validate a Claude model identifier: `[A-Za-z0-9._-]`, 1-64 chars.
 ///
 /// Matches the shape of real Claude model IDs (`opus`, `sonnet`,
-/// `claude-opus-4-7`, etc.) while rejecting shell metacharacters. This matters
-/// because the model string is typed into the remote tmux shell by `send-keys`,
-/// which would otherwise re-evaluate characters like `;`, `$`, or backticks.
+/// `claude-opus-4-7`, etc.) and `OpenCode`'s `provider/model` format
+/// (`anthropic/claude-opus-4-7`) while rejecting shell metacharacters. This
+/// matters because the model string is typed into the remote tmux shell by
+/// `send-keys`, which would otherwise re-evaluate characters like `;`, `$`,
+/// or backticks.
 pub(crate) fn validate_model(model: &str) -> Result<(), SkulkError> {
     if model.is_empty() {
         return Err(SkulkError::Validation("Model name cannot be empty.".into()));
@@ -42,9 +44,9 @@ pub(crate) fn validate_model(model: &str) -> Result<(), SkulkError> {
         ));
     }
     for c in model.chars() {
-        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
             return Err(SkulkError::Validation(format!(
-                "Invalid character '{c}' in model name. Only letters, digits, hyphens, underscores, and dots allowed."
+                "Invalid character '{c}' in model name. Only letters, digits, hyphens, underscores, dots, and slashes allowed."
             )));
         }
     }
@@ -255,6 +257,13 @@ mod tests {
     #[test]
     fn validate_model_valid_with_underscore_and_dot() {
         assert!(validate_model("claude_4.7").is_ok());
+    }
+
+    #[test]
+    fn validate_model_valid_provider_slash_model() {
+        // OpenCode requires `provider/model`.
+        assert!(validate_model("anthropic/claude-opus-4-7").is_ok());
+        assert!(validate_model("openai/gpt-4o").is_ok());
     }
 
     #[test]
