@@ -46,6 +46,7 @@ pub(crate) fn test_config() -> Config {
         base_path: "~/test-project".to_string(),
         worktree_base: "~/test-project-worktrees".to_string(),
         default_branch: "main".to_string(),
+        harness: "claude".to_string(),
         init_script: None,
         root_dir: None,
     }

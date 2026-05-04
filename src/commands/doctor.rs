@@ -30,7 +30,10 @@ enum CheckStatus {
 
 #[derive(Debug)]
 struct CheckRow {
-    label: &'static str,
+    /// Stored as `String` so the harness row can carry the configured
+    /// binary name (e.g. `"opencode"`) — every other row uses a static
+    /// label.
+    label: String,
     value: String,
     status: CheckStatus,
     /// Indented note printed below the row when present. Used for failure
@@ -46,18 +49,23 @@ struct CheckRow {
 /// emit `<tool>:installed:<version>` or `<tool>:missing`; gh has an extra
 /// `gh-auth:yes|no|na` line; path checks emit `base:exists|missing` and
 /// `worktree:exists|missing`.
+///
+/// The configured harness binary (`cfg.harness`, default `"claude"`) is
+/// probed under the static key `harness` so the parser doesn't need to know
+/// the binary name. Its `--version` output is reported back verbatim.
 pub(crate) fn probe_command(cfg: &Config) -> String {
     let base = &cfg.base_path;
     let wt = &cfg.worktree_base;
+    let harness = &cfg.harness;
     format!(
         "if command -v tmux >/dev/null 2>&1; then \
             v=$(tmux -V 2>&1); echo \"tmux:installed:$v\"; \
          else echo \"tmux:missing\"; fi; \
-         if command -v claude >/dev/null 2>&1; then \
-            v=$(claude --version 2>&1 | head -n1); echo \"claude:installed:$v\"; \
-         elif [ -x ~/.local/bin/claude ]; then \
-            v=$(~/.local/bin/claude --version 2>&1 | head -n1); echo \"claude:installed:$v\"; \
-         else echo \"claude:missing\"; fi; \
+         if command -v {harness} >/dev/null 2>&1; then \
+            v=$({harness} --version 2>&1 | head -n1); echo \"harness:installed:$v\"; \
+         elif [ -x ~/.local/bin/{harness} ]; then \
+            v=$(~/.local/bin/{harness} --version 2>&1 | head -n1); echo \"harness:installed:$v\"; \
+         else echo \"harness:missing\"; fi; \
          if command -v gh >/dev/null 2>&1; then \
             v=$(gh --version 2>&1 | head -n1); echo \"gh:installed:$v\"; \
             if gh auth status >/dev/null 2>&1; then \
@@ -73,7 +81,8 @@ pub(crate) fn probe_command(cfg: &Config) -> String {
 struct ProbeResults {
     /// `Some(version_string)` if installed, `None` if missing.
     tmux: Option<String>,
-    claude: Option<String>,
+    /// Version of the configured harness binary (claude, opencode, …).
+    harness: Option<String>,
     gh: Option<String>,
     gh_authenticated: bool,
     base_exists: bool,
@@ -86,8 +95,8 @@ fn parse_probe_output(output: &str) -> ProbeResults {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("tmux:") {
             r.tmux = parse_installed(rest);
-        } else if let Some(rest) = line.strip_prefix("claude:") {
-            r.claude = parse_installed(rest);
+        } else if let Some(rest) = line.strip_prefix("harness:") {
+            r.harness = parse_installed(rest);
         } else if let Some(rest) = line.strip_prefix("gh:") {
             r.gh = parse_installed(rest);
         } else if line == "gh-auth:yes" {
@@ -115,6 +124,8 @@ fn clean_version(raw: &str) -> String {
         rest.trim().to_string()
     } else if let Some(rest) = trimmed.strip_prefix("gh version ") {
         rest.trim().to_string()
+    } else if let Some(rest) = trimmed.strip_prefix("opencode ") {
+        rest.trim().to_string()
     } else {
         trimmed.to_string()
     }
@@ -135,7 +146,7 @@ fn config_row(cfg: &Config) -> CheckRow {
         },
     );
     CheckRow {
-        label: "Config",
+        label: "Config".into(),
         value: display,
         status: CheckStatus::Ok,
         note: None,
@@ -144,7 +155,7 @@ fn config_row(cfg: &Config) -> CheckRow {
 
 fn skulk_row() -> CheckRow {
     CheckRow {
-        label: "skulk",
+        label: "skulk".into(),
         value: LOCAL_SKULK_VERSION.to_string(),
         status: CheckStatus::Ok,
         note: None,
@@ -153,7 +164,7 @@ fn skulk_row() -> CheckRow {
 
 fn ssh_ok_row(cfg: &Config) -> CheckRow {
     CheckRow {
-        label: "SSH",
+        label: "SSH".into(),
         value: cfg.host.clone(),
         status: CheckStatus::Ok,
         note: None,
@@ -169,7 +180,7 @@ fn ssh_fail_row(cfg: &Config, err: &SkulkError) -> CheckRow {
         other => other.to_string(),
     };
     CheckRow {
-        label: "SSH",
+        label: "SSH".into(),
         value: cfg.host.clone(),
         status: CheckStatus::Fail,
         note: Some(note),
@@ -179,16 +190,16 @@ fn ssh_fail_row(cfg: &Config, err: &SkulkError) -> CheckRow {
 fn skipped_remote_rows(cfg: &Config) -> Vec<CheckRow> {
     vec![
         skipped_row("tmux", "—"),
-        skipped_row("claude", "—"),
+        skipped_row(&cfg.harness, "—"),
         skipped_row("gh", "—"),
         skipped_row("Base clone", &cfg.base_path),
         skipped_row("Worktree dir", &cfg.worktree_base),
     ]
 }
 
-fn skipped_row(label: &'static str, value: &str) -> CheckRow {
+fn skipped_row(label: &str, value: &str) -> CheckRow {
     CheckRow {
-        label,
+        label: label.to_string(),
         value: value.to_string(),
         status: CheckStatus::Skipped,
         note: None,
@@ -198,7 +209,7 @@ fn skipped_row(label: &'static str, value: &str) -> CheckRow {
 fn remote_rows(probe: &ProbeResults, cfg: &Config) -> Vec<CheckRow> {
     vec![
         tmux_row(probe.tmux.as_deref(), &cfg.host),
-        claude_row(probe.claude.as_deref(), &cfg.host),
+        harness_row(probe.harness.as_deref(), &cfg.harness, &cfg.host),
         gh_row(probe.gh.as_deref(), probe.gh_authenticated, &cfg.host),
         base_clone_row(probe.base_exists, &cfg.base_path, &cfg.host),
         worktree_dir_row(probe.worktree_exists, &cfg.worktree_base, &cfg.host),
@@ -208,13 +219,13 @@ fn remote_rows(probe: &ProbeResults, cfg: &Config) -> Vec<CheckRow> {
 fn tmux_row(version: Option<&str>, host: &str) -> CheckRow {
     match version {
         Some(v) => CheckRow {
-            label: "tmux",
+            label: "tmux".into(),
             value: v.to_string(),
             status: CheckStatus::Ok,
             note: None,
         },
         None => CheckRow {
-            label: "tmux",
+            label: "tmux".into(),
             value: "missing".into(),
             status: CheckStatus::Fail,
             note: Some(format!(
@@ -225,36 +236,56 @@ fn tmux_row(version: Option<&str>, host: &str) -> CheckRow {
     }
 }
 
-fn claude_row(version: Option<&str>, host: &str) -> CheckRow {
+/// Build the row for the configured agent harness binary.
+///
+/// `harness` is the binary name the user configured in `.skulk/config.toml`
+/// (default `"claude"`); the install hint is harness-specific so users get a
+/// usable command. Unknown harnesses fall back to a generic "install the
+/// `<harness>` binary" message.
+fn harness_row(version: Option<&str>, harness: &str, host: &str) -> CheckRow {
     match version {
         Some(v) => CheckRow {
-            label: "claude",
+            label: harness.to_string(),
             value: v.to_string(),
             status: CheckStatus::Ok,
             note: None,
         },
         None => CheckRow {
-            label: "claude",
+            label: harness.to_string(),
             value: "missing".into(),
             status: CheckStatus::Fail,
-            note: Some(format!(
-                "Claude Code is not installed on {host}.\n\
-                 Install with: ssh {host} 'curl -fsSL https://claude.ai/install.sh | sh'"
-            )),
+            note: Some(harness_install_hint(harness, host)),
         },
+    }
+}
+
+fn harness_install_hint(harness: &str, host: &str) -> String {
+    match harness {
+        "claude" => format!(
+            "Claude Code is not installed on {host}.\n\
+             Install with: ssh {host} 'curl -fsSL https://claude.ai/install.sh | sh'"
+        ),
+        "opencode" => format!(
+            "OpenCode is not installed on {host}.\n\
+             Install with: ssh {host} 'curl -fsSL https://opencode.ai/install | bash'"
+        ),
+        other => format!(
+            "Configured harness '{other}' is not installed on {host}.\n\
+             Install the '{other}' binary on the remote, then re-run `skulk doctor`."
+        ),
     }
 }
 
 fn gh_row(version: Option<&str>, authenticated: bool, host: &str) -> CheckRow {
     match (version, authenticated) {
         (Some(v), true) => CheckRow {
-            label: "gh",
+            label: "gh".into(),
             value: format!("authenticated ({v})"),
             status: CheckStatus::Ok,
             note: None,
         },
         (Some(v), false) => CheckRow {
-            label: "gh",
+            label: "gh".into(),
             value: format!("{v} (not authenticated)"),
             status: CheckStatus::Warn,
             note: Some(format!(
@@ -264,7 +295,7 @@ fn gh_row(version: Option<&str>, authenticated: bool, host: &str) -> CheckRow {
             )),
         },
         (None, _) => CheckRow {
-            label: "gh",
+            label: "gh".into(),
             value: "missing".into(),
             status: CheckStatus::Warn,
             note: Some(format!(
@@ -279,14 +310,14 @@ fn gh_row(version: Option<&str>, authenticated: bool, host: &str) -> CheckRow {
 fn base_clone_row(exists: bool, base_path: &str, host: &str) -> CheckRow {
     if exists {
         CheckRow {
-            label: "Base clone",
+            label: "Base clone".into(),
             value: base_path.to_string(),
             status: CheckStatus::Ok,
             note: None,
         }
     } else {
         CheckRow {
-            label: "Base clone",
+            label: "Base clone".into(),
             value: base_path.to_string(),
             status: CheckStatus::Fail,
             note: Some(format!(
@@ -300,14 +331,14 @@ fn base_clone_row(exists: bool, base_path: &str, host: &str) -> CheckRow {
 fn worktree_dir_row(exists: bool, worktree_base: &str, host: &str) -> CheckRow {
     if exists {
         CheckRow {
-            label: "Worktree dir",
+            label: "Worktree dir".into(),
             value: worktree_base.to_string(),
             status: CheckStatus::Ok,
             note: None,
         }
     } else {
         CheckRow {
-            label: "Worktree dir",
+            label: "Worktree dir".into(),
             value: worktree_base.to_string(),
             status: CheckStatus::Fail,
             note: Some(format!(
@@ -391,7 +422,7 @@ mod tests {
 
     fn probe_output_all_ok() -> String {
         "tmux:installed:tmux 3.3a\n\
-         claude:installed:1.2.0\n\
+         harness:installed:1.2.0\n\
          gh:installed:gh version 2.40.1 (2023-12-13)\n\
          gh-auth:yes\n\
          base:exists\n\
@@ -406,7 +437,14 @@ mod tests {
         let cfg = test_config();
         let cmd = probe_command(&cfg);
         assert!(cmd.contains("tmux -V"));
+        // `test_config()` uses `harness = "claude"`, so the probe still
+        // invokes `claude --version` — but the emitted key is the harness-
+        // agnostic `harness:installed:...` line (asserted separately).
         assert!(cmd.contains("claude --version"));
+        assert!(
+            cmd.contains("harness:installed"),
+            "probe must emit harness-prefixed key: {cmd}"
+        );
         assert!(cmd.contains("gh --version"));
         assert!(cmd.contains("gh auth status"));
         assert!(cmd.contains("~/test-project/.git"));
@@ -423,13 +461,32 @@ mod tests {
         assert!(cmd.contains("~/custom-wt"));
     }
 
+    #[test]
+    fn probe_command_invokes_configured_harness_binary() {
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let cmd = probe_command(&cfg);
+        assert!(
+            cmd.contains("opencode --version"),
+            "probe should invoke configured harness binary: {cmd}"
+        );
+        assert!(
+            cmd.contains("~/.local/bin/opencode"),
+            "probe should fall back to ~/.local/bin/<harness>: {cmd}"
+        );
+        assert!(
+            !cmd.contains("claude --version") && !cmd.contains("~/.local/bin/claude"),
+            "default harness should not appear when overridden: {cmd}"
+        );
+    }
+
     // ── parse_probe_output ─────────────────────────────────────────────
 
     #[test]
     fn parse_probe_all_installed_authenticated() {
         let r = parse_probe_output(&probe_output_all_ok());
         assert_eq!(r.tmux.as_deref(), Some("3.3a"));
-        assert_eq!(r.claude.as_deref(), Some("1.2.0"));
+        assert_eq!(r.harness.as_deref(), Some("1.2.0"));
         assert_eq!(r.gh.as_deref(), Some("2.40.1 (2023-12-13)"));
         assert!(r.gh_authenticated);
         assert!(r.base_exists);
@@ -438,11 +495,11 @@ mod tests {
 
     #[test]
     fn parse_probe_all_missing() {
-        let output = "tmux:missing\nclaude:missing\ngh:missing\ngh-auth:na\n\
+        let output = "tmux:missing\nharness:missing\ngh:missing\ngh-auth:na\n\
                       base:missing\nworktree:missing\n";
         let r = parse_probe_output(output);
         assert!(r.tmux.is_none());
-        assert!(r.claude.is_none());
+        assert!(r.harness.is_none());
         assert!(r.gh.is_none());
         assert!(!r.gh_authenticated);
         assert!(!r.base_exists);
@@ -451,7 +508,7 @@ mod tests {
 
     #[test]
     fn parse_probe_gh_installed_but_unauthenticated() {
-        let output = "tmux:installed:tmux 3.3a\nclaude:installed:1.2.0\n\
+        let output = "tmux:installed:tmux 3.3a\nharness:installed:1.2.0\n\
                       gh:installed:gh version 2.40.1\ngh-auth:no\n\
                       base:exists\nworktree:exists\n";
         let r = parse_probe_output(output);
@@ -469,6 +526,11 @@ mod tests {
     #[test]
     fn clean_version_strips_tmux_prefix() {
         assert_eq!(clean_version("tmux 3.3a"), "3.3a");
+    }
+
+    #[test]
+    fn clean_version_strips_opencode_prefix() {
+        assert_eq!(clean_version("opencode 1.0.0"), "1.0.0");
     }
 
     #[test]
@@ -500,7 +562,7 @@ mod tests {
         let cfg = test_config();
         let probe = ProbeResults {
             tmux: None,
-            claude: Some("1.2.0".into()),
+            harness: Some("1.2.0".into()),
             gh: Some("2.40.1".into()),
             gh_authenticated: true,
             base_exists: true,
@@ -514,11 +576,76 @@ mod tests {
     }
 
     #[test]
+    fn remote_rows_use_configured_harness_as_label() {
+        // The harness row's label is the configured binary name so users can
+        // tell which harness was probed.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let probe = ProbeResults {
+            tmux: Some("3.3a".into()),
+            harness: Some("1.0.0".into()),
+            gh: Some("2.40.1".into()),
+            gh_authenticated: true,
+            base_exists: true,
+            worktree_exists: true,
+        };
+        let rows = remote_rows(&probe, &cfg);
+        assert!(
+            rows.iter().any(|r| r.label == "opencode"),
+            "harness row should be labeled with configured binary: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn remote_rows_missing_harness_uses_harness_specific_install_hint() {
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let probe = ProbeResults {
+            tmux: Some("3.3a".into()),
+            harness: None,
+            gh: Some("2.40.1".into()),
+            gh_authenticated: true,
+            base_exists: true,
+            worktree_exists: true,
+        };
+        let rows = remote_rows(&probe, &cfg);
+        let opencode_row = rows.iter().find(|r| r.label == "opencode").unwrap();
+        assert_eq!(opencode_row.status, CheckStatus::Fail);
+        let note = opencode_row.note.as_ref().unwrap();
+        assert!(
+            note.contains("opencode.ai"),
+            "install hint should reference opencode.ai: {note}"
+        );
+    }
+
+    #[test]
+    fn remote_rows_unknown_harness_falls_back_to_generic_install_hint() {
+        let mut cfg = test_config();
+        cfg.harness = "aider".into();
+        let probe = ProbeResults {
+            tmux: Some("3.3a".into()),
+            harness: None,
+            gh: Some("2.40.1".into()),
+            gh_authenticated: true,
+            base_exists: true,
+            worktree_exists: true,
+        };
+        let rows = remote_rows(&probe, &cfg);
+        let row = rows.iter().find(|r| r.label == "aider").unwrap();
+        assert_eq!(row.status, CheckStatus::Fail);
+        let note = row.note.as_ref().unwrap();
+        assert!(
+            note.contains("aider"),
+            "generic hint should name the configured harness: {note}"
+        );
+    }
+
+    #[test]
     fn remote_rows_missing_gh_warns_not_fails() {
         let cfg = test_config();
         let probe = ProbeResults {
             tmux: Some("3.3a".into()),
-            claude: Some("1.2.0".into()),
+            harness: Some("1.2.0".into()),
             gh: None,
             gh_authenticated: false,
             base_exists: true,
@@ -534,7 +661,7 @@ mod tests {
         let cfg = test_config();
         let probe = ProbeResults {
             tmux: Some("3.3a".into()),
-            claude: Some("1.2.0".into()),
+            harness: Some("1.2.0".into()),
             gh: Some("2.40.1".into()),
             gh_authenticated: false,
             base_exists: true,
@@ -551,7 +678,7 @@ mod tests {
         let cfg = test_config();
         let probe = ProbeResults {
             tmux: Some("3.3a".into()),
-            claude: Some("1.2.0".into()),
+            harness: Some("1.2.0".into()),
             gh: Some("2.40.1".into()),
             gh_authenticated: true,
             base_exists: false,
@@ -568,7 +695,7 @@ mod tests {
         let cfg = test_config();
         let probe = ProbeResults {
             tmux: Some("3.3a".into()),
-            claude: Some("1.2.0".into()),
+            harness: Some("1.2.0".into()),
             gh: Some("2.40.1".into()),
             gh_authenticated: true,
             base_exists: true,
@@ -585,7 +712,7 @@ mod tests {
     #[test]
     fn render_row_appends_indented_note() {
         let row = CheckRow {
-            label: "SSH",
+            label: "SSH".into(),
             value: "myhost".into(),
             status: CheckStatus::Fail,
             note: Some("line one\nline two".into()),
@@ -604,7 +731,7 @@ mod tests {
     #[test]
     fn render_row_no_note_is_single_line() {
         let row = CheckRow {
-            label: "Config",
+            label: "Config".into(),
             value: ".skulk/config.toml".into(),
             status: CheckStatus::Ok,
             note: None,
@@ -626,7 +753,7 @@ mod tests {
     #[test]
     fn cmd_doctor_returns_error_when_check_fails() {
         let cfg = test_config();
-        let probe = "tmux:missing\nclaude:installed:1.2.0\n\
+        let probe = "tmux:missing\nharness:installed:1.2.0\n\
                      gh:installed:gh version 2.40.1\ngh-auth:yes\n\
                      base:exists\nworktree:exists\n";
         let ssh = MockSsh::new(vec![Ok(probe.to_string())]);
@@ -639,7 +766,7 @@ mod tests {
     #[test]
     fn cmd_doctor_pluralizes_failure_count() {
         let cfg = test_config();
-        let probe = "tmux:missing\nclaude:missing\n\
+        let probe = "tmux:missing\nharness:missing\n\
                      gh:installed:gh version 2.40.1\ngh-auth:yes\n\
                      base:exists\nworktree:exists\n";
         let ssh = MockSsh::new(vec![Ok(probe.to_string())]);
@@ -653,7 +780,7 @@ mod tests {
     fn cmd_doctor_warn_only_does_not_fail() {
         let cfg = test_config();
         // gh missing → warn, everything else ok
-        let probe = "tmux:installed:tmux 3.3a\nclaude:installed:1.2.0\n\
+        let probe = "tmux:installed:tmux 3.3a\nharness:installed:1.2.0\n\
                      gh:missing\ngh-auth:na\n\
                      base:exists\nworktree:exists\n";
         let ssh = MockSsh::new(vec![Ok(probe.to_string())]);

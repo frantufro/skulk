@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::config::validate_shell_safe;
+use crate::config::{DEFAULT_HARNESS, validate_shell_safe};
 use crate::display::{bold, checkmark, crossmark, dim, green};
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
@@ -35,6 +35,10 @@ pub(crate) struct InitAnswers {
     pub worktree_base: String,
     pub repo_url: String,
     pub repo_name: String,
+    /// Agent harness binary the wizard configured. Always `"claude"` unless
+    /// the user explicitly chose otherwise. Passed through to the remote
+    /// setup checks and emitted in the generated `config.toml`.
+    pub harness: String,
     pub run_setup: bool,
 }
 
@@ -195,11 +199,29 @@ pub(crate) fn run_wizard(
         },
     )?;
 
-    // Step 6: Derive paths
+    // Step 6: Agent harness — usually `claude`, but `opencode` is supported.
+    let harness = prompt_validated(
+        prompter,
+        &format!(
+            "{} Agent harness {}: ",
+            green("?", color),
+            dim(&format!("[{DEFAULT_HARNESS}]"), color)
+        ),
+        |input| {
+            let value = if input.is_empty() {
+                DEFAULT_HARNESS.to_string()
+            } else {
+                input.to_string()
+            };
+            validate_shell_safe(&value, "harness").map(|()| value)
+        },
+    )?;
+
+    // Step 7: Derive paths
     let base_path = format!("~/{repo_name}");
     let worktree_base = format!("~/{repo_name}-worktrees");
 
-    // Step 7: Show config summary
+    // Step 8: Show config summary
     eprintln!();
     eprintln!("  {}", bold("Config:", color));
     eprintln!("    host           = {host}");
@@ -207,8 +229,9 @@ pub(crate) fn run_wizard(
     eprintln!("    base_path      = {base_path}");
     eprintln!("    worktree_base  = {worktree_base}");
     eprintln!("    default_branch = {default_branch}");
+    eprintln!("    harness        = {harness}");
 
-    // Step 8: Remote setup?
+    // Step 9: Remote setup?
     let run_setup = prompter.confirm(
         &format!(
             "\n{} Set up {host} now? {}",
@@ -226,6 +249,7 @@ pub(crate) fn run_wizard(
         worktree_base,
         repo_url,
         repo_name,
+        harness,
         run_setup,
     }))
 }
@@ -321,13 +345,22 @@ fn detect_repo_info(
 /// This is safe because `validate_shell_safe` rejects `"`, `\`, and
 /// control characters — the only characters that are special inside
 /// TOML double-quoted values.
+///
+/// `harness` is omitted when it equals the default (`"claude"`) so existing
+/// configs stay minimal — `Config` defaults the field on parse.
 pub(crate) fn generate_config_toml(answers: &InitAnswers) -> String {
+    let harness_line = if answers.harness == DEFAULT_HARNESS {
+        String::new()
+    } else {
+        format!("harness = \"{}\"\n", answers.harness)
+    };
     format!(
         "host = \"{host}\"\n\
          session_prefix = \"{prefix}\"\n\
          base_path = \"{base}\"\n\
          worktree_base = \"{wt}\"\n\
-         default_branch = \"{branch}\"\n",
+         default_branch = \"{branch}\"\n\
+         {harness_line}",
         host = answers.host,
         prefix = answers.session_prefix,
         base = answers.base_path,
@@ -404,9 +437,16 @@ pub(crate) fn check_apt_command() -> &'static str {
 }
 
 /// Build the SSH command to check which tools and directories exist on the remote.
+///
+/// The harness binary is whatever `answers.harness` configured (default
+/// `"claude"`); we probe both `$PATH` and `~/.local/bin/<harness>` since both
+/// claude and opencode install there by default. The output uses the literal
+/// key `<harness>:installed|missing` so the parser can key off the binary
+/// name (matching the rest of the wizard summary).
 pub(crate) fn setup_check_command(answers: &InitAnswers) -> String {
     let base_path = &answers.base_path;
     let worktree_base = &answers.worktree_base;
+    let harness = &answers.harness;
     format!(
         "for tool in tmux git gh; do \
             if command -v $tool >/dev/null 2>&1; then \
@@ -415,10 +455,10 @@ pub(crate) fn setup_check_command(answers: &InitAnswers) -> String {
                 echo \"$tool:missing\"; \
             fi; \
          done && \
-         if command -v claude >/dev/null 2>&1 || [ -x ~/.local/bin/claude ]; then \
-            echo \"claude:installed\"; \
+         if command -v {harness} >/dev/null 2>&1 || [ -x ~/.local/bin/{harness} ]; then \
+            echo \"{harness}:installed\"; \
          else \
-            echo \"claude:missing\"; \
+            echo \"{harness}:missing\"; \
          fi && \
          if [ -d {base_path}/.git ]; then \
             echo \"repo:cloned\"; \
@@ -446,12 +486,18 @@ pub(crate) fn parse_setup_status(output: &str) -> HashMap<String, String> {
 }
 
 /// Build the SSH command to install a tool via apt (Debian/Ubuntu).
+///
+/// `claude` and `opencode` use their respective upstream installers; other
+/// harness binaries fall through to the unknown-tool message so the wizard
+/// nudges the user to install them manually rather than running an
+/// arbitrary command.
 pub(crate) fn setup_install_command(tool: &str) -> String {
     match tool {
         "tmux" | "git" | "gh" => {
             format!("sudo apt-get update -qq && sudo apt-get install -y -qq {tool}")
         }
         "claude" => "curl -fsSL https://claude.ai/install.sh | sh".to_string(),
+        "opencode" => "curl -fsSL https://opencode.ai/install | bash".to_string(),
         _ => format!("echo 'Unknown tool: {tool}'"),
     }
 }
@@ -493,8 +539,9 @@ pub(crate) fn run_remote_setup(
     let raw = ssh.run(&setup_check_command(answers))?;
     let status = parse_setup_status(&raw);
 
-    // Step 3: Install missing tools
-    let tools = ["tmux", "git", "gh", "claude"];
+    // Step 3: Install missing tools — including the configured harness binary,
+    // whose status key in the probe output matches its name.
+    let tools = ["tmux", "git", "gh", answers.harness.as_str()];
     for tool in &tools {
         let state = status.get(*tool).map_or("unknown", String::as_str);
         match state {
@@ -735,6 +782,7 @@ mod tests {
             worktree_base: "~/test-worktrees".into(),
             repo_url: "https://github.com/user/test.git".into(),
             repo_name: "test".into(),
+            harness: "claude".into(),
             run_setup: false,
         };
         let toml_str = generate_config_toml(&answers);
@@ -744,6 +792,51 @@ mod tests {
         assert_eq!(cfg.base_path, "~/test");
         assert_eq!(cfg.worktree_base, "~/test-worktrees");
         assert_eq!(cfg.default_branch, "main");
+        assert_eq!(cfg.harness, "claude");
+    }
+
+    #[test]
+    fn generate_config_omits_harness_line_for_default() {
+        // Existing configs predate the harness field. Emit it only when
+        // non-default so generated configs stay diff-friendly.
+        let answers = InitAnswers {
+            host: "h".into(),
+            session_prefix: "p-".into(),
+            default_branch: "main".into(),
+            base_path: "~/p".into(),
+            worktree_base: "~/p-w".into(),
+            repo_url: "u".into(),
+            repo_name: "p".into(),
+            harness: "claude".into(),
+            run_setup: false,
+        };
+        let toml_str = generate_config_toml(&answers);
+        assert!(
+            !toml_str.contains("harness"),
+            "harness=claude is the default and should not appear: {toml_str}"
+        );
+    }
+
+    #[test]
+    fn generate_config_emits_harness_line_for_opencode() {
+        let answers = InitAnswers {
+            host: "h".into(),
+            session_prefix: "p-".into(),
+            default_branch: "main".into(),
+            base_path: "~/p".into(),
+            worktree_base: "~/p-w".into(),
+            repo_url: "u".into(),
+            repo_name: "p".into(),
+            harness: "opencode".into(),
+            run_setup: false,
+        };
+        let toml_str = generate_config_toml(&answers);
+        assert!(
+            toml_str.contains("harness = \"opencode\""),
+            "harness line missing for non-default value: {toml_str}"
+        );
+        let cfg: Config = toml::from_str(&toml_str).expect("should parse");
+        assert_eq!(cfg.harness, "opencode");
     }
 
     // ── run_wizard ─────────────────────────────────────────────────────
@@ -754,6 +847,7 @@ mod tests {
             "myserver", // SSH host
             "",         // session prefix (accept default)
             "",         // default branch (accept default)
+            "",         // harness (accept default "claude")
             "y",        // run setup
         ]);
         let result = run_wizard(
@@ -782,6 +876,7 @@ mod tests {
             "myserver",                             // SSH host
             "",                                     // session prefix (accept default)
             "",                                     // default branch (accept default "main")
+            "",                                     // harness (accept default "claude")
             "n",                                    // skip setup
         ]);
         let result = run_wizard(
@@ -821,6 +916,7 @@ mod tests {
             "newhost", // SSH host
             "custom-", // custom prefix
             "develop", // custom branch
+            "",        // harness (accept default "claude")
             "n",       // skip setup
         ]);
         let result = run_wizard(
@@ -839,11 +935,34 @@ mod tests {
     }
 
     #[test]
+    fn wizard_records_chosen_harness() {
+        let mut prompter = MockPrompter::new(vec![
+            "myserver", // host
+            "",         // prefix default
+            "",         // branch default
+            "opencode", // pick opencode
+            "n",        // skip setup
+        ]);
+        let result = run_wizard(
+            &mut prompter,
+            &git_ctx_full(),
+            false,
+            false,
+            &mock_ssh_test_ok,
+        );
+        let answers = result
+            .expect("wizard should succeed")
+            .expect("wizard should not abort");
+        assert_eq!(answers.harness, "opencode");
+    }
+
+    #[test]
     fn wizard_uses_defaults_for_prefix_and_branch() {
         let mut prompter = MockPrompter::new(vec![
             "myserver", // host
             "",         // prefix default
             "",         // branch default
+            "",         // harness default
             "n",        // skip setup
         ]);
         let result = run_wizard(
@@ -880,6 +999,7 @@ mod tests {
             "y",        // retry SSH
             "",         // prefix default
             "",         // branch default
+            "",         // harness default
             "n",        // skip setup
         ]);
         let result = run_wizard(&mut prompter, &git_ctx_full(), false, false, &test_ssh);
@@ -916,6 +1036,7 @@ mod tests {
             "myserver",  // SSH host
             "",          // prefix default
             "",          // branch default
+            "",          // harness default
             "n",         // skip setup
         ]);
         let result = run_wizard(&mut prompter, &ctx, false, false, &mock_ssh_test_ok);
@@ -955,6 +1076,7 @@ mod tests {
             worktree_base: "~/project-wt".into(),
             repo_url: "u".into(),
             repo_name: "project".into(),
+            harness: "claude".into(),
             run_setup: true,
         };
         let cmd = setup_check_command(&answers);
@@ -964,6 +1086,31 @@ mod tests {
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("~/project/.git"));
         assert!(cmd.contains("~/project-wt"));
+    }
+
+    #[test]
+    fn setup_check_command_probes_configured_harness() {
+        let answers = InitAnswers {
+            host: "h".into(),
+            session_prefix: "s-".into(),
+            default_branch: "main".into(),
+            base_path: "~/project".into(),
+            worktree_base: "~/project-wt".into(),
+            repo_url: "u".into(),
+            repo_name: "project".into(),
+            harness: "opencode".into(),
+            run_setup: true,
+        };
+        let cmd = setup_check_command(&answers);
+        assert!(cmd.contains("opencode"), "should probe opencode: {cmd}");
+        assert!(
+            cmd.contains("~/.local/bin/opencode"),
+            "should fall back to ~/.local/bin/opencode: {cmd}"
+        );
+        assert!(
+            !cmd.contains("claude"),
+            "default harness should not appear: {cmd}"
+        );
     }
 
     #[test]
@@ -1008,6 +1155,15 @@ mod tests {
     }
 
     #[test]
+    fn setup_install_opencode() {
+        let cmd = setup_install_command("opencode");
+        assert!(
+            cmd.contains("curl") && cmd.contains("opencode.ai"),
+            "opencode installer should use opencode.ai: {cmd}"
+        );
+    }
+
+    #[test]
     fn setup_install_unknown_tool_echoes_message() {
         let cmd = setup_install_command("unknown-tool");
         assert!(cmd.contains("Unknown tool"));
@@ -1037,6 +1193,7 @@ mod tests {
             worktree_base: "~/test-worktrees".into(),
             repo_url: "https://example.com/repo.git".into(),
             repo_name: "test".into(),
+            harness: "claude".into(),
             run_setup: true,
         }
     }
