@@ -26,7 +26,7 @@ pub(crate) fn check_base_clone(
     }
 }
 
-/// Validate a Claude model identifier: `[A-Za-z0-9._-]`, 1-64 chars.
+/// Validate a model identifier: `[A-Za-z0-9._/-]`, 1-64 chars.
 ///
 /// Matches the shape of real Claude model IDs (`opus`, `sonnet`,
 /// `claude-opus-4-7`, etc.) and `OpenCode`'s `provider/model` format
