@@ -14,12 +14,8 @@ run skulk agents with OpenCode instead of (or alongside) Claude Code.
   Defaults to `"claude"` when absent so existing configs keep working.
 - In `build_launch_sequence` (`src/commands/new.rs`), use `cfg.harness`
   instead of the hard-coded `"claude"` string.
-- Drop `--dangerously-skip-permissions` when `harness != "claude"` — it is
-  Claude-specific and will cause OpenCode to error.
-- The `--model` flag format differs between tools. Add a `model_flag_format` or
-  derive it from `harness`:
-  - `claude`: `--model <value>`
-  - `opencode`: `--model <value>` (same, confirm on release)
+- `--dangerously-skip-permissions` and `--model <value>` are identical between
+  Claude Code and OpenCode — no conditional logic needed.
 - Update `skulk doctor` (`src/commands/init.rs`) to check for the configured
   `harness` binary rather than hard-coding `claude`.
 - Add tests for both `claude` and `opencode` launch sequences (MockSsh).
@@ -35,6 +31,6 @@ harness = "opencode"   # defaults to "claude"
 
 **Touches**:
 - `src/config.rs` — add `harness: Option<String>`, default to `"claude"`
-- `src/commands/new.rs` — use `cfg.harness`, conditional permission flag
+- `src/commands/new.rs` — use `cfg.harness` in place of hard-coded `"claude"`
 - `src/commands/init.rs` — check configured binary in doctor
 - `src/commands/restart.rs` — same launch path, picks up change automatically
