@@ -197,6 +197,19 @@ skulk pull
 
 `destroy` and `destroy-all` require confirmation unless `--force` is passed.
 
+## Alternative Harnesses
+
+By default skulk launches Claude Code. Set `harness` in `.skulk/config.toml`
+to use OpenCode instead:
+
+```toml
+harness = "opencode"   # defaults to "claude"
+```
+
+When `harness = "opencode"`, skulk writes an OpenCode TypeScript plugin for
+idle-state tracking instead of Claude Code hooks. Note: `skulk wait` may return
+early right after sending a prompt (OpenCode has no `UserPromptSubmit` equivalent).
+
 ## Environment Health
 
 ```bash
