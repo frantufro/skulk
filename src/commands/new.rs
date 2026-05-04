@@ -33,8 +33,16 @@ pub(crate) fn resolve_local_env_file(cfg: &Config) -> Option<PathBuf> {
 /// `.env`, optionally run the init hook, then start the agent harness.
 ///
 /// The harness binary is `cfg.harness` (default `"claude"`; set to `"opencode"`
-/// for `OpenCode`). Both share the `--dangerously-skip-permissions` and
-/// `--model <name>` flags, so no harness-specific logic is needed here.
+/// for `OpenCode`). Per-harness flag handling:
+///
+/// - `--dangerously-skip-permissions`: Claude Code's TUI flag. `OpenCode` only
+///   accepts it on `opencode run`, not on the TUI launch — for opencode we
+///   instead write `opencode.json` with `"permission": "allow"` to the
+///   worktree root (see [`agent_create_worktree_command`]).
+/// - `--remote-control`: Claude Code only. For other harnesses the flag is
+///   skipped and a stderr warning is emitted if the user explicitly requested
+///   it.
+/// - `--model <name>`: shared.
 ///
 /// The init hook is gated on file existence (`[ -f {init_script} ]`), so a
 /// project without `.skulk/init.sh` starts the harness directly. When the hook
@@ -58,9 +66,20 @@ fn build_launch_sequence(
     let worktree = agent.worktree_path(cfg);
     let init_script = cfg.init_script.as_deref().unwrap_or(DEFAULT_INIT_SCRIPT);
     let harness = &cfg.harness;
-    let remote_control_flag = if remote_control {
+    let is_claude = harness == DEFAULT_HARNESS;
+    let permissions_flag = if is_claude {
+        " --dangerously-skip-permissions"
+    } else {
+        ""
+    };
+    let remote_control_flag = if remote_control && is_claude {
         format!(" --remote-control {session}")
     } else {
+        if remote_control && !is_claude {
+            eprintln!(
+                "warning: --remote-control is Claude Code only; ignoring for harness '{harness}'"
+            );
+        }
         String::new()
     };
     // model and claude_args are interpolated raw into the sequence. The whole
@@ -75,9 +94,8 @@ fn build_launch_sequence(
         Some(args) if !args.is_empty() => format!(" {args}"),
         _ => String::new(),
     };
-    let harness_cmd = format!(
-        "{harness} --dangerously-skip-permissions{remote_control_flag}{model_flag}{extra_args}"
-    );
+    let harness_cmd =
+        format!("{harness}{permissions_flag}{remote_control_flag}{model_flag}{extra_args}");
     // Grouping `{ set -a; . ./.env; set +a; }` (not `&&`-chained) guarantees
     // `set +a` runs even if `.env` has a syntax error and sourcing fails —
     // otherwise the shell would stay in auto-export mode and leak locals
@@ -169,6 +187,10 @@ pub(crate) fn opencode_plugin_source(session_name: &str) -> String {
 ///   only set by Skulk's own send path. `skulk wait` invoked before the agent
 ///   has processed a turn therefore returns immediately as idle — acceptable
 ///   for now per upstream `OpenCode` issue #573.
+///   Also writes `<worktree>/opencode.json` with `{"permission":"allow"}` if
+///   the file does not already exist — `OpenCode`'s TUI does not accept
+///   `--dangerously-skip-permissions` (that flag only exists on
+///   `opencode run`), so permission must be granted via project config.
 ///
 /// For any other harness no hook is installed; `skulk wait` will treat the
 /// missing marker file as idle and return immediately.
@@ -195,10 +217,16 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
         }
         "opencode" => {
             let plugin_src = opencode_plugin_source(&session_name);
+            // OpenCode's TUI does not accept `--dangerously-skip-permissions`
+            // (that flag only exists on `opencode run`), so we grant permission
+            // via the project config instead. `[ -e ]` preserves any existing
+            // `opencode.json` the user has committed.
+            let opencode_json = r#"{"permission":"allow"}"#;
             format!(
                 "{base} && \
                  mkdir -p {worktree}/.opencode/plugins && \
-                 printf '%s' '{plugin_src}' > {worktree}/.opencode/plugins/skulk-state.ts"
+                 printf '%s' '{plugin_src}' > {worktree}/.opencode/plugins/skulk-state.ts && \
+                 [ -e {worktree}/opencode.json ] || printf '%s' '{opencode_json}' > {worktree}/opencode.json"
             )
         }
         _ => base,
@@ -617,6 +645,46 @@ mod tests {
         assert!(
             !cmd.contains("settings.local.json"),
             "claude-only hooks file must not appear for opencode harness: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_command_writes_opencode_json_for_opencode_harness() {
+        // OpenCode's TUI doesn't accept --dangerously-skip-permissions, so we
+        // grant permission via opencode.json instead.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(
+            cmd.contains("~/test-project-worktrees/skulk-my-task/opencode.json"),
+            "expected opencode.json write at worktree root: {cmd}"
+        );
+        assert!(
+            cmd.contains(r#""permission":"allow""#),
+            "expected permission:allow JSON payload: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_command_preserves_existing_opencode_json() {
+        // If the user has committed an opencode.json into the project, we must
+        // not overwrite it. Guarded by `[ -e ... ] || ...`.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(
+            cmd.contains("[ -e ~/test-project-worktrees/skulk-my-task/opencode.json ] ||"),
+            "expected guard against overwriting an existing opencode.json: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_command_skips_opencode_json_for_claude_harness() {
+        let cfg = test_config();
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(
+            !cmd.contains("opencode.json"),
+            "opencode.json must not appear for claude harness: {cmd}"
         );
     }
 
@@ -1522,32 +1590,64 @@ mod tests {
     #[test]
     fn build_launch_sequence_uses_opencode_when_harness_is_opencode() {
         // The configured harness is interpolated as the binary name in both
-        // branches of the init-hook `if`. Both harnesses share
-        // `--dangerously-skip-permissions`, so only the binary name changes.
+        // branches of the init-hook `if`.
         let mut cfg = test_config();
         cfg.harness = "opencode".into();
         let seq = build_launch_sequence("my-task", &cfg, false, None, None);
         assert!(
-            seq.contains("opencode --dangerously-skip-permissions"),
-            "expected opencode launch line: {seq}"
+            seq.contains("opencode") && seq.contains("else opencode"),
+            "expected opencode launch line in both branches: {seq}"
         );
         assert!(
-            !seq.contains("claude --dangerously-skip-permissions"),
+            !seq.contains("claude"),
             "claude binary must not appear when harness is opencode: {seq}"
         );
     }
 
     #[test]
-    fn build_launch_sequence_threads_flags_through_opencode() {
-        // Regression guard: --remote-control, --model, and claude_args must
-        // attach to the configured harness binary, not to a hard-coded
-        // `claude`.
+    fn build_launch_sequence_omits_dangerously_skip_permissions_for_opencode() {
+        // OpenCode's TUI does not accept `--dangerously-skip-permissions`
+        // (that flag only exists on `opencode run`). Permission is granted
+        // via `opencode.json` instead — see agent_create_worktree_command.
         let mut cfg = test_config();
         cfg.harness = "opencode".into();
-        let seq = build_launch_sequence("my-task", &cfg, true, Some("opus"), Some("--verbose"));
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
         assert!(
-            seq.contains("opencode --dangerously-skip-permissions --remote-control skulk-my-task --model opus --verbose"),
-            "expected all flags chained onto opencode: {seq}"
+            !seq.contains("--dangerously-skip-permissions"),
+            "opencode launch must not include --dangerously-skip-permissions: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_skips_remote_control_for_non_claude_harness() {
+        // --remote-control is a Claude Code-only flag; OpenCode rejects it.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let seq = build_launch_sequence("my-task", &cfg, true, None, None);
+        assert!(
+            !seq.contains("--remote-control"),
+            "opencode launch must not include --remote-control even when requested: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_threads_remaining_flags_through_opencode() {
+        // Regression guard: --model and claude_args must attach to the
+        // configured harness binary. --remote-control and
+        // --dangerously-skip-permissions are intentionally absent for
+        // opencode.
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        let seq = build_launch_sequence(
+            "my-task",
+            &cfg,
+            false,
+            Some("anthropic/claude-opus-4-7"),
+            Some("--verbose"),
+        );
+        assert!(
+            seq.contains("opencode --model anthropic/claude-opus-4-7 --verbose"),
+            "expected --model and claude_args chained onto opencode: {seq}"
         );
     }
 

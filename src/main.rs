@@ -86,11 +86,13 @@ pub(crate) enum Commands {
         /// Launch Claude with --remote-control so the agent is reachable from the
         /// Claude Code mobile/web app. Off by default because it triggers an upstream
         /// idle-death bug; Skulk's own commands work via tmux directly.
+        /// Ignored (with a stderr warning) when harness is not `claude`.
         #[arg(long)]
         remote_control: bool,
-        /// Model name passed through to Claude Code as `--model <name>`
-        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`). Restricted to
-        /// `[A-Za-z0-9._-]` — shell metacharacters are rejected.
+        /// Model name passed through to the harness as `--model <name>`.
+        /// Claude Code accepts short aliases (`opus`, `sonnet`, `claude-opus-4-7`).
+        /// `OpenCode` requires `provider/model` (e.g. `anthropic/claude-opus-4-7`).
+        /// Restricted to `[A-Za-z0-9._/-]` — shell metacharacters are rejected.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
         /// Extra flags appended to the Claude Code launch command. The string is
@@ -248,11 +250,13 @@ pub(crate) enum Commands {
         /// Launch Claude with --remote-control so the agent is reachable from the
         /// Claude Code mobile/web app. Off by default because it triggers an upstream
         /// idle-death bug; Skulk's own commands work via tmux directly.
+        /// Ignored (with a stderr warning) when harness is not `claude`.
         #[arg(long)]
         remote_control: bool,
-        /// Model name passed through to Claude Code as `--model <name>`
-        /// (e.g. `opus`, `sonnet`, `claude-opus-4-7`). Restricted to
-        /// `[A-Za-z0-9._-]` — shell metacharacters are rejected.
+        /// Model name passed through to the harness as `--model <name>`.
+        /// Claude Code accepts short aliases (`opus`, `sonnet`, `claude-opus-4-7`).
+        /// `OpenCode` requires `provider/model` (e.g. `anthropic/claude-opus-4-7`).
+        /// Restricted to `[A-Za-z0-9._/-]` — shell metacharacters are rejected.
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
         /// Extra flags appended to the Claude Code launch command. The string is
@@ -279,10 +283,13 @@ pub(crate) enum Commands {
         /// Explicit name for the new agent (skips auto-derivation)
         #[arg(long = "as", value_name = "NEW_NAME")]
         new_name: Option<String>,
-        /// Launch the new agent with --remote-control
+        /// Launch the new agent with --remote-control. Claude Code only;
+        /// ignored (with a stderr warning) when harness is not `claude`.
         #[arg(long)]
         remote_control: bool,
-        /// Model to pass to the new agent's Claude Code instance
+        /// Model to pass to the new agent's harness instance.
+        /// Claude Code accepts short aliases (`opus`, `sonnet`); `OpenCode`
+        /// requires `provider/model` (e.g. `anthropic/claude-opus-4-7`).
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
         /// Extra flags to append to the new agent's Claude launch
