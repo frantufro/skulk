@@ -1,0 +1,4 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/hy3-preview-free"
+}
