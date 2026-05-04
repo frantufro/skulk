@@ -676,6 +676,53 @@ mod tests {
     }
 
     #[test]
+    fn opencode_plugin_source_is_syntactically_valid() {
+        // Guard against a future `format!` template edit that produces broken
+        // plugin source (unbalanced braces, stray quotes, etc.). The plugin
+        // contains one TypeScript-only construct — a parameter type annotation
+        // — so we strip it to JS and run `node --check`, which only parses
+        // syntax (no module resolution, so `node:fs` specifiers are fine).
+        // Skip when node isn't installed so the Rust suite stays toolchain-
+        // light for contributors without a Node runtime.
+        let src = opencode_plugin_source("skulk-my-task");
+        let js = src.replace(": { event: { type: string } }", "");
+
+        let node_available = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v node")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_available {
+            eprintln!("skipping opencode plugin syntax check: node not installed");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "skulk_opencode_plugin_check_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("skulk-state.mjs");
+        std::fs::write(&path, &js).expect("write plugin source");
+
+        let output = std::process::Command::new("node")
+            .args(["--check"])
+            .arg(&path)
+            .output()
+            .expect("run node --check");
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            output.status.success(),
+            "node --check rejected the plugin source:\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn hooks_settings_json_includes_stop_hook_for_session() {
         let json = hooks_settings_json("skulk-my-task");
         assert!(json.contains("\"Stop\""), "missing Stop hook: {json}");

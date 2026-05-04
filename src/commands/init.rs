@@ -1277,6 +1277,36 @@ mod tests {
         assert!(run_remote_setup(&ssh, &test_answers(), false).is_ok());
     }
 
+    #[test]
+    fn remote_setup_unknown_harness_runs_echo_placeholder() {
+        // Pins the wizard's behavior when the configured harness isn't one
+        // of the built-ins (claude/opencode): `setup_install_command` returns
+        // an `echo 'Unknown tool: ...'` placeholder which exits 0, so the
+        // current wizard reports the harness as installed even though
+        // nothing was actually installed. This test documents that branch
+        // is exercised end-to-end; if a future change makes the placeholder
+        // fail loud (the right fix), this test should fail and be updated.
+        let ssh = MockSsh::new(vec![
+            ssh_ok(), // apt-get check
+            Ok(
+                "tmux:installed\ngit:installed\ngh:installed\naider:missing\n\
+                 repo:cloned\nworktree-dir:exists"
+                    .into(),
+            ),
+            ssh_ok(), // "install" — actually the echo placeholder
+        ]);
+        let mut answers = test_answers();
+        answers.harness = "aider".into();
+        assert!(run_remote_setup(&ssh, &answers, false).is_ok());
+
+        let calls = ssh.calls();
+        let install_call = &calls[2];
+        assert!(
+            install_call.contains("echo") && install_call.contains("Unknown tool: aider"),
+            "unknown harness should hit the echo placeholder branch: {install_call}"
+        );
+    }
+
     // ── display ────────────────────────────────────────────────────────
 
     #[test]
