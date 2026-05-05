@@ -187,10 +187,11 @@ pub(crate) fn opencode_plugin_source(session_name: &str) -> String {
 ///   only set by Skulk's own send path. `skulk wait` invoked before the agent
 ///   has processed a turn therefore returns immediately as idle — acceptable
 ///   for now per upstream `OpenCode` issue #573.
-///   Also writes `<worktree>/opencode.json` with `{"permission":"allow"}` if
-///   the file does not already exist — `OpenCode`'s TUI does not accept
-///   `--dangerously-skip-permissions` (that flag only exists on
-///   `opencode run`), so permission must be granted via project config.
+///   Also writes `<worktree>/opencode.json` with `{"permission":"allow"}` when
+///   `cfg.auto_approve_permissions = true` — `OpenCode`'s TUI does not accept
+///   `--dangerously-skip-permissions` (that flag only exists on `opencode run`),
+///   so permission must be granted via project config. Skipped when the flag is
+///   false so the user can manage permissions themselves.
 ///
 /// For any other harness no hook is installed; `skulk wait` will treat the
 /// missing marker file as idle and return immediately.
@@ -217,17 +218,24 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
         }
         "opencode" => {
             let plugin_src = opencode_plugin_source(&session_name);
-            // OpenCode's TUI does not accept `--dangerously-skip-permissions`
-            // (that flag only exists on `opencode run`), so we grant permission
-            // via the project config instead. `[ -e ]` preserves any existing
-            // `opencode.json` the user has committed.
-            let opencode_json = r#"{"permission":"allow"}"#;
-            format!(
+            let plugin_cmd = format!(
                 "{base} && \
                  mkdir -p {worktree}/.opencode/plugins && \
-                 printf '%s' '{plugin_src}' > {worktree}/.opencode/plugins/skulk-state.ts && \
-                 [ -e {worktree}/opencode.json ] || printf '%s' '{opencode_json}' > {worktree}/opencode.json"
-            )
+                 printf '%s' '{plugin_src}' > {worktree}/.opencode/plugins/skulk-state.ts"
+            );
+            if cfg.auto_approve_permissions {
+                // OpenCode's TUI does not accept `--dangerously-skip-permissions`
+                // (that flag only exists on `opencode run`), so we grant permission
+                // via project config. `[ -e ]` preserves any existing opencode.json
+                // the user has committed.
+                let opencode_json = r#"{"permission":"allow"}"#;
+                format!(
+                    "{plugin_cmd} && \
+                     [ -e {worktree}/opencode.json ] || printf '%s' '{opencode_json}' > {worktree}/opencode.json"
+                )
+            } else {
+                plugin_cmd
+            }
         }
         _ => base,
     }
@@ -655,11 +663,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_create_worktree_command_writes_opencode_json_for_opencode_harness() {
-        // OpenCode's TUI doesn't accept --dangerously-skip-permissions, so we
-        // grant permission via opencode.json instead.
+    fn agent_create_worktree_command_writes_opencode_json_when_auto_approve_enabled() {
         let mut cfg = test_config();
         cfg.harness = "opencode".into();
+        cfg.auto_approve_permissions = true;
         let cmd = agent_create_worktree_command("my-task", &cfg);
         assert!(
             cmd.contains("~/test-project-worktrees/skulk-my-task/opencode.json"),
@@ -677,10 +684,27 @@ mod tests {
         // not overwrite it. Guarded by `[ -e ... ] || ...`.
         let mut cfg = test_config();
         cfg.harness = "opencode".into();
+        cfg.auto_approve_permissions = true;
         let cmd = agent_create_worktree_command("my-task", &cfg);
         assert!(
             cmd.contains("[ -e ~/test-project-worktrees/skulk-my-task/opencode.json ] ||"),
             "expected guard against overwriting an existing opencode.json: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_command_skips_opencode_json_when_auto_approve_disabled() {
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        // auto_approve_permissions defaults to false
+        let cmd = agent_create_worktree_command("my-task", &cfg);
+        assert!(
+            !cmd.contains("opencode.json"),
+            "opencode.json must not appear when auto_approve_permissions=false: {cmd}"
+        );
+        assert!(
+            cmd.contains("skulk-state.ts"),
+            "idle plugin must still be installed: {cmd}"
         );
     }
 

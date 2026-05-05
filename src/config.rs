@@ -29,6 +29,11 @@ pub(crate) struct Config {
     /// agent just starts Claude directly if the script isn't present on disk.
     #[serde(default)]
     pub init_script: Option<String>,
+    /// When `harness = "opencode"`, write `opencode.json` with
+    /// `{"permission":"allow"}` to each new agent's worktree so the TUI never
+    /// prompts for tool approval. Defaults to `false`.
+    #[serde(default)]
+    pub auto_approve_permissions: bool,
     /// Directory the config file was loaded from. Populated after parsing so the
     /// rest of the code can resolve sibling paths like `.skulk/.env`. Not a TOML
     /// field.
@@ -263,6 +268,31 @@ mod tests {
         assert!(result.unwrap_err().contains("harness"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_auto_approve_permissions_defaults_to_false() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.auto_approve_permissions);
+    }
+
+    #[test]
+    fn config_auto_approve_permissions_parses_when_true() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            auto_approve_permissions = true
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.auto_approve_permissions);
     }
 
     #[test]

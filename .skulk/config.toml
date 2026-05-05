@@ -4,3 +4,4 @@ base_path = "~/skulk"
 worktree_base = "~/skulk-worktrees"
 default_branch = "main"
 harness = "opencode"
+auto_approve_permissions = true

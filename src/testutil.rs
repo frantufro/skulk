@@ -48,6 +48,7 @@ pub(crate) fn test_config() -> Config {
         default_branch: "main".to_string(),
         harness: "claude".to_string(),
         init_script: None,
+        auto_approve_permissions: false,
         root_dir: None,
     }
 }

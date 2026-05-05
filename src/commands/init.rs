@@ -39,6 +39,9 @@ pub(crate) struct InitAnswers {
     /// the user explicitly chose otherwise. Passed through to the remote
     /// setup checks and emitted in the generated `config.toml`.
     pub harness: String,
+    /// Whether to write `opencode.json` with `{"permission":"allow"}` to each
+    /// new agent's worktree. Only relevant when `harness = "opencode"`.
+    pub auto_approve_permissions: bool,
     pub run_setup: bool,
 }
 
@@ -125,6 +128,63 @@ where
 
 // ── Wizard ─────────────────────────────────────────────────────────────────
 
+/// Prompts for harness binary (step 6) and, when opencode is chosen,
+/// whether to auto-approve all tool permissions (step 7).
+fn prompt_harness_and_permissions(
+    prompter: &mut dyn Prompter,
+    color: bool,
+) -> Result<(String, bool), SkulkError> {
+    let harness = prompt_validated(
+        prompter,
+        &format!(
+            "{} Agent harness {}: ",
+            green("?", color),
+            dim(&format!("[{DEFAULT_HARNESS}]"), color)
+        ),
+        |input| {
+            let value = if input.is_empty() {
+                DEFAULT_HARNESS.to_string()
+            } else {
+                input.to_string()
+            };
+            validate_shell_safe(&value, "harness").map(|()| value)
+        },
+    )?;
+    // OpenCode's TUI prompts for approval on every tool call by default.
+    // For headless skulk agents there's no human present, so we write
+    // `opencode.json` with `{"permission":"allow"}` to each worktree.
+    let auto_approve = if harness == "opencode" {
+        prompter.confirm(
+            &format!(
+                "\n{} Auto-approve all tool permissions? {} ",
+                green("?", color),
+                dim("[Y/n]", color)
+            ),
+            true,
+        )?
+    } else {
+        false
+    };
+    Ok((harness, auto_approve))
+}
+
+fn print_wizard_summary(color: bool, answers: &InitAnswers) {
+    eprintln!();
+    eprintln!("  {}", bold("Config:", color));
+    eprintln!("    host           = {}", answers.host);
+    eprintln!("    session_prefix = {}", answers.session_prefix);
+    eprintln!("    base_path      = {}", answers.base_path);
+    eprintln!("    worktree_base  = {}", answers.worktree_base);
+    eprintln!("    default_branch = {}", answers.default_branch);
+    eprintln!("    harness        = {}", answers.harness);
+    if answers.harness == "opencode" {
+        eprintln!(
+            "    auto_approve_permissions = {}",
+            answers.auto_approve_permissions
+        );
+    }
+}
+
 /// Run the interactive init wizard, collecting all user answers.
 ///
 /// All I/O is injected via `prompter` and `test_ssh`. The wizard handles:
@@ -199,49 +259,14 @@ pub(crate) fn run_wizard(
         },
     )?;
 
-    // Step 6: Agent harness — usually `claude`, but `opencode` is supported.
-    let harness = prompt_validated(
-        prompter,
-        &format!(
-            "{} Agent harness {}: ",
-            green("?", color),
-            dim(&format!("[{DEFAULT_HARNESS}]"), color)
-        ),
-        |input| {
-            let value = if input.is_empty() {
-                DEFAULT_HARNESS.to_string()
-            } else {
-                input.to_string()
-            };
-            validate_shell_safe(&value, "harness").map(|()| value)
-        },
-    )?;
+    // Steps 6–7: Harness selection and optional auto-approve permissions
+    let (harness, auto_approve_permissions) = prompt_harness_and_permissions(prompter, color)?;
 
-    // Step 7: Derive paths
+    // Step 8: Derive paths
     let base_path = format!("~/{repo_name}");
     let worktree_base = format!("~/{repo_name}-worktrees");
 
-    // Step 8: Show config summary
-    eprintln!();
-    eprintln!("  {}", bold("Config:", color));
-    eprintln!("    host           = {host}");
-    eprintln!("    session_prefix = {session_prefix}");
-    eprintln!("    base_path      = {base_path}");
-    eprintln!("    worktree_base  = {worktree_base}");
-    eprintln!("    default_branch = {default_branch}");
-    eprintln!("    harness        = {harness}");
-
-    // Step 9: Remote setup?
-    let run_setup = prompter.confirm(
-        &format!(
-            "\n{} Set up {host} now? {}",
-            green("?", color),
-            dim("[Y/n]", color)
-        ),
-        true,
-    )?;
-
-    Ok(Some(InitAnswers {
+    let answers = InitAnswers {
         host,
         session_prefix,
         default_branch,
@@ -250,7 +275,27 @@ pub(crate) fn run_wizard(
         repo_url,
         repo_name,
         harness,
+        auto_approve_permissions,
+        run_setup: false,
+    };
+
+    // Step 9: Show config summary
+    print_wizard_summary(color, &answers);
+
+    // Step 10: Remote setup?
+    let run_setup = prompter.confirm(
+        &format!(
+            "\n{} Set up {} now? {}",
+            green("?", color),
+            answers.host,
+            dim("[Y/n]", color)
+        ),
+        true,
+    )?;
+
+    Ok(Some(InitAnswers {
         run_setup,
+        ..answers
     }))
 }
 
@@ -354,13 +399,19 @@ pub(crate) fn generate_config_toml(answers: &InitAnswers) -> String {
     } else {
         format!("harness = \"{}\"\n", answers.harness)
     };
+    let auto_approve_line = if answers.auto_approve_permissions {
+        "auto_approve_permissions = true\n".to_string()
+    } else {
+        String::new()
+    };
     format!(
         "host = \"{host}\"\n\
          session_prefix = \"{prefix}\"\n\
          base_path = \"{base}\"\n\
          worktree_base = \"{wt}\"\n\
          default_branch = \"{branch}\"\n\
-         {harness_line}",
+         {harness_line}\
+         {auto_approve_line}",
         host = answers.host,
         prefix = answers.session_prefix,
         base = answers.base_path,
@@ -783,6 +834,7 @@ mod tests {
             repo_url: "https://github.com/user/test.git".into(),
             repo_name: "test".into(),
             harness: "claude".into(),
+            auto_approve_permissions: false,
             run_setup: false,
         };
         let toml_str = generate_config_toml(&answers);
@@ -808,6 +860,7 @@ mod tests {
             repo_url: "u".into(),
             repo_name: "p".into(),
             harness: "claude".into(),
+            auto_approve_permissions: false,
             run_setup: false,
         };
         let toml_str = generate_config_toml(&answers);
@@ -828,6 +881,7 @@ mod tests {
             repo_url: "u".into(),
             repo_name: "p".into(),
             harness: "opencode".into(),
+            auto_approve_permissions: false,
             run_setup: false,
         };
         let toml_str = generate_config_toml(&answers);
@@ -837,6 +891,50 @@ mod tests {
         );
         let cfg: Config = toml::from_str(&toml_str).expect("should parse");
         assert_eq!(cfg.harness, "opencode");
+    }
+
+    #[test]
+    fn generate_config_emits_auto_approve_when_true() {
+        let answers = InitAnswers {
+            host: "h".into(),
+            session_prefix: "p-".into(),
+            default_branch: "main".into(),
+            base_path: "~/p".into(),
+            worktree_base: "~/p-w".into(),
+            repo_url: "u".into(),
+            repo_name: "p".into(),
+            harness: "opencode".into(),
+            auto_approve_permissions: true,
+            run_setup: false,
+        };
+        let toml_str = generate_config_toml(&answers);
+        assert!(
+            toml_str.contains("auto_approve_permissions = true"),
+            "auto_approve_permissions line missing: {toml_str}"
+        );
+        let cfg: Config = toml::from_str(&toml_str).expect("should parse");
+        assert!(cfg.auto_approve_permissions);
+    }
+
+    #[test]
+    fn generate_config_omits_auto_approve_when_false() {
+        let answers = InitAnswers {
+            host: "h".into(),
+            session_prefix: "p-".into(),
+            default_branch: "main".into(),
+            base_path: "~/p".into(),
+            worktree_base: "~/p-w".into(),
+            repo_url: "u".into(),
+            repo_name: "p".into(),
+            harness: "claude".into(),
+            auto_approve_permissions: false,
+            run_setup: false,
+        };
+        let toml_str = generate_config_toml(&answers);
+        assert!(
+            !toml_str.contains("auto_approve_permissions"),
+            "auto_approve_permissions must be absent when false: {toml_str}"
+        );
     }
 
     // ── run_wizard ─────────────────────────────────────────────────────
@@ -941,6 +1039,7 @@ mod tests {
             "",         // prefix default
             "",         // branch default
             "opencode", // pick opencode
+            "y",        // auto-approve permissions (opencode only)
             "n",        // skip setup
         ]);
         let result = run_wizard(
@@ -954,6 +1053,7 @@ mod tests {
             .expect("wizard should succeed")
             .expect("wizard should not abort");
         assert_eq!(answers.harness, "opencode");
+        assert!(answers.auto_approve_permissions);
     }
 
     #[test]
@@ -1077,6 +1177,7 @@ mod tests {
             repo_url: "u".into(),
             repo_name: "project".into(),
             harness: "claude".into(),
+            auto_approve_permissions: false,
             run_setup: true,
         };
         let cmd = setup_check_command(&answers);
@@ -1099,6 +1200,7 @@ mod tests {
             repo_url: "u".into(),
             repo_name: "project".into(),
             harness: "opencode".into(),
+            auto_approve_permissions: false,
             run_setup: true,
         };
         let cmd = setup_check_command(&answers);
@@ -1194,6 +1296,7 @@ mod tests {
             repo_url: "https://example.com/repo.git".into(),
             repo_name: "test".into(),
             harness: "claude".into(),
+            auto_approve_permissions: false,
             run_setup: true,
         }
     }
