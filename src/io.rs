@@ -394,6 +394,17 @@ pub(crate) fn main() {
         COLOR_ENABLED.store(false, Ordering::Relaxed);
     }
 
+    // Run version staleness check unless opted out
+    if std::env::var("SKULK_NO_UPDATE_CHECK").is_err() {
+        let client = crate::commands::update::UreqClient;
+        if let Some((latest, current)) = crate::commands::update::check_staleness(&client) {
+            let latest_trimmed = latest.strip_prefix('v').unwrap_or(&latest);
+            eprintln!(
+                "Warning: skulk v{latest_trimmed} is available (you have v{current}). Run `skulk update` to upgrade."
+            );
+        }
+    }
+
     // Init runs before config exists — handle it specially
     if matches!(cli.command, Commands::Init) {
         match run_init() {

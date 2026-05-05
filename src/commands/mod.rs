@@ -12,4 +12,5 @@ pub(crate) mod replay;
 pub(crate) mod restart;
 pub(crate) mod ship;
 pub(crate) mod status;
+pub(crate) mod update;
 pub(crate) mod wait;
