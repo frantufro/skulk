@@ -1,4 +1,4 @@
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub(crate) enum SkulkError {
     /// SSH command could not be spawned
     #[error("Failed to run ssh: {0}")]
@@ -15,6 +15,9 @@ pub(crate) enum SkulkError {
     /// Resource not found
     #[error("{0}")]
     NotFound(String),
+    /// Update operation failed
+    #[error("Update failed: {0}")]
+    UpdateFailed(String),
 }
 
 pub(crate) fn classify_ssh_error(stderr: &str, host: &str) -> SkulkError {

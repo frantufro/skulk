@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 
 use commands::{
     completions, destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart,
-    ship, status, wait,
+    ship, status, update, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -369,6 +369,12 @@ pub(crate) enum Commands {
         #[arg(value_enum)]
         shell: completions::CompletionShell,
     },
+
+    /// Update skulk to the latest version
+    ///
+    /// Fetches the latest release from GitHub, downloads the binary for the
+    /// current platform, replaces the running binary, and prints the new version.
+    Update,
 }
 
 impl Commands {
@@ -402,6 +408,7 @@ impl Commands {
             Commands::Transcript { .. } => "transcript",
             Commands::Wait { .. } => "wait",
             Commands::Completions { .. } => "completions",
+            Commands::Update => "update",
         }
     }
 }
@@ -549,6 +556,7 @@ pub(crate) fn run(
                 }
             }
         }
+        Commands::Update => update::cmd_update(&update::UreqClient),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
