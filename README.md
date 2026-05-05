@@ -87,6 +87,7 @@ default_branch = "main"
 | `base_path` | Path to the main git clone on the remote |
 | `worktree_base` | Directory where agent worktrees are created |
 | `default_branch` | Branch that new worktrees are based on (default: `main`) |
+| `harness` | Agent harness to use: `claude` (default) or `opencode` |
 
 The config file is searched upward from your current directory, so you can place it at your project root.
 
@@ -268,6 +269,32 @@ Claude Code session:
 
 The plugin contributes a `skulk-agent-management` skill that covers the
 full agent lifecycle (create, monitor, interact, review, ship, clean up).
+
+## Alternative Harnesses
+
+By default, `skulk` uses [Claude Code](https://docs.claude.com/en/docs/claude-code) as the agent harness. You can switch to [OpenCode](https://opencode.ai) by setting the `harness` field in `.skulk/config.toml`:
+
+```toml
+harness = "opencode"
+```
+
+If omitted, `harness` defaults to `"claude"`.
+
+### Installing OpenCode on the Remote Server
+
+OpenCode must be installed on the remote server before using the `opencode` harness. Follow the [OpenCode installation guide](https://opencode.ai/docs/install) for your remote's OS, or run this one-liner for Linux (Debian-based):
+
+```bash
+curl -fsSL https://opencode.ai/install | bash
+```
+
+Verify the installation by running `opencode --version` over SSH on the remote.
+
+### OpenCode-Specific Behavior
+
+- **`skulk wait` limitation:** OpenCode does not have an equivalent to Claude Code's `UserPromptSubmit` event, so `skulk wait` may return early right after sending a prompt, before the agent finishes its turn.
+- **`--model` flag format:** When using OpenCode, the `--model` flag requires the `provider/model` format (e.g. `anthropic/claude-opus-4-7`), not just the model name.
+- **`--remote-control` ignored:** The `--remote-control` flag is Claude-only and will be ignored when using the OpenCode harness.
 
 ## How It Works
 
