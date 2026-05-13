@@ -8,6 +8,9 @@ use anyhow::Context;
 /// Cache duration for version check (24 hours)
 const CACHE_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Total timeout for HTTP requests in the update flow.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Get the cache file path: ~/.cache/skulk/latest-version
 fn cache_file_path() -> Result<std::path::PathBuf, SkulkError> {
     // Use test-specific cache dir if set, to avoid test interference
@@ -51,14 +54,24 @@ fn write_cache(version: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
+/// Parse a semantic version, accepting an optional leading `v`.
+fn parse_version(s: &str) -> Result<semver::Version, semver::Error> {
+    semver::Version::parse(s.strip_prefix('v').unwrap_or(s))
+}
+
 /// Check if a newer version is available. Returns `(latest_version, current_version)` if update exists.
 pub(crate) fn check_staleness(client: &impl HttpClient) -> Option<(String, String)> {
     let current = env!("CARGO_PKG_VERSION").to_string();
+    let Ok(current_ver) = parse_version(&current) else {
+        return None;
+    };
     let Ok(latest) = get_latest_version(client) else {
         return None; // Silently skip on fetch errors
     };
-    let latest_trimmed = latest.strip_prefix('v').unwrap_or(&latest);
-    if latest_trimmed > current.as_str() {
+    let Ok(latest_ver) = parse_version(&latest) else {
+        return None;
+    };
+    if latest_ver > current_ver {
         Some((latest, current))
     } else {
         None
@@ -86,6 +99,8 @@ pub(crate) trait HttpClient {
     fn get_latest_release(&self) -> Result<ReleaseInfo, SkulkError>;
     /// Download asset from URL to destination path
     fn download_asset(&self, url: &str, dest: &Path) -> Result<(), SkulkError>;
+    /// Fetch a small text asset (e.g. a `.sha256` file) directly into memory.
+    fn get_text(&self, url: &str) -> Result<String, SkulkError>;
 }
 
 /// Info extracted from GitHub latest release response
@@ -110,6 +125,7 @@ impl HttpClient for UreqClient {
         let url = "https://api.github.com/repos/frantufro/skulk/releases/latest";
         let resp = ureq::get(url)
             .set("User-Agent", "skulk")
+            .timeout(HTTP_TIMEOUT)
             .call()
             .context("Failed to fetch release from GitHub")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
@@ -138,6 +154,7 @@ impl HttpClient for UreqClient {
     fn download_asset(&self, url: &str, dest: &Path) -> Result<(), SkulkError> {
         let resp = ureq::get(url)
             .set("User-Agent", "skulk")
+            .timeout(HTTP_TIMEOUT)
             .call()
             .context("Failed to download asset")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
@@ -149,31 +166,96 @@ impl HttpClient for UreqClient {
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
         Ok(())
     }
+
+    fn get_text(&self, url: &str) -> Result<String, SkulkError> {
+        let resp = ureq::get(url)
+            .set("User-Agent", "skulk")
+            .timeout(HTTP_TIMEOUT)
+            .call()
+            .context("Failed to fetch text asset")
+            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
+        resp.into_string()
+            .context("Failed to read response body")
+            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))
+    }
+}
+
+/// Compute the SHA-256 of a file as a lowercase hex string.
+fn sha256_hex(file_path: &Path) -> Result<String, SkulkError> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut file = std::fs::File::open(file_path)
+        .map_err(|e| SkulkError::UpdateFailed(format!("Failed to open file for hashing: {e}")))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| SkulkError::UpdateFailed(format!("Failed to hash file: {e}")))?;
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Writing to a String can't fail; the unused Result is discarded explicitly.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
+/// Extract the hex digest from a sha256sum-style file (`<hash>  <filename>` or just `<hash>`).
+fn parse_sha256_file(content: &str) -> Option<String> {
+    let token = content.split_whitespace().next()?;
+    if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(token.to_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Verify that `file_path` hashes to `expected_sha256` (lowercase hex).
+fn verify_checksum(file_path: &Path, expected_sha256: &str) -> Result<(), SkulkError> {
+    let computed = sha256_hex(file_path)?;
+    let expected = expected_sha256.trim().to_lowercase();
+    if computed == expected {
+        Ok(())
+    } else {
+        Err(SkulkError::UpdateFailed(format!(
+            "Checksum mismatch (expected {expected}, got {computed})"
+        )))
+    }
 }
 
 /// Run the update command
 pub(crate) fn cmd_update(client: &impl HttpClient) -> Result<(), SkulkError> {
     let current_version = env!("CARGO_PKG_VERSION");
+    let current_ver = parse_version(current_version)
+        .map_err(|e| SkulkError::UpdateFailed(format!("Invalid current version: {e}")))?;
     let release = client.get_latest_release()?;
-    let latest_version = release
-        .tag_name
-        .strip_prefix('v')
-        .unwrap_or(&release.tag_name);
+    let latest_ver = parse_version(&release.tag_name)
+        .map_err(|e| SkulkError::UpdateFailed(format!("Invalid latest version: {e}")))?;
 
-    if latest_version <= current_version {
+    if latest_ver <= current_ver {
         println!("skulk is already up to date (v{current_version})");
         return Ok(());
     }
 
     // Find asset for current platform
-    let target = std::env::var("TARGET")
-        .map_err(|e| SkulkError::UpdateFailed(format!("Failed to get TARGET env var: {e}")))?;
+    let target = env!("TARGET");
     let asset = release
         .assets
         .iter()
-        .find(|a| a.name.contains(&target))
+        .find(|a| a.name.contains(target) && a.name.ends_with(".tar.gz"))
         .ok_or_else(|| {
             SkulkError::UpdateFailed(format!("No release asset found for target {target}"))
+        })?;
+
+    // Locate the matching checksum asset; required for safe install.
+    let checksum_name = format!("{}.sha256", asset.name);
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == checksum_name)
+        .ok_or_else(|| {
+            SkulkError::UpdateFailed(format!(
+                "Missing checksum asset {checksum_name} for release {}",
+                release.tag_name
+            ))
         })?;
 
     // Get current binary path
@@ -185,11 +267,24 @@ pub(crate) fn cmd_update(client: &impl HttpClient) -> Result<(), SkulkError> {
     // Download to temp path
     client.download_asset(&asset.browser_download_url, &temp_path)?;
 
+    // Verify SHA-256 before installing; remove the temp file on mismatch so we
+    // don't leave a partially-trusted binary on disk.
+    let checksum_content = client.get_text(&checksum_asset.browser_download_url)?;
+    let expected = parse_sha256_file(&checksum_content).ok_or_else(|| {
+        SkulkError::UpdateFailed(format!(
+            "Could not parse checksum file {checksum_name} (expected sha256sum format)"
+        ))
+    })?;
+    if let Err(e) = verify_checksum(&temp_path, &expected) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e);
+    }
+
     // Replace binary atomically
     std::fs::rename(&temp_path, &current_exe)
         .map_err(|e| SkulkError::UpdateFailed(format!("Failed to replace binary: {e}")))?;
 
-    println!("Updated skulk to v{latest_version}");
+    println!("Updated skulk to v{latest_ver}");
     Ok(())
 }
 
@@ -202,6 +297,7 @@ mod tests {
     struct MockHttpClient {
         release: Result<ReleaseInfo, SkulkError>,
         download_result: Result<(), SkulkError>,
+        text_result: Result<String, SkulkError>,
     }
 
     impl HttpClient for MockHttpClient {
@@ -211,6 +307,10 @@ mod tests {
 
         fn download_asset(&self, _url: &str, _dest: &Path) -> Result<(), SkulkError> {
             self.download_result.clone()
+        }
+
+        fn get_text(&self, _url: &str) -> Result<String, SkulkError> {
+            self.text_result.clone()
         }
     }
 
@@ -224,6 +324,7 @@ mod tests {
         let client = MockHttpClient {
             release: Ok(release),
             download_result: Ok(()),
+            text_result: Ok(String::new()),
         };
         let result = cmd_update(&client);
         assert!(result.is_ok());
@@ -246,6 +347,7 @@ mod tests {
         let client = MockHttpClient {
             release: Ok(release),
             download_result: Ok(()),
+            text_result: Ok(String::new()),
         };
         let result = check_staleness(&client);
         assert!(result.is_none());
@@ -273,6 +375,7 @@ mod tests {
         let client = MockHttpClient {
             release: Ok(release),
             download_result: Ok(()),
+            text_result: Ok(String::new()),
         };
         let result = check_staleness(&client);
         assert!(result.is_some());
@@ -299,6 +402,7 @@ mod tests {
         let client = MockHttpClient {
             release: Err(SkulkError::UpdateFailed("test error".into())),
             download_result: Ok(()),
+            text_result: Ok(String::new()),
         };
         let result = check_staleness(&client);
         assert!(result.is_none());
@@ -307,6 +411,90 @@ mod tests {
         unsafe {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn check_staleness_handles_unparseable_versions() {
+        let test_dir =
+            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let _ = std::fs::create_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
+        unsafe {
+            std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
+        }
+        let release = ReleaseInfo {
+            tag_name: "not-a-version".into(),
+            assets: vec![],
+        };
+        let client = MockHttpClient {
+            release: Ok(release),
+            download_result: Ok(()),
+            text_result: Ok(String::new()),
+        };
+        let result = check_staleness(&client);
+        assert!(result.is_none());
+        let _ = std::fs::remove_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
+        unsafe {
+            std::env::remove_var("SKULK_TEST_CACHE_DIR");
+        }
+    }
+
+    #[test]
+    fn check_staleness_uses_semver_not_lexicographic() {
+        // Lexicographic comparison would say "0.10.0" < "0.9.0"; semver must not.
+        let older = parse_version("v0.9.0").unwrap();
+        let newer = parse_version("v0.10.0").unwrap();
+        assert!(newer > older);
+    }
+
+    #[test]
+    fn parse_sha256_file_accepts_sha256sum_format() {
+        let content =
+            "abc123def456abc123def456abc123def456abc123def456abc123def456abcd  skulk.tar.gz\n";
+        let parsed = parse_sha256_file(content).unwrap();
+        assert_eq!(parsed.len(), 64);
+        assert!(parsed.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parse_sha256_file_accepts_hash_only() {
+        let content = "abc123def456abc123def456abc123def456abc123def456abc123def456abcd\n";
+        let parsed = parse_sha256_file(content).unwrap();
+        assert_eq!(parsed.len(), 64);
+    }
+
+    #[test]
+    fn parse_sha256_file_rejects_garbage() {
+        assert!(parse_sha256_file("nope").is_none());
+        assert!(parse_sha256_file("").is_none());
+        assert!(parse_sha256_file("abc").is_none());
+    }
+
+    #[test]
+    fn verify_checksum_accepts_matching_hash() {
+        // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b16...
+        let tmp = std::env::temp_dir().join(format!("skulk_chk_{}", rand::random::<u32>()));
+        std::fs::write(&tmp, b"hello").unwrap();
+        let result = verify_checksum(
+            &tmp,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        );
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_ok(), "verify_checksum failed: {result:?}");
+    }
+
+    #[test]
+    fn verify_checksum_rejects_mismatched_hash() {
+        let tmp = std::env::temp_dir().join(format!("skulk_chk_{}", rand::random::<u32>()));
+        std::fs::write(&tmp, b"hello").unwrap();
+        let result = verify_checksum(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let _ = std::fs::remove_file(&tmp);
+        assert!(matches!(result, Err(SkulkError::UpdateFailed(_))));
     }
 
     #[test]
