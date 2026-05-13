@@ -23,11 +23,10 @@ fn cache_file_path() -> Result<std::path::PathBuf, SkulkError> {
     Ok(cache_dir.join("latest-version"))
 }
 
-/// Read cached version and timestamp. Returns (version, timestamp) if valid and fresh.
+/// Read cached version and timestamp. Returns `(version, timestamp)` if valid and fresh.
 fn read_cache() -> Option<(String, SystemTime)> {
-    let path = match cache_file_path() {
-        Ok(p) => p,
-        Err(_) => return None,
+    let Ok(path) = cache_file_path() else {
+        return None;
     };
     let content = std::fs::read_to_string(&path).ok()?;
     let mut lines = content.lines();
@@ -52,12 +51,11 @@ fn write_cache(version: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
-/// Check if a newer version is available. Returns (latest_version, current_version) if update exists.
+/// Check if a newer version is available. Returns `(latest_version, current_version)` if update exists.
 pub(crate) fn check_staleness(client: &impl HttpClient) -> Option<(String, String)> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let latest = match get_latest_version(client) {
-        Ok(v) => v,
-        Err(_) => return None, // Silently skip on fetch errors
+    let Ok(latest) = get_latest_version(client) else {
+        return None; // Silently skip on fetch errors
     };
     let latest_trimmed = latest.strip_prefix('v').unwrap_or(&latest);
     if latest_trimmed > current.as_str() {
@@ -237,6 +235,7 @@ mod tests {
         let test_dir =
             std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
         let _ = std::fs::create_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
         }
@@ -251,6 +250,7 @@ mod tests {
         let result = check_staleness(&client);
         assert!(result.is_none());
         let _ = std::fs::remove_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
@@ -262,6 +262,7 @@ mod tests {
         let test_dir =
             std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
         let _ = std::fs::create_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
         }
@@ -279,6 +280,7 @@ mod tests {
         assert_eq!(latest, "v0.4.3");
         assert_eq!(current, env!("CARGO_PKG_VERSION"));
         let _ = std::fs::remove_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
@@ -290,6 +292,7 @@ mod tests {
         let test_dir =
             std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
         let _ = std::fs::create_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
         }
@@ -300,6 +303,7 @@ mod tests {
         let result = check_staleness(&client);
         assert!(result.is_none());
         let _ = std::fs::remove_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
@@ -311,6 +315,7 @@ mod tests {
         let test_dir =
             std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
         let _ = std::fs::create_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
         }
@@ -324,6 +329,7 @@ mod tests {
         assert_eq!(cached_version, version);
         assert!(timestamp.elapsed().unwrap() < Duration::from_secs(10));
         let _ = std::fs::remove_file(&path); // Clean up after
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
@@ -336,6 +342,7 @@ mod tests {
         let test_dir =
             std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
         let _ = std::fs::create_dir_all(&test_dir);
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
         }
@@ -354,6 +361,7 @@ mod tests {
         let (_, timestamp) = cached.unwrap();
         assert!(timestamp.elapsed().unwrap() > CACHE_DURATION);
         let _ = std::fs::remove_file(&path); // Clean up after
+        // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
