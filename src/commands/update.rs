@@ -262,30 +262,84 @@ pub(crate) fn cmd_update(client: &impl HttpClient) -> Result<(), SkulkError> {
     let current_exe = std::env::current_exe().map_err(|e| {
         SkulkError::UpdateFailed(format!("Failed to get current executable path: {e}"))
     })?;
-    let temp_path = current_exe.with_extension("tmp");
+    let archive_path = current_exe.with_extension("tar.gz.tmp");
+    let new_binary_path = current_exe.with_extension("new");
 
-    // Download to temp path
-    client.download_asset(&asset.browser_download_url, &temp_path)?;
+    // Download the release tarball.
+    client.download_asset(&asset.browser_download_url, &archive_path)?;
 
-    // Verify SHA-256 before installing; remove the temp file on mismatch so we
-    // don't leave a partially-trusted binary on disk.
+    // Verify SHA-256 before extracting; remove the temp file on mismatch so we
+    // don't leave a partially-trusted archive on disk.
     let checksum_content = client.get_text(&checksum_asset.browser_download_url)?;
     let expected = parse_sha256_file(&checksum_content).ok_or_else(|| {
         SkulkError::UpdateFailed(format!(
             "Could not parse checksum file {checksum_name} (expected sha256sum format)"
         ))
     })?;
-    if let Err(e) = verify_checksum(&temp_path, &expected) {
-        let _ = std::fs::remove_file(&temp_path);
+    if let Err(e) = verify_checksum(&archive_path, &expected) {
+        let _ = std::fs::remove_file(&archive_path);
         return Err(e);
     }
 
-    // Replace binary atomically
-    std::fs::rename(&temp_path, &current_exe)
+    // Extract the `skulk` binary out of the tarball and drop the archive.
+    if let Err(e) = extract_binary(&archive_path, "skulk", &new_binary_path) {
+        let _ = std::fs::remove_file(&archive_path);
+        let _ = std::fs::remove_file(&new_binary_path);
+        return Err(e);
+    }
+    let _ = std::fs::remove_file(&archive_path);
+
+    // Restore the executable bit on Unix; rename within the same directory is
+    // atomic on POSIX, so the active binary is never observed in a half-written
+    // state.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new_binary_path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| {
+                SkulkError::UpdateFailed(format!("Failed to set executable permissions: {e}"))
+            })?;
+    }
+
+    std::fs::rename(&new_binary_path, &current_exe)
         .map_err(|e| SkulkError::UpdateFailed(format!("Failed to replace binary: {e}")))?;
 
     println!("Updated skulk to v{latest_ver}");
     Ok(())
+}
+
+/// Extract a single file named `binary_name` from a gzipped tar archive into `dest`.
+fn extract_binary(archive_path: &Path, binary_name: &str, dest: &Path) -> Result<(), SkulkError> {
+    let archive_file = std::fs::File::open(archive_path)
+        .map_err(|e| SkulkError::UpdateFailed(format!("Failed to open archive: {e}")))?;
+    let decoder = flate2::read::GzDecoder::new(archive_file);
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|e| SkulkError::UpdateFailed(format!("Failed to read archive: {e}")))?;
+    for entry in entries {
+        let mut entry = entry
+            .map_err(|e| SkulkError::UpdateFailed(format!("Failed to read archive entry: {e}")))?;
+        // Match on the basename only — we trust the fixed `dest` path, not any
+        // path components inside the tarball (no path traversal risk).
+        let is_match = entry
+            .path()
+            .map_err(|e| SkulkError::UpdateFailed(format!("Failed to read entry path: {e}")))?
+            .file_name()
+            .and_then(|n| n.to_str())
+            == Some(binary_name);
+        if is_match {
+            let mut out = std::fs::File::create(dest).map_err(|e| {
+                SkulkError::UpdateFailed(format!("Failed to create extracted binary: {e}"))
+            })?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| SkulkError::UpdateFailed(format!("Failed to extract binary: {e}")))?;
+            return Ok(());
+        }
+    }
+    Err(SkulkError::UpdateFailed(format!(
+        "Archive does not contain a `{binary_name}` binary"
+    )))
 }
 
 #[cfg(test)]
@@ -554,5 +608,54 @@ mod tests {
             std::env::remove_var("SKULK_TEST_CACHE_DIR");
         }
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    /// Build an in-memory gzipped tarball containing one file with the given
+    /// name and payload, written to `dest`.
+    fn build_test_tarball(dest: &Path, name: &str, payload: &[u8]) {
+        let file = std::fs::File::create(dest).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append_data(&mut header, name, payload).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn extract_binary_pulls_named_entry_from_tarball() {
+        use std::io::Read;
+        let tmp = std::env::temp_dir().join(format!("skulk_extract_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive = tmp.join("release.tar.gz");
+        let dest = tmp.join("skulk.new");
+        let payload: &[u8] = b"\x7fELF fake binary contents";
+        build_test_tarball(&archive, "skulk", payload);
+
+        extract_binary(&archive, "skulk", &dest).unwrap();
+
+        let mut got = Vec::new();
+        std::fs::File::open(&dest)
+            .unwrap()
+            .read_to_end(&mut got)
+            .unwrap();
+        assert_eq!(got, payload);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn extract_binary_errors_when_entry_missing() {
+        let tmp = std::env::temp_dir().join(format!("skulk_extract_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive = tmp.join("release.tar.gz");
+        let dest = tmp.join("skulk.new");
+        build_test_tarball(&archive, "something-else", b"nope");
+
+        let result = extract_binary(&archive, "skulk", &dest);
+        assert!(matches!(result, Err(SkulkError::UpdateFailed(_))));
+        assert!(!dest.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
