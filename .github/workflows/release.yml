@@ -49,13 +49,22 @@ jobs:
         run: |
           ARCHIVE="skulk-${{ matrix.target }}.tar.gz"
           tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" skulk
+          # Emit a sha256sum-format checksum so `skulk update` can verify the
+          # download before installing. Portable between Linux and macOS runners.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: skulk-${{ matrix.target }}
-          path: ${{ env.ARCHIVE }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
 
   release:
     name: Create Release
@@ -71,7 +80,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/skulk-*.tar.gz
+          files: |
+            artifacts/skulk-*.tar.gz
+            artifacts/skulk-*.tar.gz.sha256
 
   publish-homebrew-formula:
     name: Publish Homebrew formula
