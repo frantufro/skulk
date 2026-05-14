@@ -166,9 +166,14 @@ pub(crate) fn parse_status_output(
     let diffstat_line = ds_raw.lines().last().unwrap_or("").trim();
     let (files_changed, insertions, deletions) = parse_diff_stat(diffstat_line);
 
+    // Marker synthesis is transitional: the SSH probe still reports the
+    // Stop-hook mtime, so here we translate "mtime >= activity" into a
+    // synthetic "idle"/"busy" marker. A follow-up commit switches the probe
+    // to read the marker file's actual contents and drops `Session.activity`.
     let (state, uptime) = match &our_session {
         Some(s) => {
-            let state = resolve_agent_state(s.state, s.activity, state_mtime);
+            let marker = state_mtime.map(|m| if m >= s.activity { "idle" } else { "busy" });
+            let state = resolve_agent_state(s.state, marker);
             (state, Some(format_uptime(remote_now, s.created)))
         }
         None => (AgentState::Stopped, None),
