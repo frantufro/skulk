@@ -35,26 +35,25 @@ pub(crate) enum AgentState {
 pub(crate) struct Session {
     pub name: String,
     pub created: i64,
-    /// tmux `session_activity` epoch — last time any pane output changed.
-    pub activity: i64,
     pub state: AgentState,
     pub worktree: Option<String>,
 }
 
 /// Parse a raw tmux `list-sessions` output into `Session`s with an initial
 /// `Attached` or `Detached` state. Callers upgrade to `Idle` via
-/// [`resolve_agent_state`] once the Stop-hook mtime is known.
+/// [`resolve_agent_state`] once the marker contents are known.
+///
+/// Expected columns: `session_name`, `session_created`, `session_attached`.
 pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
     raw.lines()
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 4 {
+            if parts.len() < 3 {
                 return None;
             }
             let created = parts[1].parse::<i64>().ok()?;
-            let activity = parts[2].parse::<i64>().ok()?;
-            let state = if parts[3] == "0" {
+            let state = if parts[2] == "0" {
                 AgentState::Detached
             } else {
                 AgentState::Attached
@@ -62,7 +61,6 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
             Some(Session {
                 name: parts[0].to_string(),
                 created,
-                activity,
                 state,
                 worktree: None,
             })
@@ -212,12 +210,11 @@ mod tests {
 
     #[test]
     fn parse_sessions_single_line() {
-        let raw = "skulk-test\t1700000000\t1700000100\t0\n";
+        let raw = "skulk-test\t1700000000\t0\n";
         let sessions = parse_sessions(raw);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "skulk-test");
         assert_eq!(sessions[0].created, 1700000000);
-        assert_eq!(sessions[0].activity, 1700000100);
         assert_eq!(sessions[0].state, AgentState::Detached);
         assert!(sessions[0].worktree.is_none());
     }
@@ -236,7 +233,7 @@ mod tests {
 
     #[test]
     fn parse_sessions_multiple_lines() {
-        let raw = "skulk-a\t1\t2\t0\nskulk-b\t3\t4\t1\n";
+        let raw = "skulk-a\t1\t0\nskulk-b\t3\t1\n";
         let sessions = parse_sessions(raw);
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].state, AgentState::Detached);

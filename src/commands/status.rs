@@ -6,8 +6,7 @@ use crate::inventory::{AgentState, get_worktree_map, parse_sessions, resolve_age
 use crate::ssh::Ssh;
 use crate::util::{extract_section, validate_name};
 
-const TMUX_FORMAT: &str =
-    "#{session_name}\t#{session_created}\t#{session_activity}\t#{session_attached}";
+const TMUX_FORMAT: &str = "#{session_name}\t#{session_created}\t#{session_attached}";
 
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
@@ -100,7 +99,8 @@ pub(crate) fn status_command(name: &str, cfg: &Config) -> String {
          cd {base} && (git show-ref --verify --quiet refs/heads/{branch} && echo yes || echo no) && \
          echo __BRANCH_EXISTS_END__ && \
          echo __STATE_START__ && \
-         {{ [ -f ~/.skulk/state/{session_name} ] && stat -c %Y ~/.skulk/state/{session_name}; }} 2>/dev/null; \
+         {{ [ -f ~/.skulk/state/{session_name} ] && cat ~/.skulk/state/{session_name}; }} 2>/dev/null; \
+         echo && \
          echo __STATE_END__ && \
          echo __REVCOUNT_START__ && \
          cd {base} && git rev-list --count {default}..{branch} 2>/dev/null || true && \
@@ -150,10 +150,7 @@ pub(crate) fn parse_status_output(
     }
 
     let state_raw = extract_section(raw, "__STATE_START__\n", "\n__STATE_END__");
-    let state_mtime = state_raw
-        .lines()
-        .next()
-        .and_then(|l| l.trim().parse::<i64>().ok());
+    let marker = state_raw.lines().map(str::trim).find(|l| !l.is_empty());
 
     let rc_raw = extract_section(raw, "__REVCOUNT_START__\n", "\n__REVCOUNT_END__");
     let commits_ahead = rc_raw
@@ -166,13 +163,8 @@ pub(crate) fn parse_status_output(
     let diffstat_line = ds_raw.lines().last().unwrap_or("").trim();
     let (files_changed, insertions, deletions) = parse_diff_stat(diffstat_line);
 
-    // Marker synthesis is transitional: the SSH probe still reports the
-    // Stop-hook mtime, so here we translate "mtime >= activity" into a
-    // synthetic "idle"/"busy" marker. A follow-up commit switches the probe
-    // to read the marker file's actual contents and drops `Session.activity`.
     let (state, uptime) = match &our_session {
         Some(s) => {
-            let marker = state_mtime.map(|m| if m >= s.activity { "idle" } else { "busy" });
             let state = resolve_agent_state(s.state, marker);
             (state, Some(format_uptime(remote_now, s.created)))
         }
@@ -327,10 +319,10 @@ mod tests {
         let cfg = test_config();
         let raw = mock_status_output(
             1_700_000_200,
-            "skulk-my-task\t1700000000\t1700000100\t0",
+            "skulk-my-task\t1700000000\t0",
             &[("skulk-my-task", "/home/user/wt/skulk-my-task")],
             true,
-            Some(1_700_000_150),
+            Some("idle"),
             Some(3),
             " 5 files changed, 120 insertions(+), 34 deletions(-)",
         );
@@ -378,7 +370,7 @@ mod tests {
         let cfg = test_config();
         let raw = mock_status_output(
             1_700_000_200,
-            "skulk-busy\t1700000000\t1700000180\t0",
+            "skulk-busy\t1700000000\t0",
             &[("skulk-busy", "/home/user/wt/skulk-busy")],
             true,
             None,
@@ -418,7 +410,7 @@ mod tests {
         let cfg = test_config();
         let raw = mock_status_output(
             1_700_000_200,
-            "skulk-fresh\t1700000000\t1700000100\t0",
+            "skulk-fresh\t1700000000\t0",
             &[("skulk-fresh", "/home/user/wt/skulk-fresh")],
             true,
             None,
@@ -547,10 +539,10 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_status_output(
             1_700_000_200,
-            "skulk-test\t1700000000\t1700000100\t0",
+            "skulk-test\t1700000000\t0",
             &[("skulk-test", "/wt/skulk-test")],
             true,
-            Some(1_700_000_150),
+            Some("idle"),
             Some(2),
             " 2 files changed, 10 insertions(+), 3 deletions(-)",
         ))]);

@@ -1134,10 +1134,10 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_status_output(
             1_700_000_200,
-            "skulk-test\t1700000000\t1700000100\t0",
+            "skulk-test\t1700000000\t0",
             &[("skulk-test", "/wt/skulk-test")],
             true,
-            Some(1_700_000_150),
+            Some("idle"),
             Some(1),
             " 1 file changed, 5 insertions(+)",
         ))]);

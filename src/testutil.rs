@@ -211,8 +211,8 @@ pub(crate) fn mock_list_output(epoch: i64, tmux_lines: &str, worktrees: &[(&str,
 /// Helper: build a mock `status_command` response.
 ///
 /// Sections mirror the delimited layout emitted by `status_command`: epoch,
-/// tmux, worktrees porcelain, branch-exists probe, Stop-hook state mtime,
-/// rev-list count, and `git diff --stat` summary line.
+/// tmux, worktrees porcelain, branch-exists probe, Stop/`UserPromptSubmit`
+/// hook marker contents, rev-list count, and `git diff --stat` summary line.
 ///
 /// `tmux_lines` is inserted verbatim so callers can also pass a `no server
 /// running…` line to exercise the stopped-agent path.
@@ -221,7 +221,7 @@ pub(crate) fn mock_status_output(
     tmux_lines: &str,
     worktrees: &[(&str, &str)],
     branch_exists: bool,
-    state_mtime: Option<i64>,
+    state_marker: Option<&str>,
     commits_ahead: Option<u32>,
     diffstat_line: &str,
 ) -> String {
@@ -244,8 +244,11 @@ pub(crate) fn mock_status_output(
     out.push_str(if branch_exists { "yes\n" } else { "no\n" });
     out.push_str("__BRANCH_EXISTS_END__\n");
     out.push_str("__STATE_START__\n");
-    if let Some(m) = state_mtime {
-        out.push_str(&format!("{m}\n"));
+    if let Some(m) = state_marker {
+        out.push_str(m);
+        if !m.ends_with('\n') {
+            out.push('\n');
+        }
     }
     out.push_str("__STATE_END__\n");
     out.push_str("__REVCOUNT_START__\n");
@@ -262,13 +265,15 @@ pub(crate) fn mock_status_output(
     out
 }
 
-/// Helper: like [`mock_list_output`] but also injects Stop-hook state entries
-/// as `(session_name, mtime_epoch)` pairs.
+/// Helper: like [`mock_list_output`] but also injects Stop/`UserPromptSubmit`
+/// hook marker entries as `(session_name, marker_content)` pairs, where
+/// `marker_content` is the literal string the hooks would have written
+/// (`"idle"` or `"busy"`).
 pub(crate) fn mock_list_output_with_state(
     epoch: i64,
     tmux_lines: &str,
     worktrees: &[(&str, &str)],
-    state: &[(&str, i64)],
+    state: &[(&str, &str)],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("__EPOCH__{epoch}__EPOCH__\n"));
@@ -286,8 +291,8 @@ pub(crate) fn mock_list_output_with_state(
     }
     out.push_str("__WORKTREES_END__\n");
     out.push_str("__STATE_START__\n");
-    for (name, mtime) in state {
-        out.push_str(&format!("{name} {mtime}\n"));
+    for (name, content) in state {
+        out.push_str(&format!("{name} {content}\n"));
     }
     out.push_str("__STATE_END__\n");
     out

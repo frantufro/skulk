@@ -200,7 +200,6 @@ mod tests {
         Session {
             name: name.to_string(),
             created,
-            activity: created,
             state,
             worktree: worktree.map(ToString::to_string),
         }

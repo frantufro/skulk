@@ -9,8 +9,7 @@ use crate::inventory::{
 use crate::ssh::Ssh;
 use crate::util::extract_section;
 
-const TMUX_FORMAT: &str =
-    "#{session_name}\t#{session_created}\t#{session_activity}\t#{session_attached}";
+const TMUX_FORMAT: &str = "#{session_name}\t#{session_created}\t#{session_attached}";
 
 fn parse_remote_epoch(output: &str) -> i64 {
     output
@@ -25,24 +24,28 @@ fn parse_remote_epoch(output: &str) -> i64 {
         })
 }
 
-/// Parse the state-file section into a map of session name -> Stop-hook mtime.
+/// Parse the state-file section into a map of session name -> marker contents.
 ///
-/// Each line is `<session_name> <unix_seconds>`. Lines that fail to parse are
+/// Each line is `<session_name> <busy|idle>`. Lines that fail to parse are
 /// silently ignored — state file infrastructure is delivered by the `wait`
 /// task, and an absent / empty section simply means no idle data is available.
-fn parse_state_map(raw: &str) -> HashMap<String, i64> {
+///
+/// We read contents (not mtime) because `session_activity` does not tick
+/// during Claude's extended-thinking redraws, so an mtime comparison would
+/// misreport mid-thinking agents as idle.
+fn parse_state_map(raw: &str) -> HashMap<String, String> {
     raw.lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
             let name = parts.next()?.to_string();
-            let mtime = parts.next()?.parse::<i64>().ok()?;
-            Some((name, mtime))
+            let content = parts.next()?.to_string();
+            Some((name, content))
         })
         .collect()
 }
 
 /// Build the SSH command for `skulk list`: epoch, tmux sessions, worktrees,
-/// and Stop-hook state files in one call.
+/// and Stop/`UserPromptSubmit` hook marker contents in one call.
 pub(crate) fn list_command(cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     format!(
@@ -54,7 +57,7 @@ pub(crate) fn list_command(cfg: &Config) -> String {
          cd {base_path} && git worktree list --porcelain 2>/dev/null || true && \
          echo __WORKTREES_END__ && \
          echo __STATE_START__ && \
-         for f in ~/.skulk/state/*; do [ -f \"$f\" ] && printf '%s %s\\n' \"$(basename \"$f\")\" \"$(stat -c %Y \"$f\")\"; done 2>/dev/null; \
+         for f in ~/.skulk/state/*; do [ -f \"$f\" ] && printf '%s %s\\n' \"$(basename \"$f\")\" \"$(cat \"$f\")\"; done 2>/dev/null; \
          echo __STATE_END__"
     )
 }
@@ -85,21 +88,12 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     let state_map = parse_state_map(state_raw);
 
     // Join worktree paths and upgrade live sessions to Idle when appropriate.
-    //
-    // Marker synthesis is transitional: the SSH probe still reports the
-    // Stop-hook mtime, so here we translate "mtime >= activity" into a
-    // synthetic "idle"/"busy" marker. A follow-up commit switches the probe
-    // to read the marker file's actual contents and drops `Session.activity`.
     for session in &mut sessions {
         session.worktree = worktree_map.get(&session.name).cloned();
-        let marker = state_map.get(&session.name).map(|m| {
-            if *m >= session.activity {
-                "idle"
-            } else {
-                "busy"
-            }
-        });
-        session.state = resolve_agent_state(session.state, marker);
+        session.state = resolve_agent_state(
+            session.state,
+            state_map.get(&session.name).map(String::as_str),
+        );
     }
 
     // Orphaned worktrees (no matching tmux session) appear as stopped agents
@@ -108,7 +102,6 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
             sessions.push(Session {
                 name: name.clone(),
                 created: 0,
-                activity: 0,
                 state: AgentState::Stopped,
                 worktree: Some(path.clone()),
             });
@@ -146,38 +139,38 @@ mod tests {
 
     #[test]
     fn parse_state_map_parses_lines() {
-        let raw = "skulk-a 1700000000\nskulk-b 1700000050\n";
+        let raw = "skulk-a idle\nskulk-b busy\n";
         let map = parse_state_map(raw);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("skulk-a"), Some(&1_700_000_000));
-        assert_eq!(map.get("skulk-b"), Some(&1_700_000_050));
+        assert_eq!(map.get("skulk-a").map(String::as_str), Some("idle"));
+        assert_eq!(map.get("skulk-b").map(String::as_str), Some("busy"));
     }
 
     #[test]
     fn parse_state_map_skips_malformed_lines() {
-        let raw = "skulk-a 1700000000\nmalformed\nskulk-b not_a_number\nskulk-c 42\n";
+        let raw = "skulk-a idle\nmalformed\nskulk-c busy\n";
         let map = parse_state_map(raw);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("skulk-a"), Some(&1_700_000_000));
-        assert_eq!(map.get("skulk-c"), Some(&42));
+        assert_eq!(map.get("skulk-a").map(String::as_str), Some("idle"));
+        assert_eq!(map.get("skulk-c").map(String::as_str), Some("busy"));
     }
 
     #[test]
     fn parse_list_output_keeps_detached_state_without_state_file() {
         let cfg = test_config();
-        let raw = mock_list_output(1_700_000_000, "skulk-test\t1700000000\t1700000100\t0", &[]);
+        let raw = mock_list_output(1_700_000_000, "skulk-test\t1700000000\t0", &[]);
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions[0].state, AgentState::Detached);
     }
 
     #[test]
-    fn parse_list_output_marks_idle_when_state_mtime_ge_activity() {
+    fn parse_list_output_marks_idle_when_marker_says_idle() {
         let cfg = test_config();
         let raw = mock_list_output_with_state(
             1_700_000_200,
-            "skulk-done\t1700000000\t1700000100\t0",
+            "skulk-done\t1700000000\t0",
             &[],
-            &[("skulk-done", 1_700_000_100)],
+            &[("skulk-done", "idle")],
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
@@ -185,13 +178,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_list_output_keeps_detached_when_activity_after_state_mtime() {
+    fn parse_list_output_keeps_detached_when_marker_says_busy() {
+        // Regression: previously `mtime >= activity` would flip mid-thinking
+        // agents to Idle when `session_activity` froze during ANSI redraws.
+        // Now the marker's literal "busy" content is the source of truth.
         let cfg = test_config();
         let raw = mock_list_output_with_state(
             1_700_000_200,
-            "skulk-busy\t1700000000\t1700000150\t0",
+            "skulk-busy\t1700000000\t0",
             &[],
-            &[("skulk-busy", 1_700_000_100)],
+            &[("skulk-busy", "busy")],
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
@@ -215,7 +211,7 @@ mod tests {
         let cfg = test_config();
         let raw = mock_list_output(
             1_700_000_000,
-            "skulk-test\t1700000000\t1700000100\t0",
+            "skulk-test\t1700000000\t0",
             &[("skulk-test", "/home/user/agents/skulk-test")],
         );
         let (sessions, remote_now) = parse_list_output(&raw, &cfg);
@@ -245,7 +241,7 @@ mod tests {
         let cfg = test_config();
         let raw = mock_list_output(
             1_700_000_000,
-            "skulk-one\t1700000000\t1700000100\t0\nother-session\t1700000000\t1700000100\t0",
+            "skulk-one\t1700000000\t0\nother-session\t1700000000\t0",
             &[],
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
@@ -255,21 +251,21 @@ mod tests {
 
     #[test]
     fn parse_remote_epoch_extracts_epoch() {
-        let output = "__EPOCH__1700000000__EPOCH__\nskulk-test\t1700000000\t1700000100\t0";
+        let output = "__EPOCH__1700000000__EPOCH__\nskulk-test\t1700000000\t0";
         let epoch = parse_remote_epoch(output);
         assert_eq!(epoch, 1700000000);
     }
 
     #[test]
     fn parse_remote_epoch_fallback_on_missing() {
-        let output = "skulk-test\t1700000000\t1700000100\t0";
+        let output = "skulk-test\t1700000000\t0";
         let epoch = parse_remote_epoch(output);
         assert!(epoch > 0);
     }
 
     #[test]
     fn parse_remote_epoch_fallback_on_malformed() {
-        let output = "__EPOCH__abc__EPOCH__\nskulk-test\t1700000000\t1700000100\t0";
+        let output = "__EPOCH__abc__EPOCH__\nskulk-test\t1700000000\t0";
         let epoch = parse_remote_epoch(output);
         assert!(epoch > 0);
     }
@@ -299,7 +295,7 @@ mod tests {
         // Session AND worktree both exist — should appear once as Detached, not also as Stopped
         let raw = mock_list_output(
             1_700_000_000,
-            "skulk-test\t1700000000\t1700000100\t0",
+            "skulk-test\t1700000000\t0",
             &[("skulk-test", "/home/user/agents/skulk-test")],
         );
         let (sessions, _) = parse_list_output(&raw, &cfg);
@@ -312,7 +308,7 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(mock_list_output(
             1_700_000_000,
-            "skulk-test\t1700000000\t1700000100\t0",
+            "skulk-test\t1700000000\t0",
             &[("skulk-test", "/home/user/agents/skulk-test")],
         ))]);
         assert!(cmd_list(&ssh, &cfg).is_ok());
