@@ -85,13 +85,21 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     let state_map = parse_state_map(state_raw);
 
     // Join worktree paths and upgrade live sessions to Idle when appropriate.
+    //
+    // Marker synthesis is transitional: the SSH probe still reports the
+    // Stop-hook mtime, so here we translate "mtime >= activity" into a
+    // synthetic "idle"/"busy" marker. A follow-up commit switches the probe
+    // to read the marker file's actual contents and drops `Session.activity`.
     for session in &mut sessions {
         session.worktree = worktree_map.get(&session.name).cloned();
-        session.state = resolve_agent_state(
-            session.state,
-            session.activity,
-            state_map.get(&session.name).copied(),
-        );
+        let marker = state_map.get(&session.name).map(|m| {
+            if *m >= session.activity {
+                "idle"
+            } else {
+                "busy"
+            }
+        });
+        session.state = resolve_agent_state(session.state, marker);
     }
 
     // Orphaned worktrees (no matching tmux session) appear as stopped agents

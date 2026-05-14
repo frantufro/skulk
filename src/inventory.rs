@@ -70,22 +70,21 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
         .collect()
 }
 
-/// Upgrade a live session's state to `Idle` when the Stop-hook marker is at
-/// least as recent as the tmux activity timestamp. `Stopped` is preserved.
+/// Upgrade a live session's state to `Idle` when the marker says so.
+/// `Stopped` is preserved.
 ///
-/// The Stop hook fires just after Claude writes its last output, so when idle
-/// `state_mtime >= activity`. When Claude resumes, new output bumps `activity`
-/// above `state_mtime` until the next turn ends.
-pub(crate) fn resolve_agent_state(
-    state: AgentState,
-    activity: i64,
-    state_mtime: Option<i64>,
-) -> AgentState {
+/// The hooks installed at agent creation write `idle` (Stop hook, when Claude
+/// finishes a turn) or `busy` (`UserPromptSubmit` hook, when a turn begins)
+/// to `~/.skulk/state/<session>`. Callers supply the literal marker contents.
+/// Missing or unrecognized contents preserve the tmux state — agents that
+/// have never received a prompt have no marker yet and should remain
+/// Attached/Detached, not be upgraded to Idle.
+pub(crate) fn resolve_agent_state(state: AgentState, marker: Option<&str>) -> AgentState {
     if state == AgentState::Stopped {
         return AgentState::Stopped;
     }
-    match state_mtime {
-        Some(m) if m >= activity => AgentState::Idle,
+    match marker.map(str::trim) {
+        Some("idle") => AgentState::Idle,
         _ => state,
     }
 }
@@ -249,11 +248,12 @@ mod tests {
     #[test]
     fn resolve_agent_state_stopped_when_session_gone() {
         assert_eq!(
-            resolve_agent_state(AgentState::Stopped, 0, None),
+            resolve_agent_state(AgentState::Stopped, None),
             AgentState::Stopped
         );
+        // Stop wins over any marker content.
         assert_eq!(
-            resolve_agent_state(AgentState::Stopped, 1000, Some(2000)),
+            resolve_agent_state(AgentState::Stopped, Some("idle")),
             AgentState::Stopped
         );
     }
@@ -261,36 +261,56 @@ mod tests {
     #[test]
     fn resolve_agent_state_preserves_live_state_without_marker() {
         assert_eq!(
-            resolve_agent_state(AgentState::Detached, 1000, None),
+            resolve_agent_state(AgentState::Detached, None),
             AgentState::Detached
         );
         assert_eq!(
-            resolve_agent_state(AgentState::Attached, 1000, None),
+            resolve_agent_state(AgentState::Attached, None),
             AgentState::Attached
         );
     }
 
     #[test]
-    fn resolve_agent_state_idle_when_mtime_ge_activity() {
+    fn resolve_agent_state_idle_when_marker_says_idle() {
         assert_eq!(
-            resolve_agent_state(AgentState::Detached, 1000, Some(1000)),
+            resolve_agent_state(AgentState::Detached, Some("idle")),
             AgentState::Idle
         );
         assert_eq!(
-            resolve_agent_state(AgentState::Attached, 1000, Some(1005)),
+            resolve_agent_state(AgentState::Attached, Some("idle")),
             AgentState::Idle
         );
     }
 
     #[test]
-    fn resolve_agent_state_working_when_activity_after_mtime() {
+    fn resolve_agent_state_keeps_live_state_when_marker_says_busy() {
         assert_eq!(
-            resolve_agent_state(AgentState::Detached, 2000, Some(1000)),
+            resolve_agent_state(AgentState::Detached, Some("busy")),
             AgentState::Detached
         );
         assert_eq!(
-            resolve_agent_state(AgentState::Attached, 2000, Some(1000)),
+            resolve_agent_state(AgentState::Attached, Some("busy")),
             AgentState::Attached
+        );
+    }
+
+    #[test]
+    fn resolve_agent_state_preserves_live_state_for_unknown_marker() {
+        assert_eq!(
+            resolve_agent_state(AgentState::Detached, Some("missing")),
+            AgentState::Detached
+        );
+        assert_eq!(
+            resolve_agent_state(AgentState::Detached, Some("")),
+            AgentState::Detached
+        );
+    }
+
+    #[test]
+    fn resolve_agent_state_tolerates_trailing_whitespace_in_marker() {
+        assert_eq!(
+            resolve_agent_state(AgentState::Detached, Some("idle\n")),
+            AgentState::Idle
         );
     }
 
