@@ -311,6 +311,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_agent_state_treats_marker_with_internal_whitespace_as_unknown() {
+        // The match is exact against the literal token "idle" after trimming
+        // outer whitespace. A marker like "idle stale" — which could arise if
+        // a future hook tries to append a timestamp without updating the
+        // parser — is treated as unknown and the live tmux state is preserved.
+        // Locks current behavior: marker content MUST be a single whitespace-
+        // free token. Changing this requires updating the parser intentionally.
+        assert_eq!(
+            resolve_agent_state(AgentState::Detached, Some("idle stale")),
+            AgentState::Detached
+        );
+        assert_eq!(
+            resolve_agent_state(AgentState::Attached, Some("idle stale")),
+            AgentState::Attached
+        );
+    }
+
     // ── GcOrphans ───────────────────────────────────────────────────────
 
     #[test]
