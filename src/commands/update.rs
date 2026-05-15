@@ -415,6 +415,12 @@ mod tests {
     #[test]
     #[serial]
     fn check_staleness_returns_update_when_newer_available() {
+        // Derive the mock "latest" from the current crate version so this test
+        // stays correct as we bump the version. Bumping major+1 is unambiguous
+        // under semver: it cannot accidentally be equal to or less than current.
+        let current_ver = parse_version(env!("CARGO_PKG_VERSION")).unwrap();
+        let mock_latest = format!("v{}.0.0", current_ver.major + 1);
+
         let test_dir =
             std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
         let _ = std::fs::create_dir_all(&test_dir);
@@ -423,7 +429,7 @@ mod tests {
             std::env::set_var("SKULK_TEST_CACHE_DIR", test_dir.to_str().unwrap());
         }
         let release = ReleaseInfo {
-            tag_name: "v0.4.3".into(),
+            tag_name: mock_latest.clone(),
             assets: vec![],
         };
         let client = MockHttpClient {
@@ -434,7 +440,7 @@ mod tests {
         let result = check_staleness(&client);
         assert!(result.is_some());
         let (latest, current) = result.unwrap();
-        assert_eq!(latest, "v0.4.3");
+        assert_eq!(latest, mock_latest);
         assert_eq!(current, env!("CARGO_PKG_VERSION"));
         let _ = std::fs::remove_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
