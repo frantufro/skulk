@@ -701,6 +701,9 @@ mod tests {
     use crate::config::Config;
     use crate::testutil::{MockPrompter, MockSsh, ssh_ok};
 
+    // Signature must match the `&dyn Fn(&str) -> Result<(), SkulkError>` that
+    // `run_wizard` accepts for its SSH probe; the wrap is API, not vestigial.
+    #[allow(clippy::unnecessary_wraps)]
     fn mock_ssh_test_ok(_host: &str) -> Result<(), SkulkError> {
         Ok(())
     }

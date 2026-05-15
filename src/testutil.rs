@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::commands::init::Prompter;
@@ -29,6 +30,12 @@ macro_rules! assert_err {
 pub(crate) use assert_err;
 
 /// Short-hand for a successful, empty SSH response.
+///
+/// Returns a wrapped `Ok` rather than the bare `String` so the same call shape
+/// can sit next to [`ssh_err`] inside `MockSsh::new(vec![...])`, which expects
+/// `Result<String, SkulkError>`. Removing the wrap would force every call site
+/// to write `Ok(ssh_ok())` instead.
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn ssh_ok() -> Result<String, SkulkError> {
     Ok(String::new())
 }
@@ -156,14 +163,16 @@ pub(crate) fn mock_inventory(
     out.push_str("__SESSIONS_END__\n");
     out.push_str("__WORKTREES_START__\n");
     for (branch, path) in worktrees {
-        out.push_str(&format!(
-            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n\n"
-        ));
+        writeln!(
+            out,
+            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n"
+        )
+        .expect("writing to String is infallible");
     }
     out.push_str("__WORKTREES_END__\n");
     out.push_str("__BRANCHES_START__\n");
     for b in branches {
-        out.push_str(&format!("  {b}\n"));
+        writeln!(out, "  {b}").expect("writing to String is infallible");
     }
     out.push_str("__BRANCHES_END__\n");
     out
@@ -201,7 +210,7 @@ impl Prompter for MockPrompter {
     }
 }
 
-/// Helper: build a mock list_command response with epoch, tmux sessions, and worktrees.
+/// Helper: build a mock `list_command` response with epoch, tmux sessions, and worktrees.
 /// The state section is emitted empty; use [`mock_list_output_with_state`] to
 /// populate Stop-hook state files for idle-column tests.
 pub(crate) fn mock_list_output(epoch: i64, tmux_lines: &str, worktrees: &[(&str, &str)]) -> String {
@@ -226,7 +235,7 @@ pub(crate) fn mock_status_output(
     diffstat_line: &str,
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("__EPOCH__{epoch}__EPOCH__\n"));
+    writeln!(out, "__EPOCH__{epoch}__EPOCH__").expect("writing to String is infallible");
     out.push_str("__TMUX_START__\n");
     out.push_str(tmux_lines);
     if !tmux_lines.is_empty() && !tmux_lines.ends_with('\n') {
@@ -235,9 +244,11 @@ pub(crate) fn mock_status_output(
     out.push_str("__TMUX_END__\n");
     out.push_str("__WORKTREES_START__\n");
     for (branch, path) in worktrees {
-        out.push_str(&format!(
-            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n\n"
-        ));
+        writeln!(
+            out,
+            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n"
+        )
+        .expect("writing to String is infallible");
     }
     out.push_str("__WORKTREES_END__\n");
     out.push_str("__BRANCH_EXISTS_START__\n");
@@ -253,7 +264,7 @@ pub(crate) fn mock_status_output(
     out.push_str("__STATE_END__\n");
     out.push_str("__REVCOUNT_START__\n");
     if let Some(c) = commits_ahead {
-        out.push_str(&format!("{c}\n"));
+        writeln!(out, "{c}").expect("writing to String is infallible");
     }
     out.push_str("__REVCOUNT_END__\n");
     out.push_str("__DIFFSTAT_START__\n");
@@ -276,7 +287,7 @@ pub(crate) fn mock_list_output_with_state(
     state: &[(&str, &str)],
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("__EPOCH__{epoch}__EPOCH__\n"));
+    writeln!(out, "__EPOCH__{epoch}__EPOCH__").expect("writing to String is infallible");
     out.push_str("__TMUX_START__\n");
     out.push_str(tmux_lines);
     if !tmux_lines.is_empty() && !tmux_lines.ends_with('\n') {
@@ -285,14 +296,16 @@ pub(crate) fn mock_list_output_with_state(
     out.push_str("__TMUX_END__\n");
     out.push_str("__WORKTREES_START__\n");
     for (branch, path) in worktrees {
-        out.push_str(&format!(
-            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n\n"
-        ));
+        writeln!(
+            out,
+            "worktree {path}\nHEAD abc123\nbranch refs/heads/{branch}\n"
+        )
+        .expect("writing to String is infallible");
     }
     out.push_str("__WORKTREES_END__\n");
     out.push_str("__STATE_START__\n");
     for (name, content) in state {
-        out.push_str(&format!("{name} {content}\n"));
+        writeln!(out, "{name} {content}").expect("writing to String is infallible");
     }
     out.push_str("__STATE_END__\n");
     out
