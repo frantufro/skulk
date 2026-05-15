@@ -309,10 +309,9 @@ mod tests {
     fn completions_rejects_invalid_shell() {
         // clap's ValueEnum should refuse anything outside {bash, zsh, fish}
         // with a clear error pointing at possible values.
-        // Not using expect_err() because Cli doesn't impl Debug.
-        let err = match Cli::try_parse_from(["skulk", "completions", "powershell"]) {
-            Ok(_) => panic!("expected parse error for unsupported shell"),
-            Err(e) => e,
+        // `let...else` instead of `expect_err()` because `Cli` doesn't impl Debug.
+        let Err(err) = Cli::try_parse_from(["skulk", "completions", "powershell"]) else {
+            panic!("expected parse error for unsupported shell");
         };
         let rendered = err.to_string();
         assert!(

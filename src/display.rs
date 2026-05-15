@@ -209,27 +209,27 @@ mod tests {
 
     #[test]
     fn format_uptime_minutes() {
-        assert_eq!(format_uptime(1000090, 1000000), "1m");
+        assert_eq!(format_uptime(1_000_090, 1_000_000), "1m");
     }
 
     #[test]
     fn format_uptime_hours_and_minutes() {
-        assert_eq!(format_uptime(1003700, 1000000), "1h 1m");
+        assert_eq!(format_uptime(1_003_700, 1_000_000), "1h 1m");
     }
 
     #[test]
     fn format_uptime_days_and_hours() {
-        assert_eq!(format_uptime(1090000, 1000000), "1d 1h");
+        assert_eq!(format_uptime(1_090_000, 1_000_000), "1d 1h");
     }
 
     #[test]
     fn format_uptime_negative_returns_just_now() {
-        assert_eq!(format_uptime(1000000, 1000100), "just now");
+        assert_eq!(format_uptime(1_000_000, 1_000_100), "just now");
     }
 
     #[test]
     fn format_uptime_zero_returns_0m() {
-        assert_eq!(format_uptime(1000000, 1000000), "0m");
+        assert_eq!(format_uptime(1_000_000, 1_000_000), "0m");
     }
 
     // ── format_sessions_table ───────────────────────────────────────────
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn format_sessions_table_empty() {
         let cfg = test_config();
-        let result = format_sessions_table(&[], 1000000, &cfg);
+        let result = format_sessions_table(&[], 1_000_000, &cfg);
         assert_eq!(
             result,
             "No agents running.\nUse `skulk new <name>` to create one."
@@ -247,8 +247,8 @@ mod tests {
     #[test]
     fn format_sessions_table_has_header() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-test", 1000000, AgentState::Detached, None)];
-        let result = format_sessions_table(&sessions, 1000090, &cfg);
+        let sessions = vec![sess("skulk-test", 1_000_000, AgentState::Detached, None)];
+        let result = format_sessions_table(&sessions, 1_000_090, &cfg);
         let first_line = result.lines().next().unwrap();
         assert!(first_line.contains("NAME"));
         assert!(first_line.contains("STATUS"));
@@ -261,24 +261,34 @@ mod tests {
     #[test]
     fn format_sessions_table_attached_status() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-attached", 1000000, AgentState::Attached, None)];
-        let result = format_sessions_table(&sessions, 1000090, &cfg);
+        let sessions = vec![sess(
+            "skulk-attached",
+            1_000_000,
+            AgentState::Attached,
+            None,
+        )];
+        let result = format_sessions_table(&sessions, 1_000_090, &cfg);
         assert!(result.contains("attached"));
     }
 
     #[test]
     fn format_sessions_table_detached_status() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-detached", 1000000, AgentState::Detached, None)];
-        let result = format_sessions_table(&sessions, 1000090, &cfg);
+        let sessions = vec![sess(
+            "skulk-detached",
+            1_000_000,
+            AgentState::Detached,
+            None,
+        )];
+        let result = format_sessions_table(&sessions, 1_000_090, &cfg);
         assert!(result.contains("detached"));
     }
 
     #[test]
     fn format_sessions_table_worktree_placeholder() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-wt", 1000000, AgentState::Detached, None)];
-        let result = format_sessions_table(&sessions, 1000090, &cfg);
+        let sessions = vec![sess("skulk-wt", 1_000_000, AgentState::Detached, None)];
+        let result = format_sessions_table(&sessions, 1_000_090, &cfg);
         let data_lines: Vec<&str> = result.lines().skip(1).collect();
         assert!(!data_lines.is_empty());
         for line in data_lines {
@@ -291,19 +301,19 @@ mod tests {
         let cfg = test_config();
         let sessions = vec![sess(
             "skulk-test",
-            1000000,
+            1_000_000,
             AgentState::Detached,
             Some("~/test-project-worktrees/skulk-test"),
         )];
-        let result = format_sessions_table(&sessions, 1000090, &cfg);
+        let result = format_sessions_table(&sessions, 1_000_090, &cfg);
         assert!(result.contains("~/test-project-worktrees/skulk-test"));
     }
 
     #[test]
     fn format_sessions_table_strips_agent_prefix_from_name() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-my-task", 1000000, AgentState::Detached, None)];
-        let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
+        let sessions = vec![sess("skulk-my-task", 1_000_000, AgentState::Detached, None)];
+        let result = format_sessions_table_with_color(&sessions, 1_000_090, false, &cfg);
         let data_line = result.lines().nth(1).unwrap();
         assert!(data_line.starts_with("my-task"));
         assert!(!data_line.starts_with("skulk-"));
@@ -318,7 +328,7 @@ mod tests {
             AgentState::Stopped,
             Some("~/test-project-worktrees/skulk-zombie"),
         )];
-        let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
+        let result = format_sessions_table_with_color(&sessions, 1_000_090, false, &cfg);
         assert!(
             result.contains("stopped"),
             "should show stopped status: {result}"
@@ -334,7 +344,7 @@ mod tests {
             AgentState::Stopped,
             Some("~/test-project-worktrees/skulk-zombie"),
         )];
-        let result = format_sessions_table_with_color(&sessions, 1000090, false, &cfg);
+        let result = format_sessions_table_with_color(&sessions, 1_000_090, false, &cfg);
         let data_line = result.lines().nth(1).unwrap();
         assert!(
             data_line.contains("stopped"),
@@ -349,9 +359,10 @@ mod tests {
     #[test]
     fn format_sessions_table_shows_idle_state_value() {
         let cfg = test_config();
-        let working = sess("skulk-busy", 1000000, AgentState::Detached, None);
-        let idle_agent = sess("skulk-done", 1000000, AgentState::Idle, None);
-        let result = format_sessions_table_with_color(&[working, idle_agent], 1000090, false, &cfg);
+        let working = sess("skulk-busy", 1_000_000, AgentState::Detached, None);
+        let idle_agent = sess("skulk-done", 1_000_000, AgentState::Idle, None);
+        let result =
+            format_sessions_table_with_color(&[working, idle_agent], 1_000_090, false, &cfg);
         assert!(result.contains("detached"));
         assert!(result.contains("idle"));
     }
@@ -359,8 +370,8 @@ mod tests {
     #[test]
     fn format_sessions_table_idle_highlighted_in_color() {
         let cfg = test_config();
-        let s = sess("skulk-done", 1000000, AgentState::Idle, None);
-        let output = format_sessions_table_with_color(&[s], 1000090, true, &cfg);
+        let s = sess("skulk-done", 1_000_000, AgentState::Idle, None);
+        let output = format_sessions_table_with_color(&[s], 1_000_090, true, &cfg);
         // Idle value should appear in bold green; the raw word "idle" is present.
         assert!(output.contains("idle"));
         assert!(output.contains("\x1b[32m"));
@@ -370,8 +381,13 @@ mod tests {
     #[test]
     fn format_sessions_table_contains_color_when_enabled() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-test", 1700000000, AgentState::Detached, None)];
-        let output = format_sessions_table_with_color(&sessions, 1700000200, true, &cfg);
+        let sessions = vec![sess(
+            "skulk-test",
+            1_700_000_000,
+            AgentState::Detached,
+            None,
+        )];
+        let output = format_sessions_table_with_color(&sessions, 1_700_000_200, true, &cfg);
         assert!(output.contains("\x1b[32m"));
         assert!(output.contains("\x1b[0m"));
         assert!(output.contains("\x1b[1m"));
@@ -380,8 +396,13 @@ mod tests {
     #[test]
     fn format_sessions_table_no_color_when_disabled() {
         let cfg = test_config();
-        let sessions = vec![sess("skulk-test", 1700000000, AgentState::Detached, None)];
-        let output = format_sessions_table_with_color(&sessions, 1700000200, false, &cfg);
+        let sessions = vec![sess(
+            "skulk-test",
+            1_700_000_000,
+            AgentState::Detached,
+            None,
+        )];
+        let output = format_sessions_table_with_color(&sessions, 1_700_000_200, false, &cfg);
         assert!(!output.contains("\x1b["));
     }
 

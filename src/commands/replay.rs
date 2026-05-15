@@ -316,6 +316,9 @@ mod tests {
 
     // ── cmd_replay ───────────────────────────────────────────────────────
 
+    // Wrapped in `Ok` so the returned value can be queued directly inside
+    // `MockSsh::new(vec![...])`, which expects `Result<String, SkulkError>`.
+    #[allow(clippy::unnecessary_wraps)]
     fn prompt_read_ok(body: &str) -> Result<String, SkulkError> {
         Ok(body.into())
     }

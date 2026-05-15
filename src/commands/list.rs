@@ -253,7 +253,7 @@ mod tests {
     fn parse_remote_epoch_extracts_epoch() {
         let output = "__EPOCH__1700000000__EPOCH__\nskulk-test\t1700000000\t0";
         let epoch = parse_remote_epoch(output);
-        assert_eq!(epoch, 1700000000);
+        assert_eq!(epoch, 1_700_000_000);
     }
 
     #[test]

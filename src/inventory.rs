@@ -214,7 +214,7 @@ mod tests {
         let sessions = parse_sessions(raw);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "skulk-test");
-        assert_eq!(sessions[0].created, 1700000000);
+        assert_eq!(sessions[0].created, 1_700_000_000);
         assert_eq!(sessions[0].state, AgentState::Detached);
         assert!(sessions[0].worktree.is_none());
     }
