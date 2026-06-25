@@ -9,7 +9,9 @@ use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
-use crate::util::{claude_project_dir_name, remote_claude_project_dir_command, validate_name};
+use crate::util::{
+    branch_to_agent_name, claude_project_dir_name, remote_claude_project_dir_command, validate_name,
+};
 
 /// Local-side operations `skulk upload` needs that are not SSH calls: git
 /// queries against the local repo, local filesystem reads, and temp-file
@@ -90,9 +92,14 @@ pub(crate) fn cmd_upload(
         ));
     }
 
-    // Step 3: Resolve the agent name. With `--to` it's explicit; otherwise the
-    // branch name IS the agent name.
-    let agent_name = to.unwrap_or(local_branch).to_string();
+    // Step 3: Resolve the agent name. With `--to` it's explicit and validated
+    // as typed; otherwise the branch name becomes the agent name, with `/`
+    // namespacing flattened to `-` so namespaced branches (`feat/add-upload`)
+    // are accepted while the remote worktree/state dirs stay flat.
+    let agent_name = match to {
+        Some(name) => name.to_string(),
+        None => branch_to_agent_name(local_branch),
+    };
     validate_name(&agent_name)?;
 
     let agent = AgentRef::new(&agent_name, cfg);
@@ -587,13 +594,44 @@ mod tests {
     }
 
     #[test]
-    fn upload_rejects_invalid_branch_name() {
-        // A slash in the branch name (e.g. feat/x) is rejected by validate_name
-        // before any SSH call — slashes are not allowed in agent names.
+    fn upload_sanitizes_slash_in_branch_to_agent_name() {
+        // A namespaced branch (feat/add-thing) is flattened to a valid agent
+        // name (feat-add-thing) so the remote worktree/state dirs stay flat,
+        // and the import targets the sanitized branch ref.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_empty_inventory()),
+            ssh_ok(), // git fetch
+            ssh_ok(), // worktree + hooks
+            ssh_ok(), // rm remote bundle
+            ssh_ok(), // tmux create
+        ]);
+        let mut local = MockLocalOps::clean();
+        local.branch = Ok("feat/add-thing".into());
+
+        let result = cmd_upload(&ssh, &local, None, false, &cfg);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        let calls = ssh.calls();
+        // The bundle still carries the original local branch, imported as the
+        // sanitized remote branch ref `skulk-feat-add-thing`.
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("git fetch")
+                    && c.contains("feat/add-thing:skulk-feat-add-thing")),
+            "expected fetch importing sanitized branch, got: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn upload_rejects_branch_with_unsanitizable_char() {
+        // A branch with a character that slash-flattening can't fix (a space)
+        // is still rejected by validate_name before any SSH call.
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
         let mut local = MockLocalOps::clean();
-        local.branch = Ok("feat/add-thing".into());
+        local.branch = Ok("feat add thing".into());
 
         let result = cmd_upload(&ssh, &local, None, false, &cfg);
 

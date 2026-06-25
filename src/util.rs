@@ -86,6 +86,20 @@ pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
+/// Derive a valid agent name from a git branch name.
+///
+/// Branch namespacing uses `/` (e.g. `feat/add-upload`), which `validate_name`
+/// rejects because the name becomes a path component of the remote worktree and
+/// state directories. Replacing each `/` with `-` keeps those layouts flat while
+/// letting namespaced branches be uploaded: `feat/add-upload` -> `feat-add-upload`.
+///
+/// Any other character invalid in an agent name is left untouched so the
+/// subsequent `validate_name` call surfaces a clear error rather than this
+/// silently mangling it.
+pub(crate) fn branch_to_agent_name(branch: &str) -> String {
+    branch.replace('/', "-")
+}
+
 /// POSIX single-quote escape: replace `'` with `'\''` for safe SSH -> tmux send-keys transit.
 ///
 /// The caller wraps the result in single quotes: `format!("'{}'", shell_escape(input))`.
@@ -155,6 +169,29 @@ pub(crate) fn confirm_from_reader<R: BufRead>(prompt: &str, reader: &mut R) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── branch_to_agent_name tests ──────────────────────────────────────
+
+    #[test]
+    fn branch_to_agent_name_replaces_slashes() {
+        assert_eq!(branch_to_agent_name("feat/add-upload"), "feat-add-upload");
+    }
+
+    #[test]
+    fn branch_to_agent_name_replaces_nested_slashes() {
+        assert_eq!(branch_to_agent_name("feat/fix/deep"), "feat-fix-deep");
+    }
+
+    #[test]
+    fn branch_to_agent_name_leaves_plain_names_unchanged() {
+        assert_eq!(branch_to_agent_name("my-task"), "my-task");
+    }
+
+    #[test]
+    fn branch_to_agent_name_result_passes_validation() {
+        let name = branch_to_agent_name("feat/add-upload");
+        assert!(validate_name(&name).is_ok());
+    }
 
     // ── validate_name tests ─────────────────────────────────────────────
 
