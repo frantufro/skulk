@@ -1,138 +1,13 @@
-use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use crate::agent_ref::AgentRef;
 use crate::commands::interact::cmd_archive;
+use crate::commands::local_ops::LocalOps;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
 use crate::util::{claude_project_dir_name, remote_claude_project_dir_command, validate_name};
-
-/// Local filesystem and git operations needed by `skulk download`.
-///
-/// Split into a trait so `cmd_download` can be unit-tested with a fully
-/// in-memory mock — none of these touch a real git repo, the user's home
-/// directory, or the working tree during tests.
-pub(crate) trait LocalOps {
-    /// `git status --porcelain` in the current directory. Empty output means
-    /// the working tree is clean.
-    fn git_status(&self) -> Result<String, SkulkError>;
-
-    /// The current working directory.
-    fn current_dir(&self) -> Result<PathBuf, SkulkError>;
-
-    /// Whether a path exists on the local filesystem.
-    fn path_exists(&self, path: &Path) -> bool;
-
-    /// Recursively remove a directory (used by `--force` to clear stale paths).
-    fn remove_dir_all(&self, path: &Path) -> Result<(), SkulkError>;
-
-    /// Recursively create a directory.
-    fn create_dir_all(&self, path: &Path) -> Result<(), SkulkError>;
-
-    /// Create a local git worktree for `branch` at `path`.
-    ///
-    /// Fetches the branch from `origin` first so a branch that only exists on
-    /// the remote host (never pushed) surfaces a helpful error rather than a
-    /// bare `git worktree add` failure.
-    fn create_local_worktree(&self, branch: &str, path: &Path) -> Result<(), SkulkError>;
-
-    /// Remove a previously-created local git worktree at `path`.
-    ///
-    /// Used to roll back after a mid-transfer failure. Best-effort: removal
-    /// failures are surfaced to the caller, which logs them rather than
-    /// masking the original error.
-    fn remove_local_worktree(&self, path: &Path);
-
-    /// The local Claude Code projects directory (`~/.claude/projects`).
-    fn claude_projects_dir(&self) -> PathBuf;
-}
-
-/// Production [`LocalOps`] backed by the real filesystem and `git`.
-pub(crate) struct RealLocalOps;
-
-impl RealLocalOps {
-    /// Run a local `git` invocation, returning trimmed stdout on success or a
-    /// `SkulkError::SshFailed` carrying stderr on failure.
-    fn run_git(args: &[&str]) -> Result<String, SkulkError> {
-        let output = ProcessCommand::new("git")
-            .args(args)
-            .output()
-            .map_err(|e| SkulkError::SshExec(format!("failed to run git: {e}")))?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(SkulkError::SshFailed(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ))
-        }
-    }
-}
-
-impl LocalOps for RealLocalOps {
-    fn git_status(&self) -> Result<String, SkulkError> {
-        Self::run_git(&["status", "--porcelain"])
-    }
-
-    fn current_dir(&self) -> Result<PathBuf, SkulkError> {
-        std::env::current_dir()
-            .map_err(|e| SkulkError::Validation(format!("Cannot determine current directory: {e}")))
-    }
-
-    fn path_exists(&self, path: &Path) -> bool {
-        path.exists()
-    }
-
-    fn remove_dir_all(&self, path: &Path) -> Result<(), SkulkError> {
-        std::fs::remove_dir_all(path).map_err(|e| {
-            SkulkError::Validation(format!("Failed to remove {}: {e}", path.display()))
-        })
-    }
-
-    fn create_dir_all(&self, path: &Path) -> Result<(), SkulkError> {
-        std::fs::create_dir_all(path).map_err(|e| {
-            SkulkError::Validation(format!("Failed to create {}: {e}", path.display()))
-        })
-    }
-
-    fn create_local_worktree(&self, branch: &str, path: &Path) -> Result<(), SkulkError> {
-        // Fetch the branch from origin first. If the branch was never pushed,
-        // this fails and we surface a guiding error pointing at `skulk push`.
-        if Self::run_git(&["fetch", "origin", branch]).is_err() {
-            return Err(SkulkError::Diagnostic {
-                message: format!("Branch '{branch}' is not on origin."),
-                suggestion: format!(
-                    "Run `skulk push {branch}` (or push the branch to origin) and retry."
-                ),
-            });
-        }
-        // Prune stale per-worktree metadata under `.git/worktrees/<name>`.
-        // A `--force` re-download removes the worktree directory from the
-        // filesystem but leaves git's bookkeeping behind; without pruning,
-        // `git worktree add` below fails with "already registered".
-        Self::run_git(&["worktree", "prune"])?;
-        let path_str = path.to_string_lossy();
-        Self::run_git(&["worktree", "add", &path_str, branch]).map(|_| ())
-    }
-
-    fn remove_local_worktree(&self, path: &Path) {
-        // `git worktree remove --force` clears both the directory and git's
-        // per-worktree metadata, leaving no stale registration behind.
-        let path_str = path.to_string_lossy();
-        if let Err(e) = Self::run_git(&["worktree", "remove", "--force", &path_str]) {
-            eprintln!(
-                "Warning: failed to roll back worktree {}: {e}",
-                path.display()
-            );
-        }
-    }
-
-    fn claude_projects_dir(&self) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".claude").join("projects")
-    }
-}
 
 /// Resolve the local machine's hostname for the auto-archive reason annotation.
 ///
@@ -171,7 +46,7 @@ fn local_hostname() -> String {
 /// remote agent (tmux session killed, worktree and branch preserved).
 pub(crate) fn cmd_download(
     ssh: &impl Ssh,
-    local: &impl LocalOps,
+    local: &dyn LocalOps,
     name: &str,
     force: bool,
     cfg: &Config,
@@ -289,91 +164,12 @@ pub(crate) fn cmd_download(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::collections::HashSet;
+    use std::path::PathBuf;
 
     use super::*;
-    use crate::testutil::{MockSsh, mock_empty_inventory, mock_inventory, ssh_ok, test_config};
-
-    /// In-memory [`LocalOps`] for deterministic `cmd_download` tests.
-    struct MockLocalOps {
-        git_status: String,
-        cwd: PathBuf,
-        existing_paths: HashSet<PathBuf>,
-        claude_projects: PathBuf,
-        worktree_result: RefCell<Option<Result<(), SkulkError>>>,
-        removed: RefCell<Vec<PathBuf>>,
-        created_worktrees: RefCell<Vec<(String, PathBuf)>>,
-        removed_worktrees: RefCell<Vec<PathBuf>>,
-    }
-
-    impl MockLocalOps {
-        fn clean() -> Self {
-            Self {
-                git_status: String::new(),
-                cwd: PathBuf::from("/home/user/project"),
-                existing_paths: HashSet::new(),
-                claude_projects: PathBuf::from("/home/user/.claude/projects"),
-                worktree_result: RefCell::new(None),
-                removed: RefCell::new(Vec::new()),
-                created_worktrees: RefCell::new(Vec::new()),
-                removed_worktrees: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn with_dirty(mut self, status: &str) -> Self {
-            self.git_status = status.to_string();
-            self
-        }
-
-        fn with_existing(mut self, path: &str) -> Self {
-            self.existing_paths.insert(PathBuf::from(path));
-            self
-        }
-
-        fn with_worktree_err(self, err: SkulkError) -> Self {
-            *self.worktree_result.borrow_mut() = Some(Err(err));
-            self
-        }
-    }
-
-    impl LocalOps for MockLocalOps {
-        fn git_status(&self) -> Result<String, SkulkError> {
-            Ok(self.git_status.clone())
-        }
-
-        fn current_dir(&self) -> Result<PathBuf, SkulkError> {
-            Ok(self.cwd.clone())
-        }
-
-        fn path_exists(&self, path: &Path) -> bool {
-            self.existing_paths.contains(path)
-        }
-
-        fn remove_dir_all(&self, path: &Path) -> Result<(), SkulkError> {
-            self.removed.borrow_mut().push(path.to_path_buf());
-            Ok(())
-        }
-
-        fn create_dir_all(&self, _path: &Path) -> Result<(), SkulkError> {
-            Ok(())
-        }
-
-        fn create_local_worktree(&self, branch: &str, path: &Path) -> Result<(), SkulkError> {
-            self.created_worktrees
-                .borrow_mut()
-                .push((branch.to_string(), path.to_path_buf()));
-            self.worktree_result.borrow_mut().take().unwrap_or(Ok(()))
-        }
-
-        fn remove_local_worktree(&self, path: &Path) {
-            self.removed_worktrees.borrow_mut().push(path.to_path_buf());
-        }
-
-        fn claude_projects_dir(&self) -> PathBuf {
-            self.claude_projects.clone()
-        }
-    }
+    use crate::testutil::{
+        MockLocalOps, MockSsh, mock_empty_inventory, mock_inventory, ssh_ok, test_config,
+    };
 
     /// Inventory in which `name` (session-prefixed) has a worktree on the remote.
     fn inventory_with_agent(session_name: &str) -> String {

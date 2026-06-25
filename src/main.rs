@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use commands::upload::LocalOps;
+use commands::local_ops::LocalOps;
 use commands::{
     completions, destroy, doctor, download, gc, interact, list, new, prompt_source, pull, replay,
     restart, ship, status, update, upload, wait,
@@ -611,9 +611,7 @@ pub(crate) fn run(
         }
         Commands::Update => update::cmd_update(&update::UreqClient),
         Commands::Upload { to, force } => upload::cmd_upload(ssh, local, to.as_deref(), force, cfg),
-        Commands::Download { name, force } => {
-            download::cmd_download(ssh, &download::RealLocalOps, &name, force, cfg)
-        }
+        Commands::Download { name, force } => download::cmd_download(ssh, local, &name, force, cfg),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))

@@ -275,7 +275,7 @@ impl RealLocalOps {
     }
 }
 
-impl crate::commands::upload::LocalOps for RealLocalOps {
+impl crate::commands::local_ops::LocalOps for RealLocalOps {
     fn git_status(&self) -> Result<String, SkulkError> {
         self.git(&["status", "--porcelain"])
     }
@@ -331,6 +331,60 @@ impl crate::commands::upload::LocalOps for RealLocalOps {
         std::fs::remove_file(path).map_err(|e| {
             SkulkError::Validation(format!("failed to remove {}: {e}", path.display()))
         })
+    }
+
+    fn current_dir(&self) -> Result<std::path::PathBuf, SkulkError> {
+        std::env::current_dir()
+            .map_err(|e| SkulkError::Validation(format!("Cannot determine current directory: {e}")))
+    }
+
+    fn path_exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> Result<(), SkulkError> {
+        std::fs::remove_dir_all(path).map_err(|e| {
+            SkulkError::Validation(format!("Failed to remove {}: {e}", path.display()))
+        })
+    }
+
+    fn create_dir_all(&self, path: &Path) -> Result<(), SkulkError> {
+        std::fs::create_dir_all(path).map_err(|e| {
+            SkulkError::Validation(format!("Failed to create {}: {e}", path.display()))
+        })
+    }
+
+    fn create_local_worktree(&self, branch: &str, path: &Path) -> Result<(), SkulkError> {
+        // Fetch the branch from origin first. If the branch was never pushed,
+        // this fails and we surface a guiding error pointing at `skulk push`.
+        if self.git(&["fetch", "origin", branch]).is_err() {
+            return Err(SkulkError::Diagnostic {
+                message: format!("Branch '{branch}' is not on origin."),
+                suggestion: format!(
+                    "Run `skulk push {branch}` (or push the branch to origin) and retry."
+                ),
+            });
+        }
+        // Prune stale per-worktree metadata under `.git/worktrees/<name>`.
+        // A `--force` re-download removes the worktree directory from the
+        // filesystem but leaves git's bookkeeping behind; without pruning,
+        // `git worktree add` below fails with "already registered".
+        self.git(&["worktree", "prune"])?;
+        let path_str = path.to_string_lossy();
+        self.git(&["worktree", "add", &path_str, branch])
+            .map(|_| ())
+    }
+
+    fn remove_local_worktree(&self, path: &Path) {
+        // `git worktree remove --force` clears both the directory and git's
+        // per-worktree metadata, leaving no stale registration behind.
+        let path_str = path.to_string_lossy();
+        if let Err(e) = self.git(&["worktree", "remove", "--force", &path_str]) {
+            eprintln!(
+                "Warning: failed to roll back worktree {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 

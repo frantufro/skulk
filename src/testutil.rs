@@ -1,10 +1,10 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::commands::init::Prompter;
-use crate::commands::upload::LocalOps;
+use crate::commands::local_ops::LocalOps;
 use crate::config::{Config, OutputFormat};
 use crate::error::SkulkError;
 use crate::inventory::AgentInventory;
@@ -346,13 +346,20 @@ pub(crate) fn mock_list_output_with_state(
     out
 }
 
-/// Configurable [`LocalOps`] double for `skulk upload` tests.
+/// Configurable [`LocalOps`] double for `skulk upload` and `skulk download`
+/// tests.
 ///
 /// Each field backs one trait method. Defaults (via [`MockLocalOps::clean`])
-/// describe a clean repo on branch `feature` with no Claude session history,
-/// so the happy path needs no overrides. `removed` records `remove_file` calls
-/// so tests can assert the temp-bundle cleanup ran.
+/// describe a clean working tree on branch `feature` with no Claude session
+/// history, so the happy path needs no overrides.
+///
+/// The `removed` vec records both `remove_file` (upload's temp-bundle cleanup)
+/// and `remove_dir_all` (download's `--force` / rollback cleanup) calls, so
+/// either command's tests can assert the relevant path was removed. The
+/// `created_worktrees` / `removed_worktrees` vecs back `create_local_worktree`
+/// / `remove_local_worktree` for the download flow.
 pub(crate) struct MockLocalOps {
+    // Upload-oriented fields.
     pub status: Result<String, SkulkError>,
     pub branch: Result<String, SkulkError>,
     pub bundle: Result<(), SkulkError>,
@@ -362,6 +369,12 @@ pub(crate) struct MockLocalOps {
     pub bundle_path: PathBuf,
     pub remove: Result<(), SkulkError>,
     pub removed: RefCell<Vec<PathBuf>>,
+    // Download-oriented fields.
+    pub cwd: PathBuf,
+    pub existing_paths: HashSet<PathBuf>,
+    pub worktree_result: RefCell<Option<Result<(), SkulkError>>>,
+    pub created_worktrees: RefCell<Vec<(String, PathBuf)>>,
+    pub removed_worktrees: RefCell<Vec<PathBuf>>,
 }
 
 impl MockLocalOps {
@@ -371,13 +384,36 @@ impl MockLocalOps {
             status: Ok(String::new()),
             branch: Ok("feature".into()),
             bundle: Ok(()),
-            projects_dir: PathBuf::from("/home/local/.claude/projects"),
+            projects_dir: PathBuf::from("/home/user/.claude/projects"),
             files: Ok(vec![]),
             root: PathBuf::from("/home/local/skulk"),
             bundle_path: PathBuf::from("/tmp/skulk-upload-feature.bundle"),
             remove: Ok(()),
             removed: RefCell::new(vec![]),
+            cwd: PathBuf::from("/home/user/project"),
+            existing_paths: HashSet::new(),
+            worktree_result: RefCell::new(None),
+            created_worktrees: RefCell::new(Vec::new()),
+            removed_worktrees: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Mark the working tree as dirty with the given `git status --porcelain`.
+    pub fn with_dirty(mut self, status: &str) -> Self {
+        self.status = Ok(status.to_string());
+        self
+    }
+
+    /// Register a path that [`LocalOps::path_exists`] should report as present.
+    pub fn with_existing(mut self, path: &str) -> Self {
+        self.existing_paths.insert(PathBuf::from(path));
+        self
+    }
+
+    /// Make the next [`LocalOps::create_local_worktree`] call return `err`.
+    pub fn with_worktree_err(self, err: SkulkError) -> Self {
+        *self.worktree_result.borrow_mut() = Some(Err(err));
+        self
     }
 }
 
@@ -385,14 +421,14 @@ impl LocalOps for MockLocalOps {
     fn git_status(&self) -> Result<String, SkulkError> {
         self.status.clone()
     }
+    fn claude_projects_dir(&self) -> PathBuf {
+        self.projects_dir.clone()
+    }
     fn git_current_branch(&self) -> Result<String, SkulkError> {
         self.branch.clone()
     }
     fn create_git_bundle(&self, _branch: &str, _dest: &Path) -> Result<(), SkulkError> {
         self.bundle.clone()
-    }
-    fn claude_projects_dir(&self) -> PathBuf {
-        self.projects_dir.clone()
     }
     fn list_dir_files(&self, _dir: &Path) -> Result<Vec<PathBuf>, SkulkError> {
         self.files.clone()
@@ -406,6 +442,28 @@ impl LocalOps for MockLocalOps {
     fn remove_file(&self, path: &Path) -> Result<(), SkulkError> {
         self.removed.borrow_mut().push(path.to_path_buf());
         self.remove.clone()
+    }
+    fn current_dir(&self) -> Result<PathBuf, SkulkError> {
+        Ok(self.cwd.clone())
+    }
+    fn path_exists(&self, path: &Path) -> bool {
+        self.existing_paths.contains(path)
+    }
+    fn remove_dir_all(&self, path: &Path) -> Result<(), SkulkError> {
+        self.removed.borrow_mut().push(path.to_path_buf());
+        Ok(())
+    }
+    fn create_dir_all(&self, _path: &Path) -> Result<(), SkulkError> {
+        Ok(())
+    }
+    fn create_local_worktree(&self, branch: &str, path: &Path) -> Result<(), SkulkError> {
+        self.created_worktrees
+            .borrow_mut()
+            .push((branch.to_string(), path.to_path_buf()));
+        self.worktree_result.borrow_mut().take().unwrap_or(Ok(()))
+    }
+    fn remove_local_worktree(&self, path: &Path) {
+        self.removed_worktrees.borrow_mut().push(path.to_path_buf());
     }
 }
 
