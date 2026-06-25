@@ -100,8 +100,8 @@ pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
 /// Build the SSH command to write an archive reason sidecar file.
 ///
 /// Stored at `~/.skulk/archive/<session_name>.txt` so callers can later
-/// inspect why an agent was archived. `reason` must already be
-/// `shell_escape`d by the caller.
+/// inspect why an agent was archived. `reason` must be the raw, unescaped
+/// string; this function applies `shell_escape` internally.
 pub(crate) fn archive_reason_command(session_name: &str, reason: &str) -> String {
     format!(
         "mkdir -p ~/.skulk/archive && printf '%s' '{}' > ~/.skulk/archive/{session_name}.txt",

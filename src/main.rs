@@ -1061,6 +1061,19 @@ mod tests {
     }
 
     #[test]
+    fn archive_accepts_reason_flag() {
+        let cli = Cli::try_parse_from(["skulk", "archive", "agent", "--reason", "PR merged"])
+            .expect("--reason should parse");
+        match cli.command {
+            Commands::Archive { name, reason } => {
+                assert_eq!(name, "agent");
+                assert_eq!(reason.as_deref(), Some("PR merged"));
+            }
+            _ => panic!("expected Commands::Archive"),
+        }
+    }
+
+    #[test]
     fn run_dispatches_restart() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
