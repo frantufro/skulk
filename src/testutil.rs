@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::commands::init::Prompter;
-use crate::config::Config;
+use crate::config::{Config, OutputFormat};
 use crate::error::SkulkError;
 use crate::inventory::AgentInventory;
 use crate::ssh::Ssh;
@@ -47,6 +47,11 @@ pub(crate) fn ssh_err(msg: &str) -> Result<String, SkulkError> {
 
 /// Builds a `Config` with known values for testing.
 pub(crate) fn test_config() -> Config {
+    test_config_with_format(OutputFormat::Human)
+}
+
+/// Builds a `Config` with known values for testing, with the given output format.
+pub(crate) fn test_config_with_format(output_format: OutputFormat) -> Config {
     Config {
         host: "testhost".to_string(),
         session_prefix: "skulk-".to_string(),
@@ -56,7 +61,16 @@ pub(crate) fn test_config() -> Config {
         harness: "claude".to_string(),
         init_script: None,
         auto_approve_permissions: false,
+        output_format,
         root_dir: None,
+    }
+}
+
+/// Builds a `Config` set to JSON output mode for testing JSON-output paths.
+pub(crate) fn test_config_json() -> Config {
+    Config {
+        output_format: OutputFormat::Json,
+        ..test_config()
     }
 }
 

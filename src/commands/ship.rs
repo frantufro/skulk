@@ -1,6 +1,7 @@
 use crate::agent_ref::AgentRef;
 use crate::commands::interact::push_command;
-use crate::config::Config;
+use crate::config::{Config, OutputFormat};
+use crate::display::emit_json;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::ssh::Ssh;
 use crate::util::validate_name;
@@ -126,6 +127,18 @@ pub(crate) fn format_post_push_pr_failure(
     }
 }
 
+/// Build the JSON result value for a successful `ship` in machine-readable mode.
+///
+/// `name` is the short agent name (no prefix); `pr_url` is whatever `gh pr
+/// create` printed to stdout — an empty string when the URL was unavailable.
+pub(crate) fn json_ship_result(name: &str, pr_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "agent": name,
+        "pr_url": pr_url,
+    })
+}
+
 /// Push an agent's branch and open a PR with a Claude-authored description.
 ///
 /// Three SSH round-trips, in order:
@@ -133,7 +146,8 @@ pub(crate) fn format_post_push_pr_failure(
 ///   2. Push the branch with upstream tracking (reusing `push_command`).
 ///   3. Generate the description via `claude -p` and open the PR via `gh pr create`.
 ///
-/// The PR URL printed by `gh pr create` is forwarded to stdout on success.
+/// In `Human` mode the PR URL printed by `gh pr create` is forwarded to stdout
+/// on success. In `Json` mode a machine-readable object is emitted instead.
 ///
 /// Partial-failure policy: if step 2 succeeds but step 3 fails, the branch
 /// stays on the remote (we do not roll back the push — see
@@ -158,10 +172,18 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
         format_post_push_pr_failure(&branch, name, &classified)
     })?;
 
-    if !output.is_empty() {
-        println!("{output}");
+    match cfg.output_format {
+        OutputFormat::Json => {
+            let pr_url = output.trim();
+            emit_json(&json_ship_result(name, pr_url));
+        }
+        OutputFormat::Human => {
+            if !output.is_empty() {
+                println!("{output}");
+            }
+            eprintln!("Opened PR for {branch}.");
+        }
     }
-    eprintln!("Opened PR for {branch}.");
     Ok(())
 }
 
@@ -584,5 +606,31 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok(String::new()), ssh_ok(), ssh_ok()]);
         assert!(cmd_ship(&ssh, "feat", &cfg).is_ok());
+    }
+
+    // ── JSON output ───────────────────────────────────────────────────────
+
+    #[test]
+    fn ship_json_result_includes_ok_and_pr_url() {
+        let val = json_ship_result("feat", "https://github.com/owner/repo/pull/123");
+        assert_eq!(val["ok"], true);
+        assert_eq!(val["pr_url"], "https://github.com/owner/repo/pull/123");
+        assert_eq!(val["agent"], "feat");
+    }
+
+    #[test]
+    fn ship_human_mode_unchanged() {
+        // Human mode still produces the existing output (PR URL printed to
+        // stdout, "Opened PR for..." printed to stderr). We verify the call
+        // succeeds and does NOT return JSON — specifically that cmd_ship with
+        // OutputFormat::Human still returns Ok(()).
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(String::new()),                           // precheck
+            ssh_ok(),                                    // push
+            Ok("https://github.com/x/y/pull/99".into()), // gh pr create
+        ]);
+        let result = cmd_ship(&ssh, "feat", &cfg);
+        assert!(result.is_ok(), "human mode must still succeed: {result:?}");
     }
 }

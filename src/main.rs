@@ -39,6 +39,14 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) no_color: bool,
 
+    /// Output machine-readable JSON (overrides config `output_format`)
+    #[arg(long, global = true, conflicts_with = "human")]
+    pub(crate) json: bool,
+
+    /// Output human-readable text (overrides config `output_format`)
+    #[arg(long, global = true, conflicts_with = "json")]
+    pub(crate) human: bool,
+
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
@@ -432,7 +440,6 @@ pub(crate) fn run(
     timings: &Timings,
 ) -> Result<(), (String, SkulkError)> {
     let cmd_name = cli.command.name();
-
     let result = match cli.command {
         // Handled before `run()` in `io::main` — they don't load config or touch SSH.
         Commands::Init | Commands::Completions { .. } => unreachable!(),
@@ -580,6 +587,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok(mock_list_output(1_700_000_000, "", &[]))]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::List,
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
@@ -591,6 +600,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("exists".into()), Ok("Already up to date.".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Pull { force: false },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
@@ -608,6 +619,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::New {
                 name: "test".into(),
                 github: None,
@@ -632,6 +645,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Destroy {
                 name: "target".into(),
                 force: true,
@@ -646,6 +661,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::DestroyAll { force: true },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
@@ -657,6 +674,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok(mock_inventory_single_agent("skulk-healthy"))]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Gc { dry_run: true },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
@@ -668,6 +687,8 @@ mod tests {
         let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Connect {
                 name: "test".into(),
             },
@@ -681,6 +702,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("diff output".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Diff {
                 name: "test".into(),
                 stat: false,
@@ -696,6 +719,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok(" foo.rs | 2 +-".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Diff {
                 name: "test".into(),
                 stat: true,
@@ -711,6 +736,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("foo.rs".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Diff {
                 name: "test".into(),
                 stat: false,
@@ -794,6 +821,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::New {
                 name: "test".into(),
                 github: Some("42".into()),
@@ -824,6 +853,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::New {
                 name: "test".into(),
                 github: None,
@@ -844,6 +875,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("SKULK_GH_MISSING".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::New {
                 name: "test".into(),
                 github: Some("42".into()),
@@ -866,6 +899,8 @@ mod tests {
         let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Disconnect {
                 name: "test".into(),
             },
@@ -879,6 +914,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("some log output".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Logs {
                 name: "test".into(),
                 follow: false,
@@ -894,6 +931,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("old pane".into()), ssh_ok(), Ok("new pane".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Send {
                 name: "test".into(),
                 prompt: Some("fix bug".into()),
@@ -948,6 +987,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("old pane".into()), ssh_ok(), Ok("new pane".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Send {
                 name: "test".into(),
                 prompt: None,
@@ -966,6 +1007,8 @@ mod tests {
         let ssh = MockSsh::new(vec![]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Send {
                 name: "test".into(),
                 prompt: None,
@@ -987,6 +1030,8 @@ mod tests {
         let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Push {
                 name: "test".into(),
             },
@@ -1000,6 +1045,8 @@ mod tests {
         let ssh = MockSsh::new(vec![ssh_ok()]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Archive {
                 name: "test".into(),
             },
@@ -1020,6 +1067,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Restart {
                 name: "test".into(),
                 remote_control: false,
@@ -1045,6 +1094,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Replay {
                 name: "task".into(),
                 new_name: None,
@@ -1084,6 +1135,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("exit 1".into()))]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Replay {
                 name: "task".into(),
                 new_name: None,
@@ -1105,6 +1158,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("abc1234 first commit".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::GitLog {
                 name: "test".into(),
             },
@@ -1122,6 +1177,8 @@ mod tests {
         ]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Ship {
                 name: "test".into(),
             },
@@ -1143,6 +1200,8 @@ mod tests {
         ))]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Status {
                 name: "test".into(),
             },
@@ -1156,6 +1215,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("full scrollback output".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Transcript {
                 name: "test".into(),
                 output: None,
@@ -1170,6 +1231,8 @@ mod tests {
         let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle".into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Wait {
                 name: Some("test".into()),
                 all: false,
@@ -1185,6 +1248,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Wait {
                 name: None,
                 all: true,
@@ -1225,6 +1290,59 @@ mod tests {
     }
 
     #[test]
+    fn json_flag_sets_output_format_to_json() {
+        use crate::config::OutputFormat;
+        let cli = Cli::try_parse_from(["skulk", "--json", "list"]).expect("--json should parse");
+        let mut cfg = test_config();
+        if cli.json {
+            cfg.output_format = OutputFormat::Json;
+        } else if cli.human {
+            cfg.output_format = OutputFormat::Human;
+        }
+        assert_eq!(cfg.output_format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn human_flag_sets_output_format_to_human() {
+        let cli = Cli::try_parse_from(["skulk", "--human", "list"]).expect("--human should parse");
+        assert!(cli.human, "expected cli.human == true");
+    }
+
+    #[test]
+    fn json_and_human_are_mutually_exclusive() {
+        let result = Cli::try_parse_from(["skulk", "--json", "--human", "list"]);
+        assert!(
+            result.is_err(),
+            "expected clap conflict error when both --json and --human are passed"
+        );
+    }
+
+    #[test]
+    fn neither_flag_leaves_config_unchanged() {
+        use crate::config::OutputFormat;
+        // Config starts as Human — stays Human
+        let cli = Cli::try_parse_from(["skulk", "list"]).expect("bare list should parse");
+        let mut cfg = test_config(); // output_format = Human
+        if cli.json {
+            cfg.output_format = OutputFormat::Json;
+        } else if cli.human {
+            cfg.output_format = OutputFormat::Human;
+        }
+        assert_eq!(cfg.output_format, OutputFormat::Human);
+
+        // Config starts as Json — stays Json
+        let cli2 = Cli::try_parse_from(["skulk", "list"]).expect("bare list should parse");
+        let mut cfg2 = test_config();
+        cfg2.output_format = OutputFormat::Json;
+        if cli2.json {
+            cfg2.output_format = OutputFormat::Json;
+        } else if cli2.human {
+            cfg2.output_format = OutputFormat::Human;
+        }
+        assert_eq!(cfg2.output_format, OutputFormat::Json);
+    }
+
+    #[test]
     fn run_dispatches_doctor() {
         let cfg = test_config();
         // Single SSH roundtrip — all checks pass.
@@ -1237,6 +1355,8 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok(probe.into())]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::Doctor,
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
@@ -1251,6 +1371,8 @@ mod tests {
         })]);
         let cli = Cli {
             no_color: true,
+            json: false,
+            human: false,
             command: Commands::List,
         };
         let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());

@@ -3,7 +3,8 @@ use std::time::Duration;
 use crate::agent_ref::AgentRef;
 use crate::commands::destroy::agent_destroy_session_command;
 use crate::commands::wait::{has_session_command, mark_busy_command};
-use crate::config::Config;
+use crate::config::{Config, OutputFormat};
+use crate::display::emit_json;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::ssh::Ssh;
 use crate::util::{shell_escape, validate_name};
@@ -132,7 +133,13 @@ pub(crate) fn cmd_diff(
     let output = ssh
         .run(&diff_command(name, format, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
-    print!("{output}");
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&serde_json::json!({
+            "agent": name,
+            "diff": output,
+        })),
+        OutputFormat::Human => print!("{output}"),
+    }
     Ok(())
 }
 
@@ -216,7 +223,13 @@ pub(crate) fn cmd_logs(
     let output = ssh
         .run(&cmd)
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
-    print!("{output}");
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&serde_json::json!({
+            "agent": name,
+            "lines": output.lines().collect::<Vec<_>>(),
+        })),
+        OutputFormat::Human => print!("{output}"),
+    }
     Ok(())
 }
 
@@ -949,5 +962,62 @@ mod tests {
         let ssh = MockSsh::new(vec![]);
         let result = cmd_transcript(&ssh, "../bad", None, &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
+    }
+
+    // ── helpers for JSON result shape tests ────────────────────────────────
+
+    fn json_logs_result(name: &str, raw: &str) -> serde_json::Value {
+        let lines: Vec<&str> = raw.lines().collect();
+        serde_json::json!({
+            "agent": name,
+            "lines": lines,
+        })
+    }
+
+    fn json_diff_result(name: &str, diff: &str) -> serde_json::Value {
+        serde_json::json!({
+            "agent": name,
+            "diff": diff,
+        })
+    }
+
+    // ── logs JSON mode ──────────────────────────────────────────────────────
+
+    #[test]
+    fn logs_json_mode_emits_agent_and_lines_array() {
+        let raw = "line one\nline two\nline three";
+        let result = json_logs_result("my-agent", raw);
+        assert_eq!(result["agent"], "my-agent");
+        let lines = result["lines"].as_array().expect("lines should be array");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "line one");
+        assert_eq!(lines[1], "line two");
+        assert_eq!(lines[2], "line three");
+    }
+
+    #[test]
+    fn logs_human_mode_returns_raw_output() {
+        let mut cfg = test_config();
+        cfg.output_format = OutputFormat::Human;
+        let ssh = MockSsh::new(vec![Ok("line 1\nline 2\nline 3".into())]);
+        assert!(cmd_logs(&ssh, "test", false, None, &cfg).is_ok());
+    }
+
+    // ── diff JSON mode ──────────────────────────────────────────────────────
+
+    #[test]
+    fn diff_json_mode_emits_agent_and_diff_string() {
+        let raw = "diff --git a/foo b/foo\n+added line\n-removed line";
+        let result = json_diff_result("my-agent", raw);
+        assert_eq!(result["agent"], "my-agent");
+        assert_eq!(result["diff"], raw);
+    }
+
+    #[test]
+    fn diff_human_mode_returns_raw_output() {
+        let mut cfg = test_config();
+        cfg.output_format = OutputFormat::Human;
+        let ssh = MockSsh::new(vec![Ok("diff --git a/foo b/foo\n+hello".into())]);
+        assert!(cmd_diff(&ssh, "test", DiffFormat::Default, &cfg).is_ok());
     }
 }

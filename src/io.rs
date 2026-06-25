@@ -19,7 +19,7 @@ use clap::Parser;
 use crate::commands::completions;
 use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::commands::interact::logs_snapshot_deep_command;
-use crate::config::{self, Config, load_config};
+use crate::config::{self, Config, OutputFormat, load_config};
 use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
@@ -429,13 +429,20 @@ pub(crate) fn main() {
 
     // All other commands require config
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let cfg = match load_config(&cwd) {
+    let mut cfg = match load_config(&cwd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("skulk: {e}");
             std::process::exit(1);
         }
     };
+
+    // CLI flags override the config file value.
+    if cli.json {
+        cfg.output_format = OutputFormat::Json;
+    } else if cli.human {
+        cfg.output_format = OutputFormat::Human;
+    }
 
     let ssh = RealSsh {
         host: cfg.host.clone(),
@@ -447,7 +454,11 @@ pub(crate) fn main() {
         &confirm,
         &crate::timings::Timings::production(),
     ) {
-        eprintln!("skulk {cmd}: {e}");
+        if cfg.output_format == OutputFormat::Json {
+            crate::display::emit_json_error(&format!("skulk {cmd}: {e}"), &e);
+        } else {
+            eprintln!("skulk {cmd}: {e}");
+        }
         std::process::exit(1);
     }
 }

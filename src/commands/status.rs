@@ -1,6 +1,8 @@
+use serde::Serialize;
+
 use crate::agent_ref::AgentRef;
-use crate::config::Config;
-use crate::display::{format_uptime, use_color};
+use crate::config::{Config, OutputFormat};
+use crate::display::{emit_json, format_uptime, use_color};
 use crate::error::{SkulkError, classify_agent_error, is_tmux_no_server};
 use crate::inventory::{AgentState, get_worktree_map, parse_sessions, resolve_agent_state};
 use crate::ssh::Ssh;
@@ -21,6 +23,10 @@ pub(crate) struct StatusView {
     /// `None` when the session is stopped — there's no tmux `session_created`
     /// to anchor an uptime to.
     pub uptime: Option<String>,
+    /// Raw tmux `session_created` epoch for the running session, `None` when
+    /// stopped. Used to compute `uptime_secs` in JSON output without going
+    /// through the lossy human-readable uptime string.
+    pub created_epoch: Option<i64>,
     pub branch: String,
     pub default_branch: String,
     pub commits_ahead: u32,
@@ -163,18 +169,23 @@ pub(crate) fn parse_status_output(
     let diffstat_line = ds_raw.lines().last().unwrap_or("").trim();
     let (files_changed, insertions, deletions) = parse_diff_stat(diffstat_line);
 
-    let (state, uptime) = match &our_session {
+    let (state, uptime, created_epoch) = match &our_session {
         Some(s) => {
             let state = resolve_agent_state(s.state, marker);
-            (state, Some(format_uptime(remote_now, s.created)))
+            (
+                state,
+                Some(format_uptime(remote_now, s.created)),
+                Some(s.created),
+            )
         }
-        None => (AgentState::Stopped, None),
+        None => (AgentState::Stopped, None, None),
     };
 
     Ok(StatusView {
         display_name: agent.name().to_string(),
         state,
         uptime,
+        created_epoch,
         branch,
         default_branch: cfg.default_branch.clone(),
         commits_ahead,
@@ -239,13 +250,67 @@ pub(crate) fn format_status_with_color(view: &StatusView, color: bool) -> String
     )
 }
 
+/// Machine-readable representation of a single agent's status.
+#[derive(Debug, Serialize)]
+pub(crate) struct AgentStatusJson {
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) branch: String,
+    pub(crate) uptime_secs: Option<i64>,
+    /// Raw tmux `session_created` epoch. `None` when the agent is stopped
+    /// (no running tmux session, so no creation time is available).
+    pub(crate) session_created_epoch: Option<i64>,
+    /// Server clock captured at query time. Always present for running agents;
+    /// `None` when stopped.
+    pub(crate) queried_at: Option<i64>,
+}
+
+/// Build the JSON-serializable form of a [`StatusView`].
+///
+/// `remote_now` is the remote epoch captured during the SSH roundtrip. It is
+/// stored as `queried_at` to make its semantics explicit. `session_created_epoch`
+/// is populated from `view.created_epoch` — the raw tmux `session_created` value.
+pub(crate) fn json_agent_status(view: &StatusView, remote_now: i64) -> AgentStatusJson {
+    let status = match view.state {
+        AgentState::Attached => "attached",
+        AgentState::Detached => "detached",
+        AgentState::Idle => "idle",
+        AgentState::Stopped => "stopped",
+    };
+    // uptime_secs: computed directly from the raw session_created epoch so
+    // there is no precision loss from the intermediate human-readable string.
+    // None when the session is stopped (no created epoch available).
+    let uptime_secs = view.created_epoch.map(|c| remote_now - c);
+    let (session_created_epoch, queried_at) = if view.state == AgentState::Stopped {
+        (None, None)
+    } else {
+        (view.created_epoch, Some(remote_now))
+    };
+    AgentStatusJson {
+        name: view.display_name.clone(),
+        status: status.to_string(),
+        branch: view.branch.clone(),
+        uptime_secs,
+        session_created_epoch,
+        queried_at,
+    }
+}
+
 pub(crate) fn cmd_status(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     validate_name(name)?;
     let raw = ssh
         .run(&status_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    let remote_now = raw
+        .lines()
+        .find(|l| l.contains("__EPOCH__"))
+        .and_then(|l| l.replace("__EPOCH__", "").trim().parse::<i64>().ok())
+        .unwrap_or(0);
     let view = parse_status_output(&raw, name, cfg)?;
-    println!("{}", format_status(&view));
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&json_agent_status(&view, remote_now)),
+        OutputFormat::Human => println!("{}", format_status(&view)),
+    }
     Ok(())
 }
 
@@ -450,6 +515,7 @@ mod tests {
             display_name: "my-task".into(),
             state: AgentState::Idle,
             uptime: Some("47m".into()),
+            created_epoch: Some(1_700_000_000),
             branch: "skulk-my-task".into(),
             default_branch: "main".into(),
             commits_ahead: 3,
@@ -530,6 +596,87 @@ mod tests {
         view.default_branch = "develop".into();
         let out = format_status_with_color(&view, false);
         assert!(out.contains("Commits:  3 ahead of develop"));
+    }
+
+    // ── json_agent_status ───────────────────────────────────────────────
+
+    #[test]
+    fn status_json_mode_emits_agent_object_with_required_fields() {
+        let view = StatusView {
+            display_name: "my-task".into(),
+            state: AgentState::Detached,
+            uptime: Some("3m".into()),
+            created_epoch: Some(1_700_000_000),
+            branch: "skulk-my-task".into(),
+            default_branch: "main".into(),
+            commits_ahead: 2,
+            files_changed: 1,
+            insertions: 5,
+            deletions: 0,
+            worktree: Some("~/wt/skulk-my-task".into()),
+        };
+        let remote_now: i64 = 1_700_000_200;
+        let json = json_agent_status(&view, remote_now);
+        assert_eq!(json.name, "my-task");
+        assert_eq!(json.status, "detached");
+        assert_eq!(json.branch, "skulk-my-task");
+        // uptime_secs is derived from created_epoch directly: 1_700_000_200 - 1_700_000_000 = 200
+        assert_eq!(json.uptime_secs, Some(200));
+        assert_eq!(json.session_created_epoch, Some(1_700_000_000));
+        assert_eq!(json.queried_at, Some(1_700_000_200));
+    }
+
+    #[test]
+    fn status_json_stopped_agent_has_null_uptime_and_last_activity() {
+        let view = StatusView {
+            display_name: "done".into(),
+            state: AgentState::Stopped,
+            uptime: None,
+            created_epoch: None,
+            branch: "skulk-done".into(),
+            default_branch: "main".into(),
+            commits_ahead: 0,
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+            worktree: None,
+        };
+        let json = json_agent_status(&view, 1_700_000_000);
+        assert_eq!(json.status, "stopped");
+        assert!(json.uptime_secs.is_none());
+        assert!(json.session_created_epoch.is_none());
+        assert!(json.queried_at.is_none());
+    }
+
+    #[test]
+    fn status_human_mode_unchanged() {
+        let cfg = test_config(); // output_format = Human
+        let ssh = MockSsh::new(vec![Ok(mock_status_output(
+            1_700_000_200,
+            "skulk-test\t1700000000\t0",
+            &[("skulk-test", "/wt/skulk-test")],
+            true,
+            Some("idle"),
+            Some(2),
+            " 2 files changed, 10 insertions(+), 3 deletions(-)",
+        ))]);
+        assert!(cmd_status(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn status_json_mode_cmd_succeeds() {
+        let mut cfg = test_config();
+        cfg.output_format = crate::config::OutputFormat::Json;
+        let ssh = MockSsh::new(vec![Ok(mock_status_output(
+            1_700_000_200,
+            "skulk-test\t1700000000\t0",
+            &[("skulk-test", "/wt/skulk-test")],
+            true,
+            Some("idle"),
+            Some(2),
+            " 2 files changed, 10 insertions(+), 3 deletions(-)",
+        ))]);
+        assert!(cmd_status(&ssh, "test", &cfg).is_ok());
     }
 
     // ── cmd_status ──────────────────────────────────────────────────────

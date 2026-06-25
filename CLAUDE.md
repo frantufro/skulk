@@ -66,7 +66,10 @@ session_prefix = "skulk-"
 base_path = "~/your-project"
 worktree_base = "~/your-project-worktrees"
 # default_branch = "main"   # optional, defaults to "main"
+# output_format = "human"   # optional, "human" (default) or "json"
 ```
+
+`--json` / `--human` global flags override `output_format` at runtime.
 
 ## Never Do
 

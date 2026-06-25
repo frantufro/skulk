@@ -4,6 +4,29 @@ use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::inventory::{AgentState, GcOrphans, Session};
 
+/// Serialize an error as a JSON object and print it to stderr.
+///
+/// Schema: `{"error": "<msg>", "code": "<snake_case_variant>"}`
+pub(crate) fn emit_json_error(msg: &str, err: &crate::error::SkulkError) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "error": msg,
+            "code": err.code_str()
+        })
+    );
+}
+
+/// Serialize `value` as compact JSON and print it to stdout.
+pub(crate) fn emit_json(value: &impl serde::Serialize) {
+    // serde_json::to_string only fails for types that have non-string map keys
+    // or custom serializers that return errors — neither applies here.
+    match serde_json::to_string(value) {
+        Ok(json) => println!("{json}"),
+        Err(e) => println!("{{\"error\":\"json serialization failed: {e}\"}}"),
+    }
+}
+
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const BOLD: &str = "\x1b[1m";
@@ -195,6 +218,43 @@ pub(crate) fn format_gc_summary(orphans: &GcOrphans, dry_run: bool) -> String {
 mod tests {
     use super::*;
     use crate::testutil::test_config;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct Payload {
+        name: &'static str,
+        count: u32,
+    }
+
+    #[test]
+    fn emit_json_serializes_simple_struct() {
+        let value = Payload {
+            name: "hello",
+            count: 42,
+        };
+        // Verify the serialized form contains the expected fields.
+        let json = serde_json::to_string(&value).expect("serialization must succeed");
+        assert!(json.contains("\"name\":\"hello\""));
+        assert!(json.contains("\"count\":42"));
+        // Exercise emit_json itself: must not panic on a valid serializable value.
+        emit_json(&value);
+    }
+
+    #[test]
+    fn emit_json_produces_valid_json_string() {
+        // serde_json::to_string on a known-good value must succeed and round-trip
+        // back to the same value — verifying that emit_json's inner serialization
+        // path would produce parseable JSON.
+        let value = Payload {
+            name: "skulk",
+            count: 1,
+        };
+        let serialized = serde_json::to_string(&value).expect("serialization must not fail");
+        let round_tripped: serde_json::Value =
+            serde_json::from_str(&serialized).expect("output must be valid JSON");
+        assert_eq!(round_tripped["name"], "skulk");
+        assert_eq!(round_tripped["count"], 1_u32);
+    }
 
     fn sess(name: &str, created: i64, state: AgentState, worktree: Option<&str>) -> Session {
         Session {
