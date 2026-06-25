@@ -1,11 +1,27 @@
 use std::time::{Duration, Instant};
 
+use serde_json::{Value, json};
+
 use crate::agent_ref::AgentRef;
-use crate::config::Config;
+use crate::config::{Config, OutputFormat};
+use crate::display::emit_json;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
+
+/// Build the JSON result value for a wait operation.
+///
+/// On success (`success = true`): `{"ok": true, "agent": "<name>", "status": "idle"}`.
+/// On timeout (`success = false`, `reason = Some("timeout")`):
+/// `{"ok": false, "agent": "<name>", "reason": "timeout"}`.
+pub(crate) fn json_wait_result(name: &str, success: bool, reason: Option<&str>) -> Value {
+    if success {
+        json!({"ok": true, "agent": name, "status": "idle"})
+    } else {
+        json!({"ok": false, "agent": name, "reason": reason.unwrap_or("unknown")})
+    }
+}
 
 /// Build the SSH command to read an agent's idle-marker file.
 ///
@@ -71,18 +87,32 @@ pub(crate) fn cmd_wait(
             .map_err(|e| classify_agent_error(name, e, host))?;
         let trimmed = state.trim();
         if trimmed == "idle" || trimmed == "missing" {
-            eprintln!("Agent {session_name} is idle.");
+            if cfg.output_format == OutputFormat::Json {
+                emit_json(&json_wait_result(name, true, None));
+            } else {
+                eprintln!("Agent {session_name} is idle.");
+            }
             return Ok(());
         }
         if start.elapsed() >= timeout {
+            let message = format!(
+                "Timed out after {}s waiting for {session_name} to become idle.",
+                timeout.as_secs()
+            );
+            let suggestion =
+                format!("Inspect the agent: `skulk connect {name}` (or raise --timeout).");
+            if cfg.output_format == OutputFormat::Json {
+                // Emit the structured timeout payload and exit with code 1
+                // directly. Returning Err here would cause io.rs to also emit
+                // a JSON error object to stderr, giving consumers two JSON
+                // objects across two streams. The non-zero exit code is the
+                // machine-readable signal; the stdout payload carries the detail.
+                emit_json(&json_wait_result(name, false, Some("timeout")));
+                std::process::exit(1);
+            }
             return Err(SkulkError::Diagnostic {
-                message: format!(
-                    "Timed out after {}s waiting for {session_name} to become idle.",
-                    timeout.as_secs()
-                ),
-                suggestion: format!(
-                    "Inspect the agent: `skulk connect {name}` (or raise --timeout)."
-                ),
+                message,
+                suggestion,
             });
         }
         std::thread::sleep(poll_interval);
@@ -115,8 +145,10 @@ pub(crate) fn cmd_wait_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OutputFormat;
     use crate::testutil::{
         MockSsh, assert_err, mock_empty_inventory, mock_inventory, ssh_ok, test_config,
+        test_config_with_format,
     };
 
     #[test]
@@ -280,5 +312,49 @@ mod tests {
         ]);
         let result = cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::from_secs(60));
         assert!(matches!(result, Err(SkulkError::NotFound(_))));
+    }
+
+    #[test]
+    fn wait_json_result_idle_has_ok_true() {
+        let v = json_wait_result("my-agent", true, None);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["agent"], "my-agent");
+        assert_eq!(v["status"], "idle");
+        assert!(v.get("reason").is_none());
+    }
+
+    #[test]
+    fn wait_json_result_timeout_has_ok_false() {
+        let v = json_wait_result("my-agent", false, Some("timeout"));
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["agent"], "my-agent");
+        assert_eq!(v["reason"], "timeout");
+        assert!(v.get("status").is_none());
+    }
+
+    #[test]
+    fn wait_human_mode_unchanged() {
+        let cfg = test_config_with_format(OutputFormat::Human);
+        let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle".into())]);
+        let result = cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::from_secs(60));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cmd_wait_human_timeout_returns_diagnostic_err() {
+        // Human mode returns Err(Diagnostic) on timeout so the dispatcher
+        // prints a human-readable error and exits 1.
+        let cfg = test_config_with_format(OutputFormat::Human);
+        let ssh = MockSsh::new(vec![
+            ssh_ok(),          // has-session
+            Ok("busy".into()), // first poll, then timeout fires
+        ]);
+        let result = cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::ZERO);
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("timed out"),
+                "expected timeout message, got: {message}"
+            );
+        });
     }
 }

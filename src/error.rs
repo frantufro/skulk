@@ -20,6 +20,19 @@ pub(crate) enum SkulkError {
     UpdateFailed(String),
 }
 
+impl SkulkError {
+    pub(crate) fn code_str(&self) -> &'static str {
+        match self {
+            SkulkError::SshExec(_) => "ssh_exec",
+            SkulkError::Diagnostic { .. } => "diagnostic",
+            SkulkError::SshFailed(_) => "ssh_failed",
+            SkulkError::Validation(_) => "validation",
+            SkulkError::NotFound(_) => "not_found",
+            SkulkError::UpdateFailed(_) => "update_failed",
+        }
+    }
+}
+
 pub(crate) fn classify_ssh_error(stderr: &str, host: &str) -> SkulkError {
     let lower = stderr.to_lowercase();
     classify_ssh_error_lower(stderr, &lower, host)
@@ -374,5 +387,71 @@ mod tests {
     fn skulk_error_not_found_display() {
         let err = SkulkError::NotFound("Agent 'foo' not found.".into());
         assert_eq!(format!("{err}"), "Agent 'foo' not found.");
+    }
+
+    #[test]
+    fn skulk_error_code_str_ssh_exec() {
+        let err = SkulkError::SshExec("x".into());
+        assert_eq!(err.code_str(), "ssh_exec");
+    }
+
+    #[test]
+    fn skulk_error_code_str_not_found() {
+        let err = SkulkError::NotFound("agent not found".into());
+        assert_eq!(err.code_str(), "not_found");
+    }
+
+    #[test]
+    fn skulk_error_code_str_validation() {
+        let err = SkulkError::Validation("bad input".into());
+        assert_eq!(err.code_str(), "validation");
+    }
+
+    #[test]
+    fn skulk_error_code_str_diagnostic() {
+        let err = SkulkError::Diagnostic {
+            message: "msg".into(),
+            suggestion: "sug".into(),
+        };
+        assert_eq!(err.code_str(), "diagnostic");
+    }
+
+    #[test]
+    fn skulk_error_code_str_update_failed() {
+        let err = SkulkError::UpdateFailed("reason".into());
+        assert_eq!(err.code_str(), "update_failed");
+    }
+
+    #[test]
+    fn all_skulk_error_variants_have_code_str() {
+        // Comprehensive check: every SkulkError variant must produce a non-empty
+        // snake_case code string. When new variants are added to the enum, this
+        // test will fail to compile (non-exhaustive match) until `code_str` is
+        // updated — acting as a compile-time reminder to wire up the new variant.
+        let variants: &[(SkulkError, &str)] = &[
+            (SkulkError::SshExec("x".into()), "ssh_exec"),
+            (
+                SkulkError::Diagnostic {
+                    message: "m".into(),
+                    suggestion: "s".into(),
+                },
+                "diagnostic",
+            ),
+            (SkulkError::SshFailed("x".into()), "ssh_failed"),
+            (SkulkError::Validation("x".into()), "validation"),
+            (SkulkError::NotFound("x".into()), "not_found"),
+            (SkulkError::UpdateFailed("x".into()), "update_failed"),
+        ];
+        for (err, expected_code) in variants {
+            assert_eq!(
+                err.code_str(),
+                *expected_code,
+                "wrong code_str for variant: {err:?}"
+            );
+            assert!(
+                !err.code_str().is_empty(),
+                "code_str must be non-empty for: {err:?}"
+            );
+        }
     }
 }

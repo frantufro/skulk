@@ -1,9 +1,21 @@
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const CONFIG_DIR: &str = ".skulk";
 pub(crate) const CONFIG_FILENAME: &str = "config.toml";
+
+/// Output format for commands that produce structured data (e.g. `skulk list`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum OutputFormat {
+    /// Human-readable table / prose output (default).
+    #[default]
+    Human,
+    /// Machine-readable JSON output.
+    Json,
+}
+
 /// Runtime configuration loaded from `.skulk/config.toml`.
 ///
 /// All fields are mandatory. If no config file is found in the current
@@ -34,6 +46,10 @@ pub(crate) struct Config {
     /// prompts for tool approval. Defaults to `false`.
     #[serde(default)]
     pub auto_approve_permissions: bool,
+    /// Output format for commands that produce structured data (e.g. `skulk list`).
+    /// Defaults to `human`. Can be overridden by `--json` / `--human` CLI flags.
+    #[serde(default)]
+    pub output_format: OutputFormat,
     /// Directory the config file was loaded from. Populated after parsing so the
     /// rest of the code can resolve sibling paths like `.skulk/.env`. Not a TOML
     /// field.
@@ -135,6 +151,44 @@ pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_format_defaults_to_human_when_absent() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.output_format, OutputFormat::Human);
+    }
+
+    #[test]
+    fn output_format_parses_human() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            output_format = "human"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.output_format, OutputFormat::Human);
+    }
+
+    #[test]
+    fn output_format_parses_json() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            output_format = "json"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.output_format, OutputFormat::Json);
+    }
 
     fn full_toml() -> &'static str {
         r#"

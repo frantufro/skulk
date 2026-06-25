@@ -5,8 +5,8 @@ use crate::commands::destroy::{
     agent_destroy_branch_command, agent_destroy_session_command, agent_destroy_state_file_command,
     agent_destroy_worktree_command,
 };
-use crate::config::Config;
-use crate::display::format_gc_summary;
+use crate::config::{Config, OutputFormat};
+use crate::display::{emit_json, format_gc_summary};
 use crate::error::SkulkError;
 use crate::inventory::{AgentInventory, GcOrphans, fetch_inventory};
 use crate::ssh::Ssh;
@@ -122,6 +122,26 @@ pub(crate) fn gc_find_orphans(inv: &AgentInventory) -> GcOrphans {
     }
 }
 
+/// Build the JSON value for a gc result.
+///
+/// Returns `{"ok": true, "dry_run": <bool>, "targets": {"sessions": [...], "worktrees": [...], "branches": [...]}}`.
+///
+/// The key is `targets` (not `removed`) in both dry-run and live modes so that
+/// machine consumers receive consistent field names regardless of `dry_run`.
+/// When `dry_run=true` the listed resources have *not* been deleted; when
+/// `dry_run=false` they have. Inspect `dry_run` to determine which case applies.
+pub(crate) fn json_gc_result(orphans: &GcOrphans, dry_run: bool) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "dry_run": dry_run,
+        "targets": {
+            "sessions": orphans.sessions,
+            "worktrees": orphans.worktrees,
+            "branches": orphans.branches,
+        }
+    })
+}
+
 pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
 
@@ -132,7 +152,11 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     let orphans = gc_find_orphans(&inv);
 
     if dry_run {
-        println!("{}", format_gc_summary(&orphans, true));
+        if cfg.output_format == OutputFormat::Json {
+            emit_json(&json_gc_result(&orphans, true));
+        } else {
+            println!("{}", format_gc_summary(&orphans, true));
+        }
         return Ok(());
     }
 
@@ -193,8 +217,12 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     // found, since state files can leak independently of session/worktree state.
     cleanup_stale_state_files(ssh, &inv, &orphans, cfg);
 
-    let prefix = if orphans.is_empty() { "" } else { "\n" };
-    println!("{prefix}{}", format_gc_summary(&orphans, false));
+    if cfg.output_format == OutputFormat::Json {
+        emit_json(&json_gc_result(&orphans, false));
+    } else {
+        let prefix = if orphans.is_empty() { "" } else { "\n" };
+        println!("{prefix}{}", format_gc_summary(&orphans, false));
+    }
     Ok(())
 }
 
@@ -205,6 +233,83 @@ mod tests {
         MockSsh, make_inventory, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
         ssh_ok, test_config,
     };
+
+    // ── json_gc_result ──────────────────────────────────────────────────
+
+    #[test]
+    fn gc_json_mode_emits_ok_with_removed_lists() {
+        let orphans = GcOrphans {
+            sessions: vec!["s1".to_string()],
+            worktrees: vec!["w1".to_string()],
+            branches: vec!["b1".to_string()],
+        };
+        let result = json_gc_result(&orphans, false);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["dry_run"], false);
+        assert_eq!(result["targets"]["sessions"][0], "s1");
+        assert_eq!(result["targets"]["worktrees"][0], "w1");
+        assert_eq!(result["targets"]["branches"][0], "b1");
+    }
+
+    #[test]
+    fn gc_json_dry_run_sets_dry_run_true() {
+        let orphans = GcOrphans {
+            sessions: vec!["s1".to_string()],
+            worktrees: vec![],
+            branches: vec![],
+        };
+        let result = json_gc_result(&orphans, true);
+        assert_eq!(result["dry_run"], true);
+        assert_eq!(result["ok"], true);
+    }
+
+    #[test]
+    fn gc_json_empty_orphans_still_ok() {
+        let orphans = GcOrphans {
+            sessions: vec![],
+            worktrees: vec![],
+            branches: vec![],
+        };
+        let result = json_gc_result(&orphans, false);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["dry_run"], false);
+        assert_eq!(result["targets"]["sessions"], serde_json::json!([]));
+        assert_eq!(result["targets"]["worktrees"], serde_json::json!([]));
+        assert_eq!(result["targets"]["branches"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn gc_json_output_removed_counts_match_orphans() {
+        // The JSON arrays in `removed` must have exactly as many entries as the
+        // orphan lists, so callers can reliably use `.length` to count what was
+        // cleaned up.
+        let orphans = GcOrphans {
+            sessions: vec!["skulk-s1".to_string(), "skulk-s2".to_string()],
+            worktrees: vec!["skulk-wt1".to_string()],
+            branches: vec![
+                "skulk-b1".to_string(),
+                "skulk-b2".to_string(),
+                "skulk-b3".to_string(),
+            ],
+        };
+        let result = json_gc_result(&orphans, false);
+        let targets = &result["targets"];
+        assert_eq!(
+            targets["sessions"].as_array().unwrap().len(),
+            orphans.sessions.len(),
+            "sessions array length must match orphans.sessions"
+        );
+        assert_eq!(
+            targets["worktrees"].as_array().unwrap().len(),
+            orphans.worktrees.len(),
+            "worktrees array length must match orphans.worktrees"
+        );
+        assert_eq!(
+            targets["branches"].as_array().unwrap().len(),
+            orphans.branches.len(),
+            "branches array length must match orphans.branches"
+        );
+    }
 
     #[test]
     fn gc_find_orphans_no_orphans() {

@@ -3,5 +3,3 @@ session_prefix = "skulk-"
 base_path = "~/skulk"
 worktree_base = "~/skulk-worktrees"
 default_branch = "main"
-harness = "claude"
-auto_approve_permissions = true
