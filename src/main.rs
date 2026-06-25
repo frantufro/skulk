@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 
 use commands::{
     completions, destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart,
-    ship, status, update, wait,
+    ship, status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -386,6 +386,18 @@ pub(crate) enum Commands {
     /// Fetches the latest release from GitHub, downloads the binary for the
     /// current platform, replaces the running binary, and prints the new version.
     Update,
+
+    /// Upload local Claude Code conversation files to a remote agent's project directory
+    ///
+    /// Copies JSONL session files from `~/.claude/projects/<encoded-local-path>/` to
+    /// the matching directory on the remote so the agent can resume a conversation.
+    Upload {
+        /// Agent name
+        name: String,
+        /// Absolute path to the local project directory (encoded for Claude's storage layout)
+        #[arg(long, value_name = "DIR")]
+        local_project: String,
+    },
 }
 
 impl Commands {
@@ -420,6 +432,7 @@ impl Commands {
             Commands::Wait { .. } => "wait",
             Commands::Completions { .. } => "completions",
             Commands::Update => "update",
+            Commands::Upload { .. } => "upload",
         }
     }
 }
@@ -569,6 +582,10 @@ pub(crate) fn run(
             }
         }
         Commands::Update => update::cmd_update(&update::UreqClient),
+        Commands::Upload {
+            name,
+            local_project,
+        } => upload::cmd_upload(ssh, &name, cfg, &local_project),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -1379,6 +1396,28 @@ mod tests {
             command: Commands::Doctor,
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_upload() {
+        // The upload command is a stub that always returns Err after one SSH
+        // roundtrip (resolving the remote project dir). Verify the dispatch
+        // path reaches upload and surfaces the stub error as "upload".
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("-home-remote-worktrees-skulk-agent".into())]);
+        let cli = Cli {
+            no_color: true,
+            json: false,
+            human: false,
+            command: Commands::Upload {
+                name: "agent".into(),
+                local_project: "/home/local/skulk".into(),
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        assert!(result.is_err());
+        let (cmd, _err) = result.unwrap_err();
+        assert_eq!(cmd, "upload");
     }
 
     #[test]
