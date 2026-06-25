@@ -40,6 +40,13 @@ pub(crate) trait LocalOps {
     /// bare `git worktree add` failure.
     fn create_local_worktree(&self, branch: &str, path: &Path) -> Result<(), SkulkError>;
 
+    /// Remove a previously-created local git worktree at `path`.
+    ///
+    /// Used to roll back after a mid-transfer failure. Best-effort: removal
+    /// failures are surfaced to the caller, which logs them rather than
+    /// masking the original error.
+    fn remove_local_worktree(&self, path: &Path);
+
     /// The local Claude Code projects directory (`~/.claude/projects`).
     fn claude_projects_dir(&self) -> PathBuf;
 }
@@ -102,8 +109,25 @@ impl LocalOps for RealLocalOps {
                 ),
             });
         }
+        // Prune stale per-worktree metadata under `.git/worktrees/<name>`.
+        // A `--force` re-download removes the worktree directory from the
+        // filesystem but leaves git's bookkeeping behind; without pruning,
+        // `git worktree add` below fails with "already registered".
+        Self::run_git(&["worktree", "prune"])?;
         let path_str = path.to_string_lossy();
         Self::run_git(&["worktree", "add", &path_str, branch]).map(|_| ())
+    }
+
+    fn remove_local_worktree(&self, path: &Path) {
+        // `git worktree remove --force` clears both the directory and git's
+        // per-worktree metadata, leaving no stale registration behind.
+        let path_str = path.to_string_lossy();
+        if let Err(e) = Self::run_git(&["worktree", "remove", "--force", &path_str]) {
+            eprintln!(
+                "Warning: failed to roll back worktree {}: {e}",
+                path.display()
+            );
+        }
     }
 
     fn claude_projects_dir(&self) -> PathBuf {
@@ -123,6 +147,12 @@ fn local_hostname() -> String {
 ///
 /// Stored at `~/.skulk/archive/<session_name>.txt`. `reason` is the raw,
 /// unescaped string; this function applies `shell_escape` internally.
+///
+/// NOTE: this sidecar is currently forward-looking and intentionally unread —
+/// no command consumes it yet. It is written so that, once `cmd_archive` grows
+/// an optional `reason` argument (dependency task
+/// `add-optional-reason-flag-to-skulk-archive`), `skulk list`/`status` can
+/// surface the download origin. Until then it is a best-effort annotation.
 fn archive_reason_command(session_name: &str, reason: &str) -> String {
     format!(
         "mkdir -p ~/.skulk/archive && printf '%s' '{}' > ~/.skulk/archive/{session_name}.txt",
@@ -219,19 +249,31 @@ pub(crate) fn cmd_download(
     // Step 8: Create the local git worktree.
     local.create_local_worktree(&branch_name, &local_worktree)?;
 
-    // Step 9: Copy JSONL files from remote to local.
+    // Step 9: Copy JSONL files from remote to local. The transfer must be
+    // atomic: if any file fails to download we roll back the just-created
+    // worktree and the partially populated session directory so a retry sees
+    // a clean slate rather than tripping the Step 5 "path already exists"
+    // guard (which would then require --force).
     if !filenames.is_empty() {
         local.create_dir_all(&local_session_dir)?;
         for filename in &filenames {
             let remote_file = format!("{remote_session_dir}/{filename}");
             let local_file = local_session_dir.join(filename);
-            ssh.download_file(&remote_file, &local_file)
-                .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+            if let Err(e) = ssh.download_file(&remote_file, &local_file) {
+                local.remove_local_worktree(&local_worktree);
+                let _ = local.remove_dir_all(&local_session_dir);
+                return Err(classify_agent_error(name, e, &cfg.host));
+            }
         }
     }
 
     // Step 10: Auto-archive the remote agent, recording the download origin.
-    cmd_archive(ssh, name, cfg)?;
+    // The transfer has already succeeded, so archive failures (e.g. the remote
+    // tmux session is already gone) are best-effort: warn and continue rather
+    // than reporting overall failure for an agent that is fully downloaded.
+    if let Err(e) = cmd_archive(ssh, name, cfg) {
+        eprintln!("Warning: failed to archive remote agent '{name}': {e}");
+    }
     let reason = format!("downloaded to {}", local_hostname());
     if let Err(e) = ssh.run(&archive_reason_command(&session_name, &reason)) {
         eprintln!("Warning: failed to record archive reason for '{name}': {e}");
@@ -262,6 +304,7 @@ mod tests {
         worktree_result: RefCell<Option<Result<(), SkulkError>>>,
         removed: RefCell<Vec<PathBuf>>,
         created_worktrees: RefCell<Vec<(String, PathBuf)>>,
+        removed_worktrees: RefCell<Vec<PathBuf>>,
     }
 
     impl MockLocalOps {
@@ -274,6 +317,7 @@ mod tests {
                 worktree_result: RefCell::new(None),
                 removed: RefCell::new(Vec::new()),
                 created_worktrees: RefCell::new(Vec::new()),
+                removed_worktrees: RefCell::new(Vec::new()),
             }
         }
 
@@ -322,6 +366,10 @@ mod tests {
             self.worktree_result.borrow_mut().take().unwrap_or(Ok(()))
         }
 
+        fn remove_local_worktree(&self, path: &Path) {
+            self.removed_worktrees.borrow_mut().push(path.to_path_buf());
+        }
+
         fn claude_projects_dir(&self) -> PathBuf {
             self.claude_projects.clone()
         }
@@ -362,6 +410,104 @@ mod tests {
         let result = cmd_download(&ssh, &local, "task", false, &cfg);
         assert!(
             matches!(&result, Err(SkulkError::Validation(msg)) if msg.contains("already exists"))
+        );
+    }
+
+    #[test]
+    fn download_refuses_when_local_claude_session_exists_without_force() {
+        let cfg = test_config();
+        // Inventory + remote-encoded-path lookup happen before Step 6's guard.
+        let ssh = MockSsh::new(vec![
+            Ok(inventory_with_agent("skulk-task")),
+            Ok("-remote-worktrees-skulk-task".into()),
+        ]);
+        // The encoded local session dir for the computed worktree path exists.
+        let encoded = claude_project_dir_name("/home/user/skulk-task");
+        let session_dir = format!("/home/user/.claude/projects/{encoded}");
+        let local = MockLocalOps::clean().with_existing(&session_dir);
+        let result = cmd_download(&ssh, &local, "task", false, &cfg);
+        assert!(
+            matches!(&result, Err(SkulkError::Validation(msg)) if msg.contains("Claude session already exists")),
+            "expected Claude-session-exists Validation error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn download_with_force_removes_existing_claude_session() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(inventory_with_agent("skulk-task")),
+            Ok("-remote-worktrees-skulk-task".into()),
+            ssh_ok(), // ls listing (empty -> no files)
+            ssh_ok(), // archive kill
+            ssh_ok(), // archive reason
+        ]);
+        let encoded = claude_project_dir_name("/home/user/skulk-task");
+        let session_dir = PathBuf::from(format!("/home/user/.claude/projects/{encoded}"));
+        let local = MockLocalOps::clean().with_existing(&session_dir.to_string_lossy());
+        let result = cmd_download(&ssh, &local, "task", true, &cfg);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert!(
+            local.removed.borrow().contains(&session_dir),
+            "force should remove the existing Claude session dir: {:?}",
+            local.removed.borrow()
+        );
+    }
+
+    #[test]
+    fn download_rolls_back_worktree_and_session_on_transfer_failure() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(inventory_with_agent("skulk-task")),
+            Ok("-remote-worktrees-skulk-task".into()),
+            Ok("a.jsonl".into()), // one file to transfer
+        ])
+        .with_download_responses(vec![Err(SkulkError::SshFailed("scp failed".into()))]);
+        let local = MockLocalOps::clean();
+        let result = cmd_download(&ssh, &local, "task", false, &cfg);
+        assert!(
+            matches!(&result, Err(SkulkError::SshFailed(_))),
+            "transfer failure should propagate, got {result:?}"
+        );
+        // The just-created worktree is rolled back...
+        assert!(
+            local
+                .removed_worktrees
+                .borrow()
+                .contains(&PathBuf::from("/home/user/skulk-task")),
+            "worktree should be rolled back on transfer failure"
+        );
+        // ...and the partial session dir is removed.
+        let encoded = claude_project_dir_name("/home/user/skulk-task");
+        let session_dir = PathBuf::from(format!("/home/user/.claude/projects/{encoded}"));
+        assert!(
+            local.removed.borrow().contains(&session_dir),
+            "partial session dir should be removed on transfer failure"
+        );
+        // The remote agent must NOT be archived after a failed transfer.
+        assert!(
+            !ssh.calls().iter().any(|c| c.contains("kill-session")),
+            "remote agent must not be archived after a failed transfer"
+        );
+    }
+
+    #[test]
+    fn download_succeeds_when_remote_archive_fails() {
+        let cfg = test_config();
+        // Transfer succeeds; the archive kill-session returns an error
+        // (e.g. the tmux session is already gone). Download must still succeed.
+        let ssh = MockSsh::new(vec![
+            Ok(inventory_with_agent("skulk-task")),
+            Ok("-remote-worktrees-skulk-task".into()),
+            Ok("a.jsonl".into()),
+            Err(SkulkError::SshFailed("no server running".into())), // archive kill fails
+            ssh_ok(),                                               // archive reason
+        ]);
+        let local = MockLocalOps::clean();
+        let result = cmd_download(&ssh, &local, "task", false, &cfg);
+        assert!(
+            result.is_ok(),
+            "archive failure must be best-effort, got {result:?}"
         );
     }
 
