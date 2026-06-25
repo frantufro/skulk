@@ -53,31 +53,40 @@ pub(crate) fn validate_model(model: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
-/// Validate an agent name: [a-z0-9-], 1-30 chars,
-/// no leading/trailing/consecutive hyphens.
+/// Validate an agent name: [a-zA-Z0-9/_-], 1-100 chars.
 pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
     if name.is_empty() {
         return Err(SkulkError::Validation("Agent name cannot be empty.".into()));
     }
-    if name.len() > 30 {
+    if name.len() > 100 {
         return Err(SkulkError::Validation(
-            "Agent name must be 30 characters or fewer.".into(),
+            "Agent name must be 100 characters or fewer.".into(),
         ));
     }
-    if name.starts_with('-') || name.ends_with('-') {
+    if name.starts_with('-') {
         return Err(SkulkError::Validation(
-            "Agent name cannot start or end with a hyphen.".into(),
+            "Agent name cannot start with a hyphen.".into(),
         ));
     }
-    if name.contains("--") {
+    if name.starts_with('/') {
         return Err(SkulkError::Validation(
-            "Agent name cannot contain consecutive hyphens.".into(),
+            "Agent name cannot start with a slash.".into(),
+        ));
+    }
+    if name.ends_with('/') {
+        return Err(SkulkError::Validation(
+            "Agent name cannot end with a slash.".into(),
+        ));
+    }
+    if name.contains("//") {
+        return Err(SkulkError::Validation(
+            "Agent name cannot contain consecutive slashes.".into(),
         ));
     }
     for c in name.chars() {
-        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/') {
             return Err(SkulkError::Validation(format!(
-                "Invalid character '{c}' in agent name. Only lowercase letters, digits, and hyphens allowed."
+                "Invalid character '{c}' in agent name. Only letters, digits, hyphens, underscores, and slashes allowed."
             )));
         }
     }
@@ -143,9 +152,8 @@ mod tests {
 
     #[test]
     fn validate_name_valid_max_length() {
-        let name = "abcdefghijklmnopqrstuvwxyz1234"; // exactly 30 chars
-        assert_eq!(name.len(), 30);
-        assert!(validate_name(name).is_ok());
+        let name = "a".repeat(100);
+        assert!(validate_name(&name).is_ok());
     }
 
     #[test]
@@ -158,27 +166,21 @@ mod tests {
 
     #[test]
     fn validate_name_too_long() {
-        let name = "a".repeat(31);
+        let name = "a".repeat(101);
         let result = validate_name(&name);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("30 characters"));
+        assert!(msg.contains("100 characters"));
     }
 
     #[test]
     fn validate_name_uppercase() {
-        let result = validate_name("My-Task");
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("Invalid character"));
+        assert!(validate_name("My-Task").is_ok());
     }
 
     #[test]
     fn validate_name_underscore() {
-        let result = validate_name("my_task");
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("Invalid character"));
+        assert!(validate_name("my_task").is_ok());
     }
 
     #[test]
@@ -194,23 +196,56 @@ mod tests {
         let result = validate_name("-leading");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("start or end"));
+        assert!(msg.contains("start with a hyphen"));
     }
 
     #[test]
-    fn validate_name_trailing_hyphen() {
-        let result = validate_name("trailing-");
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("start or end"));
+    fn validate_name_valid_slash() {
+        assert!(validate_name("feat/add-feature").is_ok());
     }
 
     #[test]
-    fn validate_name_consecutive_hyphens() {
-        let result = validate_name("double--hyphen");
+    fn validate_name_valid_namespaced_slash() {
+        assert!(validate_name("feat/fix/deep").is_ok());
+    }
+
+    #[test]
+    fn validate_name_leading_slash_rejected() {
+        let result = validate_name("/absolute");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("consecutive"));
+        assert!(msg.contains("start with a slash"));
+    }
+
+    #[test]
+    fn validate_name_trailing_slash_rejected() {
+        let result = validate_name("feat/");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("end with a slash"));
+    }
+
+    #[test]
+    fn validate_name_consecutive_slashes_rejected() {
+        let result = validate_name("feat//thing");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("consecutive slashes"));
+    }
+
+    #[test]
+    fn validate_name_valid_100_chars() {
+        let name = "a".repeat(100);
+        assert!(validate_name(&name).is_ok());
+    }
+
+    #[test]
+    fn validate_name_101_chars_rejected() {
+        let name = "a".repeat(101);
+        let result = validate_name(&name);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("100 characters"));
     }
 
     // ── shell_escape tests ──────────────────────────────────────────────

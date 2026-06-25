@@ -425,7 +425,7 @@ mod tests {
     fn cmd_ship_rejects_invalid_name() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
-        let result = cmd_ship(&ssh, "Bad-Name", &cfg);
+        let result = cmd_ship(&ssh, "bad name", &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
