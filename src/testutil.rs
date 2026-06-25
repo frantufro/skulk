@@ -78,6 +78,7 @@ pub(crate) fn test_config_json() -> Config {
 pub(crate) struct MockSsh {
     pub responses: RefCell<VecDeque<Result<String, SkulkError>>>,
     pub upload_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
+    pub download_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
     calls: RefCell<Vec<String>>,
 }
 
@@ -86,6 +87,7 @@ impl MockSsh {
         Self {
             responses: RefCell::new(responses.into()),
             upload_responses: RefCell::new(VecDeque::new()),
+            download_responses: RefCell::new(VecDeque::new()),
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -97,9 +99,17 @@ impl MockSsh {
         self
     }
 
-    /// Returns the commands passed to `run`, `interactive`, and `upload_file`,
-    /// in call order. `upload_file` calls are recorded as
-    /// `UPLOAD <local>:<remote>` strings so tests can assert ordering.
+    /// Queue responses for `download_file` calls. If the queue is empty when
+    /// `download_file` is called, the mock returns `Ok(())`.
+    pub fn with_download_responses(mut self, responses: Vec<Result<(), SkulkError>>) -> Self {
+        self.download_responses = RefCell::new(responses.into());
+        self
+    }
+
+    /// Returns the commands passed to `run`, `interactive`, `upload_file`, and
+    /// `download_file`, in call order. `upload_file` calls are recorded as
+    /// `UPLOAD <local>:<remote>` and `download_file` calls as
+    /// `DOWNLOAD <remote>:<local>` strings so tests can assert ordering.
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
@@ -124,6 +134,16 @@ impl Ssh for MockSsh {
             .borrow_mut()
             .push(format!("UPLOAD {}:{remote_path}", local_path.display()));
         self.upload_responses
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+
+    fn download_file(&self, remote_path: &str, local_path: &Path) -> Result<(), SkulkError> {
+        self.calls
+            .borrow_mut()
+            .push(format!("DOWNLOAD {remote_path}:{}", local_path.display()));
+        self.download_responses
             .borrow_mut()
             .pop_front()
             .unwrap_or(Ok(()))
@@ -386,5 +406,39 @@ impl LocalOps for MockLocalOps {
     fn remove_file(&self, path: &Path) -> Result<(), SkulkError> {
         self.removed.borrow_mut().push(path.to_path_buf());
         self.remove.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_download_file_records_call() {
+        let ssh = MockSsh::new(vec![]);
+        ssh.download_file("~/.claude/projects/x/a.jsonl", Path::new("/local/a.jsonl"))
+            .expect("default download should be Ok");
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            "DOWNLOAD ~/.claude/projects/x/a.jsonl:/local/a.jsonl"
+        );
+    }
+
+    #[test]
+    fn mock_download_file_default_ok() {
+        // No responses queued — the mock returns Ok by default.
+        let ssh = MockSsh::new(vec![]);
+        let result = ssh.download_file("remote", Path::new("/local"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn mock_download_file_honors_queued_responses() {
+        let ssh = MockSsh::new(vec![])
+            .with_download_responses(vec![Err(SkulkError::SshFailed("scp failed".into()))]);
+        let result = ssh.download_file("remote", Path::new("/local"));
+        assert!(matches!(result, Err(SkulkError::SshFailed(_))));
     }
 }

@@ -199,6 +199,45 @@ impl Ssh for RealSsh {
             }
         }
     }
+
+    fn download_file(&self, remote_path: &str, local_path: &Path) -> Result<(), SkulkError> {
+        let local = is_localhost(&self.host);
+        let output = if local {
+            // Route through `sh -c` so `~` in remote_path expands like every
+            // other localhost operation. local_path is wrapped in single quotes
+            // via `shell_escape` to tolerate spaces.
+            let local_str = local_path.to_string_lossy();
+            let cmd = format!("cp {} '{}'", remote_path, shell_escape(&local_str));
+            ProcessCommand::new("sh").args(["-c", &cmd]).output()
+        } else {
+            let src = format!("{}:{}", self.host, remote_path);
+            ProcessCommand::new("scp")
+                .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+                .arg(&src)
+                .arg(local_path)
+                .output()
+        }
+        .map_err(|e| {
+            if !local && e.kind() == std::io::ErrorKind::NotFound {
+                SkulkError::Diagnostic {
+                    message: "scp command not found.".into(),
+                    suggestion: "Install OpenSSH.".into(),
+                }
+            } else {
+                SkulkError::SshExec(e.to_string())
+            }
+        })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if local {
+                Err(SkulkError::SshFailed(stderr))
+            } else {
+                Err(classify_ssh_error(&stderr, &self.host))
+            }
+        }
+    }
 }
 
 /// Real `LocalOps` implementation for `skulk upload`: shells out to the local
