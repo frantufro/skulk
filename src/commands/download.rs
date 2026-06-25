@@ -137,10 +137,32 @@ impl LocalOps for RealLocalOps {
 }
 
 /// Resolve the local machine's hostname for the auto-archive reason annotation.
+///
+/// `$HOSTNAME` is unexported on macOS and `/etc/hostname` does not exist there,
+/// so both Linux-friendly sources fall through to the portable `hostname`
+/// command before giving up with `"unknown"`.
 fn local_hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
-        .unwrap_or_else(|_| "unknown".to_string())
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    if let Ok(out) = ProcessCommand::new("hostname").output()
+        && out.status.success()
+    {
+        let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 /// Build the SSH command that records why an agent was archived.
