@@ -201,6 +201,100 @@ impl Ssh for RealSsh {
     }
 }
 
+/// Real `LocalOps` implementation for `skulk upload`: shells out to the local
+/// `git` binary and uses `std::fs` for filesystem work.
+///
+/// `root_dir` is the project directory (parent of `.skulk/`), used both as the
+/// working directory for git commands and as the project root reported to the
+/// upload flow. Falls back to the process CWD when the config carried no root
+/// (e.g. a hand-built `Config`), which keeps `git -C .` behaving as expected.
+pub(crate) struct RealLocalOps {
+    pub root_dir: Option<std::path::PathBuf>,
+}
+
+impl RealLocalOps {
+    /// The git working directory: the project root, or the process CWD if unset.
+    fn workdir(&self) -> std::path::PathBuf {
+        self.root_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    /// Run a local `git` subcommand in the project root, returning trimmed stdout.
+    fn git(&self, args: &[&str]) -> Result<String, SkulkError> {
+        let output = ProcessCommand::new("git")
+            .current_dir(self.workdir())
+            .args(args)
+            .output()
+            .map_err(|e| SkulkError::Validation(format!("failed to run git: {e}")))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(SkulkError::Validation(format!("git {}: {stderr}", args[0])))
+        }
+    }
+}
+
+impl crate::commands::upload::LocalOps for RealLocalOps {
+    fn git_status(&self) -> Result<String, SkulkError> {
+        self.git(&["status", "--porcelain"])
+    }
+
+    fn git_current_branch(&self) -> Result<String, SkulkError> {
+        self.git(&["branch", "--show-current"])
+    }
+
+    fn create_git_bundle(&self, branch: &str, dest: &Path) -> Result<(), SkulkError> {
+        let dest = dest.to_string_lossy();
+        self.git(&["bundle", "create", &dest, branch]).map(|_| ())
+    }
+
+    fn claude_projects_dir(&self) -> std::path::PathBuf {
+        let home = std::env::var_os("HOME")
+            .map_or_else(|| std::path::PathBuf::from("~"), std::path::PathBuf::from);
+        home.join(".claude").join("projects")
+    }
+
+    fn list_dir_files(&self, dir: &Path) -> Result<Vec<std::path::PathBuf>, SkulkError> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            // A missing project dir means "no Claude history"; surface as empty.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(SkulkError::Validation(format!(
+                    "failed to read {}: {e}",
+                    dir.display()
+                )));
+            }
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                SkulkError::Validation(format!("failed to read directory entry: {e}"))
+            })?;
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                files.push(entry.path());
+            }
+        }
+        Ok(files)
+    }
+
+    fn project_root(&self) -> std::path::PathBuf {
+        self.workdir()
+    }
+
+    fn temp_bundle_path(&self, agent_name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("skulk-upload-{agent_name}.bundle"))
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), SkulkError> {
+        std::fs::remove_file(path).map_err(|e| {
+            SkulkError::Validation(format!("failed to remove {}: {e}", path.display()))
+        })
+    }
+}
+
 /// Follow agent output in real-time via poll loop.
 pub(crate) fn cmd_logs_follow(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     let cmd = logs_snapshot_deep_command(name, 200, cfg);
@@ -447,11 +541,15 @@ pub(crate) fn main() {
     let ssh = RealSsh {
         host: cfg.host.clone(),
     };
+    let local = RealLocalOps {
+        root_dir: cfg.root_dir.clone(),
+    };
     if let Err((cmd, e)) = run(
         cli,
         &ssh,
         &cfg,
         &confirm,
+        &local,
         &crate::timings::Timings::production(),
     ) {
         if cfg.output_format == OutputFormat::Json {

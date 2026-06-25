@@ -13,4 +13,5 @@ pub(crate) mod restart;
 pub(crate) mod ship;
 pub(crate) mod status;
 pub(crate) mod update;
+pub(crate) mod upload;
 pub(crate) mod wait;

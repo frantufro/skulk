@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+use commands::upload::LocalOps;
 use commands::{
     completions, destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart,
-    ship, status, update, wait,
+    ship, status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -383,6 +384,27 @@ pub(crate) enum Commands {
     /// Fetches the latest release from GitHub, downloads the binary for the
     /// current platform, replaces the running binary, and prints the new version.
     Update,
+
+    /// Hand off your current local branch and Claude session to a remote agent
+    ///
+    /// Bundles the committed state of the current branch and ships it to the
+    /// remote via git bundle (no shared git remote needed), copies the local
+    /// Claude Code conversation history into the agent's project directory, then
+    /// launches a tmux session so the agent can resume the conversation.
+    ///
+    /// With no `--to`, creates a new agent named after the current branch.
+    /// With `--to <name>`, uploads into an existing agent's worktree; pass
+    /// `--force` to overwrite an existing remote Claude session.
+    ///
+    /// Requires a clean working tree on a named branch (not detached HEAD).
+    Upload {
+        /// Upload into an existing agent instead of creating a new one
+        #[arg(long, value_name = "AGENT")]
+        to: Option<String>,
+        /// Overwrite an existing remote Claude session (only with --to)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 impl Commands {
@@ -417,6 +439,7 @@ impl Commands {
             Commands::Wait { .. } => "wait",
             Commands::Completions { .. } => "completions",
             Commands::Update => "update",
+            Commands::Upload { .. } => "upload",
         }
     }
 }
@@ -437,6 +460,7 @@ pub(crate) fn run(
     ssh: &impl Ssh,
     cfg: &Config,
     confirm: &dyn Fn(&str) -> bool,
+    local: &dyn LocalOps,
     timings: &Timings,
 ) -> Result<(), (String, SkulkError)> {
     let cmd_name = cli.command.name();
@@ -564,6 +588,7 @@ pub(crate) fn run(
             }
         }
         Commands::Update => update::cmd_update(&update::UreqClient),
+        Commands::Upload { to, force } => upload::cmd_upload(ssh, local, to.as_deref(), force, cfg),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -573,12 +598,17 @@ pub(crate) fn run(
 mod tests {
     use super::*;
     use crate::testutil::{
-        MockSsh, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
+        MockLocalOps, MockSsh, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
         mock_list_output, mock_status_output, ssh_ok, test_config,
     };
 
     fn confirm_yes(_: &str) -> bool {
         true
+    }
+
+    /// A clean local repo double for dispatch tests that don't exercise upload.
+    fn local() -> MockLocalOps {
+        MockLocalOps::clean()
     }
 
     #[test]
@@ -591,7 +621,7 @@ mod tests {
             human: false,
             command: Commands::List,
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -604,7 +634,7 @@ mod tests {
             human: false,
             command: Commands::Pull { force: false },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -630,7 +660,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -652,7 +682,7 @@ mod tests {
                 force: true,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -665,7 +695,7 @@ mod tests {
             human: false,
             command: Commands::DestroyAll { force: true },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -678,7 +708,7 @@ mod tests {
             human: false,
             command: Commands::Gc { dry_run: true },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -693,7 +723,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -710,7 +740,7 @@ mod tests {
                 name_only: false,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -727,7 +757,7 @@ mod tests {
                 name_only: false,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -744,7 +774,7 @@ mod tests {
                 name_only: true,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -832,7 +862,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -864,7 +894,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
         let _ = std::fs::remove_file(&tmp);
         assert!(result.is_ok());
     }
@@ -886,7 +916,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
         assert!(result.is_err());
         let (cmd, err) = result.unwrap_err();
         assert_eq!(cmd, "new");
@@ -905,7 +935,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -922,7 +952,7 @@ mod tests {
                 lines: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -939,7 +969,7 @@ mod tests {
                 from: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -995,7 +1025,7 @@ mod tests {
                 from: Some(tmp.clone()),
             },
         };
-        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
         let _ = std::fs::remove_file(&tmp);
         assert!(result.is_ok());
     }
@@ -1017,7 +1047,7 @@ mod tests {
                 )),
             },
         };
-        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
         assert!(result.is_err());
         let (cmd, err) = result.unwrap_err();
         assert_eq!(cmd, "send");
@@ -1036,7 +1066,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1051,7 +1081,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1076,7 +1106,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1104,7 +1134,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1145,7 +1175,7 @@ mod tests {
                 claude_args: None,
             },
         };
-        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
         assert!(result.is_err());
         let (cmd, err) = result.unwrap_err();
         assert_eq!(cmd, "replay");
@@ -1164,7 +1194,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1183,7 +1213,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1206,7 +1236,7 @@ mod tests {
                 name: "test".into(),
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1222,7 +1252,7 @@ mod tests {
                 output: None,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1239,7 +1269,7 @@ mod tests {
                 timeout: 1800,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1256,7 +1286,7 @@ mod tests {
                 timeout: 1800,
             },
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
     }
 
     #[test]
@@ -1359,7 +1389,78 @@ mod tests {
             human: false,
             command: Commands::Doctor,
         };
-        assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_upload() {
+        // New-agent mode happy path: inventory, git fetch, worktree+hooks,
+        // rm bundle, tmux create. The injected MockLocalOps reports a clean
+        // repo on branch `feature` with no Claude history.
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_empty_inventory()),
+            ssh_ok(), // git fetch
+            ssh_ok(), // worktree + hooks
+            ssh_ok(), // rm remote bundle
+            ssh_ok(), // tmux create
+        ]);
+        let cli = Cli {
+            no_color: true,
+            json: false,
+            human: false,
+            command: Commands::Upload {
+                to: None,
+                force: false,
+            },
+        };
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn upload_accepts_to_and_force_flags() {
+        let cli = Cli::try_parse_from(["skulk", "upload", "--to", "agent", "--force"])
+            .expect("parsing --to and --force should succeed");
+        match cli.command {
+            Commands::Upload { to, force } => {
+                assert_eq!(to.as_deref(), Some("agent"));
+                assert!(force);
+            }
+            _ => panic!("expected Commands::Upload"),
+        }
+    }
+
+    #[test]
+    fn upload_defaults_to_new_agent_mode() {
+        let cli = Cli::try_parse_from(["skulk", "upload"]).expect("bare upload should parse");
+        match cli.command {
+            Commands::Upload { to, force } => {
+                assert!(to.is_none());
+                assert!(!force);
+            }
+            _ => panic!("expected Commands::Upload"),
+        }
+    }
+
+    #[test]
+    fn run_upload_surfaces_dirty_tree_as_upload_error() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let mut dirty = MockLocalOps::clean();
+        dirty.status = Ok(" M src/main.rs\n".into());
+        let cli = Cli {
+            no_color: true,
+            json: false,
+            human: false,
+            command: Commands::Upload {
+                to: None,
+                force: false,
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &dirty, &Timings::zero());
+        assert!(result.is_err());
+        let (cmd, _err) = result.unwrap_err();
+        assert_eq!(cmd, "upload");
     }
 
     #[test]
@@ -1375,7 +1476,7 @@ mod tests {
             human: false,
             command: Commands::List,
         };
-        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
         assert!(result.is_err());
         let (cmd_name, _err) = result.unwrap_err();
         assert_eq!(cmd_name, "list");

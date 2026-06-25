@@ -200,13 +200,49 @@ pub(crate) fn agent_create_worktree_command(name: &str, cfg: &Config) -> String 
     let worktree_base = &cfg.worktree_base;
     let default_branch = &cfg.default_branch;
     let agent = AgentRef::new(name, cfg);
-    let session_name = agent.session_name();
     let worktree = agent.worktree_path(cfg);
     let branch = agent.branch_name();
+    // `-b {branch}` creates a fresh branch off the default branch for a brand-new agent.
     let base = format!(
         "mkdir -p {worktree_base} && cd {base_path} && \
          git worktree add -b {branch} {worktree} {default_branch}"
     );
+    append_harness_hooks(base, name, cfg)
+}
+
+/// Build the SSH command to create a git worktree pointed at an **existing**
+/// branch (no `-b`), then install the same harness hooks as
+/// [`agent_create_worktree_command`].
+///
+/// Used by `skulk upload`, which imports the local branch into the remote repo
+/// via a git bundle *before* creating the worktree — so the branch already
+/// exists and must not be re-created. The `worktree_base` mkdir and hook
+/// installation are identical to the new-agent path; only the `git worktree
+/// add` form differs.
+pub(crate) fn agent_create_worktree_hooks_command(name: &str, cfg: &Config) -> String {
+    let base_path = &cfg.base_path;
+    let worktree_base = &cfg.worktree_base;
+    let agent = AgentRef::new(name, cfg);
+    let worktree = agent.worktree_path(cfg);
+    let branch = agent.branch_name();
+    // No `-b`: the branch was already created by `git fetch <bundle>` in the upload flow.
+    let base = format!(
+        "mkdir -p {worktree_base} && cd {base_path} && \
+         git worktree add {worktree} {branch}"
+    );
+    append_harness_hooks(base, name, cfg)
+}
+
+/// Append the harness-specific hook installation to a worktree-creation command.
+///
+/// Factored out of [`agent_create_worktree_command`] so the new-branch path and
+/// the existing-branch path used by `skulk upload`
+/// ([`agent_create_worktree_hooks_command`]) install identical hooks. See
+/// [`agent_create_worktree_command`] for the per-harness behavior.
+fn append_harness_hooks(base: String, name: &str, cfg: &Config) -> String {
+    let agent = AgentRef::new(name, cfg);
+    let session_name = agent.session_name();
+    let worktree = agent.worktree_path(cfg);
     match cfg.harness.as_str() {
         DEFAULT_HARNESS => {
             let hooks_json = hooks_settings_json(&session_name);
@@ -627,6 +663,38 @@ mod tests {
         assert!(cmd.contains("git worktree add -b skulk-my-task"));
         assert!(cmd.contains("~/test-project-worktrees/skulk-my-task"));
         assert!(cmd.contains("main"));
+    }
+
+    #[test]
+    fn agent_create_worktree_hooks_command_uses_existing_branch_without_dash_b() {
+        // Upload imports the branch via `git fetch <bundle>` first, so the
+        // worktree must attach to the existing branch (no `-b`, no default-branch
+        // argument).
+        let cfg = test_config();
+        let cmd = agent_create_worktree_hooks_command("my-task", &cfg);
+        assert!(cmd.contains("mkdir -p ~/test-project-worktrees"));
+        assert!(
+            cmd.contains("git worktree add ~/test-project-worktrees/skulk-my-task skulk-my-task"),
+            "expected worktree add against existing branch, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("git worktree add -b"),
+            "must not create a new branch with -b, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_create_worktree_hooks_command_installs_hooks_settings_file() {
+        let cfg = test_config();
+        let cmd = agent_create_worktree_hooks_command("my-task", &cfg);
+        assert!(
+            cmd.contains("~/test-project-worktrees/skulk-my-task/.claude"),
+            "expected .claude directory creation: {cmd}"
+        );
+        assert!(
+            cmd.contains("settings.local.json"),
+            "expected hooks settings file write: {cmd}"
+        );
     }
 
     #[test]
