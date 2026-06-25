@@ -1380,6 +1380,28 @@ mod tests {
     }
 
     #[test]
+    fn run_dispatches_upload() {
+        // The upload command is a stub that always returns Err after one SSH
+        // roundtrip (resolving the remote project dir). Verify the dispatch
+        // path reaches upload and surfaces the stub error as "upload".
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("-home-remote-worktrees-skulk-agent".into())]);
+        let cli = Cli {
+            no_color: true,
+            json: false,
+            human: false,
+            command: Commands::Upload {
+                name: "agent".into(),
+                local_project: "/home/local/skulk".into(),
+            },
+        };
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero());
+        assert!(result.is_err());
+        let (cmd, _err) = result.unwrap_err();
+        assert_eq!(cmd, "upload");
+    }
+
+    #[test]
     fn run_returns_error_with_command_name() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::Diagnostic {

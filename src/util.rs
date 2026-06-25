@@ -128,6 +128,11 @@ pub(crate) fn claude_project_dir_name(abs_path: &str) -> String {
 ///
 /// Requires the remote path to already exist (because `cd` fails on a
 /// nonexistent directory). Call this after the remote worktree has been created.
+///
+/// **The path must not contain spaces or single quotes** — it is inserted
+/// unquoted into the shell command. Callers must ensure the path is
+/// constructed from validated, space-free components (e.g. `session_prefix`
+/// and agent `name` restricted to `[a-z0-9-]`).
 pub(crate) fn remote_claude_project_dir_command(remote_path: &str) -> String {
     format!("cd {remote_path} && pwd | tr '/' '-'")
 }
