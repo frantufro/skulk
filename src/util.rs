@@ -107,6 +107,36 @@ pub(crate) fn extract_section<'a>(raw: &'a str, start: &str, end: &str) -> &'a s
     }
 }
 
+/// Encode an absolute filesystem path into the directory name Claude Code uses
+/// under `~/.claude/projects/`.
+///
+/// Claude Code stores project sessions at `~/.claude/projects/<encoded>/` where
+/// the encoded name is the absolute path with every `/` replaced by `-`.
+///
+/// Example: `/home/alice/projects/skulk` → `-home-alice-projects-skulk`
+pub(crate) fn claude_project_dir_name(abs_path: &str) -> String {
+    abs_path.replace('/', "-")
+}
+
+/// Build a shell command that outputs the Claude Code project directory name
+/// for a remote path (which may start with `~`).
+///
+/// The output is suitable for appending to `~/.claude/projects/` to get the
+/// session storage directory on the remote. Uses `cd <path> && pwd | tr '/' '-'`:
+/// `cd` expands the tilde, `pwd` gives the canonical absolute path, `tr`
+/// applies the encoding.
+///
+/// Requires the remote path to already exist (because `cd` fails on a
+/// nonexistent directory). Call this after the remote worktree has been created.
+///
+/// **The path must not contain spaces or single quotes** — it is inserted
+/// unquoted into the shell command. Callers must ensure the path is
+/// constructed from validated, space-free components (e.g. `session_prefix`
+/// and agent `name`).
+pub(crate) fn remote_claude_project_dir_command(remote_path: &str) -> String {
+    format!("cd {remote_path} && pwd | tr '/' '-'")
+}
+
 /// Read a yes/no confirmation from the given reader. Returns true for "y" or "yes" (case-insensitive).
 /// Returns false on EOF or any other input.
 pub(crate) fn confirm_from_reader<R: BufRead>(prompt: &str, reader: &mut R) -> bool {
@@ -337,5 +367,45 @@ mod tests {
     fn confirm_eof_returns_false() {
         let mut input = std::io::Cursor::new(b"");
         assert!(!confirm_from_reader("Delete?", &mut input));
+    }
+
+    // ── claude_project_dir_name tests ──────────────────────────────────────
+
+    #[test]
+    fn claude_project_dir_name_simple() {
+        assert_eq!(
+            claude_project_dir_name("/home/alice/skulk"),
+            "-home-alice-skulk"
+        );
+    }
+
+    #[test]
+    fn claude_project_dir_name_nested_with_hyphens() {
+        assert_eq!(
+            claude_project_dir_name("/home/alice/worktrees/skulk-add-feature"),
+            "-home-alice-worktrees-skulk-add-feature"
+        );
+    }
+
+    #[test]
+    fn claude_project_dir_name_root_slash() {
+        assert_eq!(claude_project_dir_name("/"), "-");
+    }
+
+    // ── remote_claude_project_dir_command tests ─────────────────────────────
+
+    #[test]
+    fn remote_claude_project_dir_command_uses_cd_and_tr() {
+        let cmd = remote_claude_project_dir_command("~/worktrees/skulk-foo");
+        assert!(cmd.contains("cd ~/worktrees/skulk-foo"));
+        assert!(cmd.contains("pwd"));
+        assert!(cmd.contains("tr '/' '-'"));
+    }
+
+    #[test]
+    fn remote_claude_project_dir_command_embeds_path() {
+        let path = "~/my-project-worktrees/skulk-thing";
+        let cmd = remote_claude_project_dir_command(path);
+        assert!(cmd.contains(path));
     }
 }

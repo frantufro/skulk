@@ -17,8 +17,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    completions, destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart,
-    ship, status, update, wait,
+    completions, destroy, doctor, download, gc, interact, list, new, prompt_source, pull, replay,
+    restart, ship, status, update, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -383,6 +383,22 @@ pub(crate) enum Commands {
     /// Fetches the latest release from GitHub, downloads the binary for the
     /// current platform, replaces the running binary, and prints the new version.
     Update,
+
+    /// Bring a remote agent's branch and Claude session to a local worktree
+    ///
+    /// Reverse of `skulk upload`. Creates a local git worktree at `../<branch>`,
+    /// copies the agent's Claude Code conversation files into the matching
+    /// `~/.claude/projects/` directory, then archives the remote agent (tmux
+    /// session killed, worktree and branch preserved). The local working tree
+    /// must be clean. Use `--force` to overwrite an existing local worktree or
+    /// Claude session.
+    Download {
+        /// Agent name to download
+        name: String,
+        /// Overwrite an existing local worktree path or Claude session
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 impl Commands {
@@ -417,6 +433,7 @@ impl Commands {
             Commands::Wait { .. } => "wait",
             Commands::Completions { .. } => "completions",
             Commands::Update => "update",
+            Commands::Download { .. } => "download",
         }
     }
 }
@@ -564,6 +581,9 @@ pub(crate) fn run(
             }
         }
         Commands::Update => update::cmd_update(&update::UreqClient),
+        Commands::Download { name, force } => {
+            download::cmd_download(ssh, &download::RealLocalOps, &name, force, cfg)
+        }
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
@@ -579,6 +599,29 @@ mod tests {
 
     fn confirm_yes(_: &str) -> bool {
         true
+    }
+
+    #[test]
+    fn download_accepts_name_and_force_flag() {
+        let cli = Cli::try_parse_from(["skulk", "download", "task", "--force"])
+            .expect("parsing download --force should succeed");
+        match cli.command {
+            Commands::Download { name, force } => {
+                assert_eq!(name, "task");
+                assert!(force);
+            }
+            _ => panic!("expected Commands::Download"),
+        }
+    }
+
+    #[test]
+    fn download_force_defaults_to_false() {
+        let cli =
+            Cli::try_parse_from(["skulk", "download", "task"]).expect("bare download should parse");
+        match cli.command {
+            Commands::Download { force, .. } => assert!(!force),
+            _ => panic!("expected Commands::Download"),
+        }
     }
 
     #[test]

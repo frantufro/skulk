@@ -11,4 +11,10 @@ pub(crate) trait Ssh {
     /// The remote path is interpolated into the transfer command without quoting, so
     /// it must be shell-safe (configuration values are validated in `config.rs`).
     fn upload_file(&self, local_path: &Path, remote_path: &str) -> Result<(), SkulkError>;
+
+    /// Copy a remote file to a local path.
+    ///
+    /// Used to retrieve Claude Code session files from a remote agent's
+    /// `~/.claude/projects/` directory.
+    fn download_file(&self, remote_path: &str, local_path: &Path) -> Result<(), SkulkError>;
 }
