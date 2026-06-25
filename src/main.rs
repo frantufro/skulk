@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 
 use commands::{
     completions, destroy, doctor, gc, interact, list, new, prompt_source, pull, replay, restart,
-    ship, status, update, wait,
+    ship, status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -383,6 +383,18 @@ pub(crate) enum Commands {
     /// Fetches the latest release from GitHub, downloads the binary for the
     /// current platform, replaces the running binary, and prints the new version.
     Update,
+
+    /// Upload local Claude Code conversation files to a remote agent's project directory
+    ///
+    /// Copies JSONL session files from `~/.claude/projects/<encoded-local-path>/` to
+    /// the matching directory on the remote so the agent can resume a conversation.
+    Upload {
+        /// Agent name
+        name: String,
+        /// Absolute path to the local project directory (encoded for Claude's storage layout)
+        #[arg(long, value_name = "DIR")]
+        local_project: String,
+    },
 }
 
 impl Commands {
@@ -417,6 +429,7 @@ impl Commands {
             Commands::Wait { .. } => "wait",
             Commands::Completions { .. } => "completions",
             Commands::Update => "update",
+            Commands::Upload { .. } => "upload",
         }
     }
 }
@@ -564,6 +577,10 @@ pub(crate) fn run(
             }
         }
         Commands::Update => update::cmd_update(&update::UreqClient),
+        Commands::Upload {
+            name,
+            local_project,
+        } => upload::cmd_upload(ssh, &name, cfg, &local_project),
     };
 
     result.map_err(|e| (cmd_name.to_string(), e))
