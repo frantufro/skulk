@@ -97,6 +97,18 @@ pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
     agent_destroy_session_command(name, cfg)
 }
 
+/// Build the SSH command to write an archive reason sidecar file.
+///
+/// Stored at `~/.skulk/archive/<session_name>.txt` so callers can later
+/// inspect why an agent was archived. `reason` must already be
+/// `shell_escape`d by the caller.
+pub(crate) fn archive_reason_command(session_name: &str, reason: &str) -> String {
+    format!(
+        "mkdir -p ~/.skulk/archive && printf '%s' '{}' > ~/.skulk/archive/{session_name}.txt",
+        shell_escape(reason)
+    )
+}
+
 /// Build the SSH command to send a prompt to a running agent (no startup delay).
 ///
 /// Unlike `agent_send_prompt_command()` (in new.rs) which includes a startup delay,
@@ -237,10 +249,25 @@ pub(crate) fn cmd_logs(
 ///
 /// Non-destructive counterpart to `cmd_destroy`. Use this to stop an agent
 /// whose work you want to review or resume later without losing anything.
-pub(crate) fn cmd_archive(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+///
+/// If `reason` is provided it is stored in a sidecar file on the remote at
+/// `~/.skulk/archive/<session>.txt`. The sidecar write is non-fatal: if it
+/// fails, a warning is printed to stderr and `Ok` is still returned.
+pub(crate) fn cmd_archive(
+    ssh: &impl Ssh,
+    name: &str,
+    reason: Option<&str>,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
     validate_name(name)?;
     ssh.run(&archive_command(name, cfg))
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    if let Some(text) = reason {
+        let session_name = AgentRef::new(name, cfg).session_name();
+        if let Err(e) = ssh.run(&archive_reason_command(&session_name, text)) {
+            eprintln!("Warning: failed to write archive reason for '{name}': {e}");
+        }
+    }
     eprintln!("Archived agent '{name}'. Worktree and branch preserved.");
     Ok(())
 }
@@ -325,7 +352,7 @@ pub(crate) fn cmd_send(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, assert_err, ssh_ok, test_config};
+    use crate::testutil::{MockSsh, assert_err, ssh_err, ssh_ok, test_config};
 
     #[test]
     fn connect_command_generates_tmux_attach() {
@@ -799,7 +826,7 @@ mod tests {
     fn cmd_archive_succeeds() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![ssh_ok()]);
-        assert!(cmd_archive(&ssh, "test", &cfg).is_ok());
+        assert!(cmd_archive(&ssh, "test", None, &cfg).is_ok());
     }
 
     #[test]
@@ -808,7 +835,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find session: skulk-ghost".into(),
         ))]);
-        let result = cmd_archive(&ssh, "ghost", &cfg);
+        let result = cmd_archive(&ssh, "ghost", None, &cfg);
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("ghost"));
         });
@@ -818,8 +845,60 @@ mod tests {
     fn cmd_archive_rejects_invalid_name() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
-        let result = cmd_archive(&ssh, "../bad", &cfg);
+        let result = cmd_archive(&ssh, "../bad", None, &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
+    }
+
+    #[test]
+    fn archive_with_reason_writes_sidecar() {
+        // Two SSH calls: kill session, then write reason sidecar
+        let ssh = MockSsh::new(vec![ssh_ok(), ssh_ok()]);
+        let cfg = test_config();
+        cmd_archive(&ssh, "my-agent", Some("PR merged"), &cfg).unwrap();
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 2);
+        // Second call writes the sidecar
+        assert!(calls[1].contains("skulk-my-agent.txt"));
+        assert!(calls[1].contains("PR merged"));
+        assert!(calls[1].contains("~/.skulk/archive"));
+    }
+
+    #[test]
+    fn archive_without_reason_makes_one_ssh_call() {
+        let ssh = MockSsh::new(vec![ssh_ok()]);
+        let cfg = test_config();
+        cmd_archive(&ssh, "my-agent", None, &cfg).unwrap();
+        assert_eq!(ssh.calls().len(), 1);
+    }
+
+    #[test]
+    fn archive_reason_failure_is_nonfatal() {
+        // First call (kill) succeeds; second call (reason write) fails
+        let ssh = MockSsh::new(vec![ssh_ok(), ssh_err("disk full")]);
+        let cfg = test_config();
+        // Must return Ok even though the sidecar write failed
+        let result = cmd_archive(&ssh, "my-agent", Some("done"), &cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn archive_reason_command_contains_session_name() {
+        let cmd = archive_reason_command("skulk-my-agent", "PR merged");
+        assert!(cmd.contains("skulk-my-agent.txt"));
+    }
+
+    #[test]
+    fn archive_reason_command_contains_reason_text() {
+        let cmd = archive_reason_command("skulk-my-agent", "PR merged");
+        assert!(cmd.contains("PR merged"));
+    }
+
+    #[test]
+    fn archive_reason_command_escapes_single_quotes() {
+        // Reason text with single quotes must be shell-escaped
+        let cmd = archive_reason_command("skulk-foo", "it's done");
+        // shell_escape turns ' into '\''
+        assert!(cmd.contains("it'\\''s done"));
     }
 
     #[test]

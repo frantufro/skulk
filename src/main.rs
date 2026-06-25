@@ -244,6 +244,9 @@ pub(crate) enum Commands {
     Archive {
         /// Agent name to archive
         name: String,
+        /// Optional annotation stored on the remote as ~/.skulk/archive/<session>.txt
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
     },
 
     /// Restart an agent in its existing worktree with a fresh Claude session
@@ -508,7 +511,9 @@ pub(crate) fn run(
                 .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
-        Commands::Archive { name } => interact::cmd_archive(ssh, &name, cfg),
+        Commands::Archive { name, reason } => {
+            interact::cmd_archive(ssh, &name, reason.as_deref(), cfg)
+        }
         Commands::Restart {
             name,
             remote_control,
@@ -1049,6 +1054,7 @@ mod tests {
             human: false,
             command: Commands::Archive {
                 name: "test".into(),
+                reason: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &Timings::zero()).is_ok());
