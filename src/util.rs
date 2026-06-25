@@ -53,7 +53,15 @@ pub(crate) fn validate_model(model: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
-/// Validate an agent name: [a-zA-Z0-9/_-], 1-100 chars.
+/// Validate an agent name: `[a-zA-Z0-9_-]`, 1-100 chars, not starting with a hyphen.
+///
+/// Slashes are intentionally rejected: the session name (`<prefix><name>`) is
+/// used as a file path component in `~/.skulk/state/<session_name>` and as the
+/// final path segment of the git worktree directory
+/// (`<worktree_base>/<session_name>`). A slash in the name would silently
+/// create nested directories in both locations, breaking the flat inventory
+/// layout assumed by `gc_find_orphans` and the state-file reads in `skulk wait`
+/// and `skulk list`.
 pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
     if name.is_empty() {
         return Err(SkulkError::Validation("Agent name cannot be empty.".into()));
@@ -68,25 +76,10 @@ pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
             "Agent name cannot start with a hyphen.".into(),
         ));
     }
-    if name.starts_with('/') {
-        return Err(SkulkError::Validation(
-            "Agent name cannot start with a slash.".into(),
-        ));
-    }
-    if name.ends_with('/') {
-        return Err(SkulkError::Validation(
-            "Agent name cannot end with a slash.".into(),
-        ));
-    }
-    if name.contains("//") {
-        return Err(SkulkError::Validation(
-            "Agent name cannot contain consecutive slashes.".into(),
-        ));
-    }
     for c in name.chars() {
-        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/') {
+        if !(c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             return Err(SkulkError::Validation(format!(
-                "Invalid character '{c}' in agent name. Only letters, digits, hyphens, underscores, and slashes allowed."
+                "Invalid character '{c}' in agent name. Only letters, digits, hyphens, and underscores allowed."
             )));
         }
     }
@@ -200,52 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_name_valid_slash() {
-        assert!(validate_name("feat/add-feature").is_ok());
-    }
-
-    #[test]
-    fn validate_name_valid_namespaced_slash() {
-        assert!(validate_name("feat/fix/deep").is_ok());
-    }
-
-    #[test]
-    fn validate_name_leading_slash_rejected() {
-        let result = validate_name("/absolute");
+    fn validate_name_slash_rejected() {
+        let result = validate_name("feat/add-feature");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("start with a slash"));
-    }
-
-    #[test]
-    fn validate_name_trailing_slash_rejected() {
-        let result = validate_name("feat/");
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("end with a slash"));
-    }
-
-    #[test]
-    fn validate_name_consecutive_slashes_rejected() {
-        let result = validate_name("feat//thing");
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("consecutive slashes"));
-    }
-
-    #[test]
-    fn validate_name_valid_100_chars() {
-        let name = "a".repeat(100);
-        assert!(validate_name(&name).is_ok());
-    }
-
-    #[test]
-    fn validate_name_101_chars_rejected() {
-        let name = "a".repeat(101);
-        let result = validate_name(&name);
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("100 characters"));
+        assert!(msg.contains("Invalid character"));
     }
 
     // ── shell_escape tests ──────────────────────────────────────────────
