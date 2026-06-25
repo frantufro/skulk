@@ -7,9 +7,7 @@ use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
-use crate::util::{
-    claude_project_dir_name, remote_claude_project_dir_command, shell_escape, validate_name,
-};
+use crate::util::{claude_project_dir_name, remote_claude_project_dir_command, validate_name};
 
 /// Local filesystem and git operations needed by `skulk download`.
 ///
@@ -165,23 +163,6 @@ fn local_hostname() -> String {
     "unknown".to_string()
 }
 
-/// Build the SSH command that records why an agent was archived.
-///
-/// Stored at `~/.skulk/archive/<session_name>.txt`. `reason` is the raw,
-/// unescaped string; this function applies `shell_escape` internally.
-///
-/// NOTE: this sidecar is currently forward-looking and intentionally unread —
-/// no command consumes it yet. It is written so that, once `cmd_archive` grows
-/// an optional `reason` argument (dependency task
-/// `add-optional-reason-flag-to-skulk-archive`), `skulk list`/`status` can
-/// surface the download origin. Until then it is a best-effort annotation.
-fn archive_reason_command(session_name: &str, reason: &str) -> String {
-    format!(
-        "mkdir -p ~/.skulk/archive && printf '%s' '{}' > ~/.skulk/archive/{session_name}.txt",
-        shell_escape(reason)
-    )
-}
-
 /// Bring a remote agent's branch and Claude session to a local worktree.
 ///
 /// Reverse of `skulk upload`: transfers the agent's git branch into a new local
@@ -293,12 +274,9 @@ pub(crate) fn cmd_download(
     // The transfer has already succeeded, so archive failures (e.g. the remote
     // tmux session is already gone) are best-effort: warn and continue rather
     // than reporting overall failure for an agent that is fully downloaded.
-    if let Err(e) = cmd_archive(ssh, name, None, cfg) {
-        eprintln!("Warning: failed to archive remote agent '{name}': {e}");
-    }
     let reason = format!("downloaded to {}", local_hostname());
-    if let Err(e) = ssh.run(&archive_reason_command(&session_name, &reason)) {
-        eprintln!("Warning: failed to record archive reason for '{name}': {e}");
+    if let Err(e) = cmd_archive(ssh, name, Some(&reason), cfg) {
+        eprintln!("Warning: failed to archive remote agent '{name}': {e}");
     }
 
     // Step 11: Print success message.
