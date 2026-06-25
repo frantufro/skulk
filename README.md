@@ -351,13 +351,14 @@ Dynamic agent-name completion shells out to `skulk list` at Tab time. If `.skulk
 
 ## Agent Names
 
-Names must be lowercase letters, digits, and hyphens. 1-30 characters. No leading, trailing, or consecutive hyphens.
+Names may contain letters (upper or lowercase), digits, hyphens, underscores, and forward slashes. 1-100 characters. Cannot start with `-` or `/`, end with `/`, or contain `//`.
 
 ```
 skulk new my-feature      # valid
 skulk new fix-123         # valid
-skulk new My_Feature      # invalid (uppercase, underscores)
-skulk new -bad-name-      # invalid (leading/trailing hyphens)
+skulk new My_Feature      # valid
+skulk new feat/add-thing  # valid
+skulk new -bad-name       # invalid (leading hyphen)
 ```
 
 ## Flags

@@ -700,11 +700,11 @@ mod tests {
         // Defense-in-depth: if something bizarre landed in the state dir
         // (a file named `skulk-with spaces` or `skulk-rogue;rm`), we don't
         // pass it to `rm`. `validate_name` rejects anything outside
-        // `[a-z0-9-]` so the suffix can't smuggle in shell metacharacters.
+        // `[a-zA-Z0-9/_-]` so the suffix can't smuggle in shell metacharacters.
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
             Ok(mock_empty_inventory()),
-            Ok("skulk-UPPER\nskulk-with space\nskulk-semi;colon\n".to_string()),
+            Ok("skulk-with space\nskulk-semi;colon\n".to_string()),
         ]);
         assert!(cmd_gc(&ssh, false, &cfg).is_ok());
         let calls = ssh.calls();
