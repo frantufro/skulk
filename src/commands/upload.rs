@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
-
 use crate::agent_ref::AgentRef;
-use crate::commands::new::{agent_create_tmux_command, agent_create_worktree_hooks_command};
+use crate::commands::new::{
+    agent_create_tmux_command, agent_create_worktree_hooks_command,
+    agent_rollback_worktree_command, format_rollback_failure_warning,
+};
 use crate::config::Config;
-use crate::error::SkulkError;
+use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
 use crate::util::{claude_project_dir_name, remote_claude_project_dir_command, validate_name};
@@ -124,31 +125,17 @@ pub(crate) fn cmd_upload(
         )));
     }
 
-    // Step 5: Create the git bundle locally.
-    let bundle_path = local.temp_bundle_path(&agent_name);
-    local.create_git_bundle(local_branch, &bundle_path)?;
-
-    // Step 6: Transfer the bundle to the remote.
-    let remote_bundle = format!("/tmp/skulk-upload-{session_name}.bundle");
-    if let Err(e) = ssh
-        .upload_file(&bundle_path, &remote_bundle)
-        .context("Failed to transfer git bundle to remote")
-    {
-        cleanup_local_bundle(local, &bundle_path);
-        return Err(SkulkError::Validation(format!("{e:#}")));
-    }
-
     // Step 7a (--to mode): refuse to clobber an existing remote Claude session
-    // unless --force was given.
+    // unless --force was given. Built from the shared path-encoding helper so
+    // the probe and Step 10 encode the worktree path identically.
     if !new_agent_mode && !force {
         let probe = format!(
-            "test -d ~/.claude/projects/$(cd {worktree_path} && pwd | tr '/' '-') && echo exists"
+            "test -d ~/.claude/projects/$({}) && echo exists",
+            remote_claude_project_dir_command(&worktree_path)
         );
         if let Ok(out) = ssh.run(&probe)
             && out.trim() == "exists"
         {
-            let _ = ssh.run(&format!("rm -f {remote_bundle}"));
-            cleanup_local_bundle(local, &bundle_path);
             return Err(SkulkError::Validation(format!(
                 "Agent '{agent_name}' already has a Claude session on the remote. \
                  Use --force to overwrite."
@@ -156,21 +143,55 @@ pub(crate) fn cmd_upload(
         }
     }
 
-    // Step 7b + 7c (new-agent mode): import the branch from the bundle and
-    // create the worktree pointed at it, with the harness hooks installed.
+    // Steps 5/6/7b/7c/8 (new-agent mode only): the git bundle exists solely to
+    // import the branch and seed the worktree. In --to mode the agent already
+    // has a worktree, so the bundle would be uploaded then deleted unread —
+    // skip it entirely and only transfer the Claude session below.
     if new_agent_mode {
+        // Step 5: Create the git bundle locally.
+        let bundle_path = local.temp_bundle_path(&agent_name);
+        local.create_git_bundle(local_branch, &bundle_path)?;
+
+        // Step 6: Transfer the bundle to the remote. Preserve the classified
+        // SSH error variant rather than flattening it into Validation.
+        let remote_bundle = format!("/tmp/skulk-upload-{session_name}.bundle");
+        if let Err(e) = ssh.upload_file(&bundle_path, &remote_bundle) {
+            cleanup_local_bundle(local, &bundle_path);
+            return Err(classify_agent_error(&agent_name, e, host));
+        }
+
+        // Step 7b: import the branch from the bundle. On failure, clean up both
+        // the remote and local temp bundles before returning.
         let base_path = &cfg.base_path;
-        ssh.run(&format!(
+        if let Err(e) = ssh.run(&format!(
             "cd {base_path} && git fetch {remote_bundle} {local_branch}:{branch_name}"
-        ))?;
-        ssh.run(&agent_create_worktree_hooks_command(&agent_name, cfg))?;
+        )) {
+            let _ = ssh.run(&format!("rm -f {remote_bundle}"));
+            cleanup_local_bundle(local, &bundle_path);
+            return Err(e);
+        }
+
+        // Step 7c: create the worktree pointed at the imported branch, with the
+        // harness hooks installed. On failure, roll back the freshly-imported
+        // branch and clean up both temp bundles.
+        if let Err(e) = ssh.run(&agent_create_worktree_hooks_command(&agent_name, cfg)) {
+            if ssh
+                .run(&agent_rollback_worktree_command(&agent_name, cfg))
+                .is_err()
+            {
+                eprintln!("{}", format_rollback_failure_warning(&agent_name));
+            }
+            let _ = ssh.run(&format!("rm -f {remote_bundle}"));
+            cleanup_local_bundle(local, &bundle_path);
+            return Err(e);
+        }
+
+        // Step 8: Clean up the remote bundle (non-fatal).
+        let _ = ssh.run(&format!("rm -f {remote_bundle}"));
+
+        // Step 9: Clean up the local bundle (non-fatal).
+        cleanup_local_bundle(local, &bundle_path);
     }
-
-    // Step 8: Clean up the remote bundle (non-fatal).
-    let _ = ssh.run(&format!("rm -f {remote_bundle}"));
-
-    // Step 9: Clean up the local bundle (non-fatal).
-    cleanup_local_bundle(local, &bundle_path);
 
     // Step 10: Transfer the local Claude session files. Skip silently when the
     // local project has no session history — the agent just starts fresh.
@@ -188,20 +209,31 @@ pub(crate) fn cmd_upload(
                 continue;
             };
             let remote_path = format!("{remote_session_dir}/{}", filename.to_string_lossy());
-            ssh.upload_file(&file, &remote_path)
-                .context("Failed to transfer Claude session file")
-                .map_err(|e| SkulkError::Validation(format!("{e:#}")))?;
+            if let Err(e) = ssh.upload_file(&file, &remote_path) {
+                return Err(classify_agent_error(&agent_name, e, host));
+            }
         }
     }
 
-    // Step 11: Launch a tmux session running the harness in the worktree.
-    ssh.run(&agent_create_tmux_command(
+    // Step 11: Launch a tmux session running the harness in the worktree. In
+    // new-agent mode a tmux failure would strand the freshly-created worktree
+    // and imported branch, so best-effort roll them back (mirroring `cmd_new`).
+    if let Err(e) = ssh.run(&agent_create_tmux_command(
         &agent_name,
         cfg,
         false,
         None,
         None,
-    ))?;
+    )) {
+        if new_agent_mode
+            && ssh
+                .run(&agent_rollback_worktree_command(&agent_name, cfg))
+                .is_err()
+        {
+            eprintln!("{}", format_rollback_failure_warning(&agent_name));
+        }
+        return Err(e);
+    }
 
     // Step 12: Success.
     println!(
@@ -396,14 +428,13 @@ mod tests {
     fn upload_to_existing_with_force_overwrites() {
         let cfg = test_config();
         // With --force, the session probe is skipped; flow proceeds to session
-        // transfer + tmux create. No git fetch / worktree in --to mode.
+        // transfer + tmux create. No git fetch / worktree / bundle in --to mode.
         let ssh = MockSsh::new(vec![
             Ok(mock_inventory(
                 &[],
                 &[("skulk-target", "/wt/skulk-target")],
                 &["skulk-target"],
             )),
-            ssh_ok(), // rm remote bundle
             ssh_ok(), // tmux create
         ]);
         let local = MockLocalOps::clean(); // no session files
@@ -419,6 +450,81 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.contains("git worktree add")),
             "--to mode must not create a worktree, got: {calls:?}"
+        );
+        // --to mode never builds or ships the git bundle: nothing to upload
+        // and no /tmp bundle to remove.
+        assert!(
+            !calls.iter().any(|c| c.contains(".bundle")),
+            "--to mode must not touch a git bundle, got: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn upload_to_existing_with_force_transfers_session_files() {
+        let cfg = test_config();
+        // --to + force, with local session history: the JSONL must land in the
+        // existing worktree's remote session dir.
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-target", "/wt/skulk-target")],
+                &["skulk-target"],
+            )),
+            Ok("-wt-skulk-target".into()), // remote project dir
+            ssh_ok(),                      // mkdir remote session dir
+            ssh_ok(),                      // tmux create
+        ]);
+        let mut local = MockLocalOps::clean();
+        local.files = Ok(vec![PathBuf::from(
+            "/home/local/.claude/projects/-home-local-skulk/session-xyz.jsonl",
+        )]);
+
+        let result = cmd_upload(&ssh, &local, Some("target"), true, &cfg);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        let calls = ssh.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("mkdir -p ~/.claude/projects/")),
+            "expected mkdir for existing worktree's session dir, got: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("UPLOAD") && c.contains("session-xyz.jsonl")),
+            "expected JSONL upload into existing worktree, got: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains(".bundle")),
+            "--to mode must not touch a git bundle, got: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn upload_rolls_back_worktree_on_tmux_failure() {
+        let cfg = test_config();
+        // New-agent mode: tmux create fails after the worktree + branch are
+        // imported. The worktree must be rolled back so gc isn't left an orphan.
+        let ssh = MockSsh::new(vec![
+            Ok(mock_empty_inventory()),
+            ssh_ok(),                                        // git fetch
+            ssh_ok(),                                        // worktree + hooks
+            ssh_ok(),                                        // rm remote bundle
+            Err(SkulkError::SshFailed("tmux: boom".into())), // tmux create FAILS
+            ssh_ok(),                                        // rollback worktree
+        ]);
+        let local = MockLocalOps::clean();
+
+        let result = cmd_upload(&ssh, &local, None, false, &cfg);
+        assert!(result.is_err(), "expected error on tmux failure");
+
+        let calls = ssh.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains("git worktree remove") && c.contains("git branch -D")),
+            "expected rollback (worktree remove + branch -D), got: {calls:?}"
         );
     }
 

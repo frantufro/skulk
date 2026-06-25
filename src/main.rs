@@ -402,7 +402,7 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "AGENT")]
         to: Option<String>,
         /// Overwrite an existing remote Claude session (only with --to)
-        #[arg(long)]
+        #[arg(long, requires = "to")]
         force: bool,
     },
 }
@@ -783,6 +783,16 @@ mod tests {
         assert!(
             result.is_err(),
             "expected clap conflict error when both --stat and --name-only are passed"
+        );
+    }
+
+    #[test]
+    fn upload_force_requires_to() {
+        // `--force` only makes sense in --to mode; without --to clap must reject it.
+        let result = Cli::try_parse_from(["skulk", "upload", "--force"]);
+        assert!(
+            result.is_err(),
+            "expected clap error when --force is passed without --to"
         );
     }
 
