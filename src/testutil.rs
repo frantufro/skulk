@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::commands::init::Prompter;
+use crate::commands::upload::LocalOps;
 use crate::config::{Config, OutputFormat};
 use crate::error::SkulkError;
 use crate::inventory::AgentInventory;
@@ -323,4 +324,67 @@ pub(crate) fn mock_list_output_with_state(
     }
     out.push_str("__STATE_END__\n");
     out
+}
+
+/// Configurable [`LocalOps`] double for `skulk upload` tests.
+///
+/// Each field backs one trait method. Defaults (via [`MockLocalOps::clean`])
+/// describe a clean repo on branch `feature` with no Claude session history,
+/// so the happy path needs no overrides. `removed` records `remove_file` calls
+/// so tests can assert the temp-bundle cleanup ran.
+pub(crate) struct MockLocalOps {
+    pub status: Result<String, SkulkError>,
+    pub branch: Result<String, SkulkError>,
+    pub bundle: Result<(), SkulkError>,
+    pub projects_dir: PathBuf,
+    pub files: Result<Vec<PathBuf>, SkulkError>,
+    pub root: PathBuf,
+    pub bundle_path: PathBuf,
+    pub remove: Result<(), SkulkError>,
+    pub removed: RefCell<Vec<PathBuf>>,
+}
+
+impl MockLocalOps {
+    /// A clean working tree on branch `feature` with no Claude session history.
+    pub fn clean() -> Self {
+        Self {
+            status: Ok(String::new()),
+            branch: Ok("feature".into()),
+            bundle: Ok(()),
+            projects_dir: PathBuf::from("/home/local/.claude/projects"),
+            files: Ok(vec![]),
+            root: PathBuf::from("/home/local/skulk"),
+            bundle_path: PathBuf::from("/tmp/skulk-upload-feature.bundle"),
+            remove: Ok(()),
+            removed: RefCell::new(vec![]),
+        }
+    }
+}
+
+impl LocalOps for MockLocalOps {
+    fn git_status(&self) -> Result<String, SkulkError> {
+        self.status.clone()
+    }
+    fn git_current_branch(&self) -> Result<String, SkulkError> {
+        self.branch.clone()
+    }
+    fn create_git_bundle(&self, _branch: &str, _dest: &Path) -> Result<(), SkulkError> {
+        self.bundle.clone()
+    }
+    fn claude_projects_dir(&self) -> PathBuf {
+        self.projects_dir.clone()
+    }
+    fn list_dir_files(&self, _dir: &Path) -> Result<Vec<PathBuf>, SkulkError> {
+        self.files.clone()
+    }
+    fn project_root(&self) -> PathBuf {
+        self.root.clone()
+    }
+    fn temp_bundle_path(&self, _agent_name: &str) -> PathBuf {
+        self.bundle_path.clone()
+    }
+    fn remove_file(&self, path: &Path) -> Result<(), SkulkError> {
+        self.removed.borrow_mut().push(path.to_path_buf());
+        self.remove.clone()
+    }
 }
