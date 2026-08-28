@@ -14,6 +14,11 @@ cargo clippy -- -D warnings -W clippy::pedantic  # lint, zero warnings
 cargo test                                       # run the full suite
 ```
 
+`.github/workflows/ci.yml` runs the same checks on every pull request and on
+every push to `main`, with the suite running on both Linux and macOS. The
+matrix has two entries because a few code paths differ by platform, so a
+green run on one of them leaves the other untested.
+
 A few stylistic conventions that are enforced informally:
 
 - No `.unwrap()` / `.expect()` in production code. Use `thiserror` +

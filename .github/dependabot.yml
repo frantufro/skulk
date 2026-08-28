@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # skulk downloads and extracts release tarballs to replace its own binary, so
+  # advisories in ureq, tar, flate2 and sha2 reach the self-update path.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
