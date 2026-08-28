@@ -9,8 +9,54 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # Four files carry the version, and a release where they disagree ships a
+      # binary, a Homebrew formula, an npm package and a plugin manifest that
+      # each claim something different. Check before anything is published.
+      - name: Check that every version agrees with the tag
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          NPM=$(node -p "require('./package.json').version")
+          PLUGIN=$(node -p "require('./claude-plugin/.claude-plugin/plugin.json').version")
+          echo "tag=$VERSION cargo=$CARGO npm=$NPM plugin=$PLUGIN"
+          fail=0
+          for pair in "Cargo.toml:$CARGO" "package.json:$NPM" "plugin.json:$PLUGIN"; do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            if [ "$value" != "$VERSION" ]; then
+              echo "::error::$name reads $value; tag $TAG expects $VERSION" >&2
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Rust tests
+        run: cargo test --locked
+
+      - name: Installer tests
+        run: npm test
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -83,6 +129,26 @@ jobs:
           files: |
             artifacts/skulk-*.tar.gz
             artifacts/skulk-*.tar.gz.sha256
+
+  publish-npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      # OIDC trusted publishing: npm mints a short-lived credential from this
+      # token, so the repository stores no npm secret.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish
+        run: npm publish --access public
 
   publish-homebrew-formula:
     name: Publish Homebrew formula

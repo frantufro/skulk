@@ -54,3 +54,23 @@ jobs:
       # --locked fails when Cargo.lock is out of date, which catches a version
       # bump that moved Cargo.toml without refreshing the lock.
       - run: cargo test --locked
+
+  installer:
+    name: Installer tests (node ${{ matrix.node }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor package.json declares, 24 is what the release workflow
+        # publishes with. Both ends get exercised.
+        node: [20, 24]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The suite has no dependencies: it drives bin/install.mjs against a
+      # fixture HTTP server on localhost, so there is nothing to install.
+      - run: npm test
