@@ -19,6 +19,10 @@ every push to `main`, with the suite running on both Linux and macOS. The
 matrix has two entries because a few code paths differ by platform, so a
 green run on one of them leaves the other untested.
 
+Changes under `bin/` or `tests/node/` also need `npm test`, which exercises the
+OpenCode installer against a local fixture server. It runs offline and needs no
+`npm install`.
+
 A few stylistic conventions that are enforced informally:
 
 - No `.unwrap()` / `.expect()` in production code. Use `thiserror` +
@@ -88,10 +92,26 @@ under the project directory.
 ## Releases
 
 1. `cargo fmt && cargo clippy -- -D warnings -W clippy::pedantic && cargo test`
-2. Bump `version` in `Cargo.toml`.
-3. Commit as `release: bump to X.Y.Z`.
-4. Tag `vX.Y.Z` and push both the commit and the tag.
+2. `npm test`
+3. Bump the version in all four files that carry it:
+   - `Cargo.toml`
+   - `Cargo.lock` (run `cargo check` to update the `skulk` entry)
+   - `package.json`
+   - `claude-plugin/.claude-plugin/plugin.json`
+4. Commit as `release: bump to X.Y.Z`.
+5. Tag `vX.Y.Z` and push both the commit and the tag.
 
-The `release.yml` GitHub workflow builds binaries for macOS (aarch64),
-Linux x86_64, and Linux aarch64, publishes the GitHub release, and
-updates the Homebrew tap formula automatically.
+The `release.yml` GitHub workflow opens with a `verify` job that asserts the tag,
+`Cargo.toml`, `package.json` and `plugin.json` all read the same version, then
+runs both test suites. Every later job depends on it, so a version left behind in
+step 3 stops the release before a single artifact is built.
+
+Once `verify` passes, the workflow builds binaries for macOS (aarch64), Linux
+x86_64, and Linux aarch64, publishes the GitHub release, publishes
+`@frantufro/skulk` to npm, and updates the Homebrew tap formula.
+
+The npm publish uses OIDC trusted publishing, so the repository holds no npm
+credential. The trust configuration lives at
+<https://www.npmjs.com/package/@frantufro/skulk/access> and names organization
+`frantufro`, repository `skulk`, workflow `release.yml`, with the environment
+field left empty.

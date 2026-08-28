@@ -270,6 +270,34 @@ Claude Code session:
 The plugin contributes a `skulk-agent-management` skill that covers the
 full agent lifecycle (create, monitor, interact, review, ship, clean up).
 
+## OpenCode Skill
+
+The same skill is available to OpenCode through npm:
+
+```bash
+npx @frantufro/skulk install
+```
+
+That writes the `skulk-agent-management` skill into
+`~/.config/opencode/skills/`, and downloads the `skulk` binary into
+`~/.local/bin` when `skulk` is absent from your `PATH`. The download's SHA-256
+is checked against the checksum published with the release before anything is
+installed. Once the binary is in place, `skulk update` handles upgrades.
+
+Options:
+
+| Flag | Effect |
+| --- | --- |
+| `--project` | install into `./.opencode/skills` for one repository |
+| `--force` | overwrite a modified `SKILL.md` without asking |
+| `--skip-existing` | keep a modified `SKILL.md` and exit successfully |
+| `--no-binary` | install the skill alone |
+
+The skill this installs is the one the Claude Code plugin contributes, packed
+verbatim from `claude-plugin/skills/`. Whichever program loads the skill, the
+`harness` setting still decides what runs on the remote, so an OpenCode session
+can drive Claude Code agents and a Claude Code session can drive OpenCode ones.
+
 ## Alternative Harnesses
 
 By default, `skulk` uses [Claude Code](https://docs.claude.com/en/docs/claude-code) as the agent harness. You can switch to [OpenCode](https://opencode.ai) by setting the `harness` field in `.skulk/config.toml`:
