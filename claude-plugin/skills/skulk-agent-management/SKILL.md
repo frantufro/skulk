@@ -1,7 +1,7 @@
 ---
 name: skulk-agent-management
 description: >
-  Manage remote Claude Code agents with skulk. Use this skill when the user
+  Manage remote coding agents with skulk. Use this skill when the user
   wants to spin up coding agents on a remote server, monitor their progress,
   review their work, or ship their changes. Covers the full agent lifecycle:
   create, monitor, interact, review, ship, and clean up. TRIGGER when: user
@@ -12,9 +12,14 @@ allowed-tools: [Bash, Read, Glob, Grep]
 
 # Skulk Agent Management
 
-Skulk manages remote Claude Code agents over SSH. Each agent runs in its own
-tmux session and git worktree on a remote server, fully isolated. You can run
-many agents in parallel on different tasks.
+Skulk manages remote coding agents over SSH. Each agent runs in its own tmux
+session and git worktree on a remote server, fully isolated. You can run many
+agents in parallel on different tasks.
+
+The agent program skulk launches on the remote is the *harness*, set by the
+`harness` field of `.skulk/config.toml`. Claude Code is the default; see
+[Alternative Harnesses](#alternative-harnesses) for OpenCode. This skill runs
+wherever your own agent runs, and the two are independent choices.
 
 ## Prerequisites
 
