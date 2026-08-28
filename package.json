@@ -1,0 +1,41 @@
+{
+  "name": "@frantufro/skulk",
+  "version": "0.7.0",
+  "description": "Install the skulk agent-management skill into OpenCode, with the skulk binary",
+  "license": "MIT",
+  "author": "frantufro",
+  "homepage": "https://github.com/frantufro/skulk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frantufro/skulk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/frantufro/skulk/issues"
+  },
+  "keywords": [
+    "skulk",
+    "opencode",
+    "claude-code",
+    "agent",
+    "skill",
+    "tmux",
+    "ssh"
+  ],
+  "type": "module",
+  "bin": {
+    "skulk-install": "bin/install.mjs"
+  },
+  "files": [
+    "bin",
+    "claude-plugin/skills"
+  ],
+  "scripts": {
+    "test": "node --test tests/node/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
