@@ -312,7 +312,7 @@ impl crate::commands::local_ops::LocalOps for RealLocalOps {
             let entry = entry.map_err(|e| {
                 SkulkError::Validation(format!("failed to read directory entry: {e}"))
             })?;
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            if entry.file_type().is_ok_and(|t| t.is_file()) {
                 files.push(entry.path());
             }
         }
