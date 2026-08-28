@@ -642,7 +642,7 @@ pub(crate) fn run_remote_setup(
     let wt_state = status.get("worktree-dir").map_or("unknown", String::as_str);
     match wt_state {
         "exists" => {
-            eprintln!("  {} worktree dir (already exists)", checkmark(color),);
+            eprintln!("  {} worktree dir (already exists)", checkmark(color));
         }
         "missing" => {
             ssh.run(&setup_create_worktree_dir_command(&answers.worktree_base))?;

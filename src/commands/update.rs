@@ -6,7 +6,7 @@ use crate::error::SkulkError;
 use anyhow::Context;
 
 /// Cache duration for version check (24 hours)
-const CACHE_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
+const CACHE_DURATION: Duration = Duration::from_hours(24);
 
 /// Total timeout for HTTP requests in the update flow.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
