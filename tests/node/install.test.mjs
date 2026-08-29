@@ -190,6 +190,9 @@ test("a missing binary is downloaded into ~/.local/bin and runs", async () => {
   assert.match(result.stdout, /sha256 verified/)
   assert.match(spawnSync(dest, ["--version"], { encoding: "utf8" }).stdout, /9\.9\.9/)
   assert.match(result.stdout, /not in your PATH/)
+  // The export line is meant to be copied into a shell, where a quoted tilde
+  // stays literal and would add a directory named `~` to PATH.
+  assert.match(result.stdout, /export PATH="\$HOME\/\.local\/bin:\$PATH"/)
   // Nothing is left behind in the destination directory.
   assert.deepEqual(fs.readdirSync(path.join(home, ".local", "bin")), ["skulk"])
 })

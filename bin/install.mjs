@@ -312,11 +312,18 @@ async function downloadBinary(version, target, destDir) {
   }
 }
 
+// A tilde inside double quotes stays literal in sh, bash and zsh, so the copied
+// line would put a directory named `~` on PATH. $HOME expands there.
+function shellPath(target) {
+  const home = os.homedir()
+  return home && target.startsWith(home + path.sep) ? "$HOME" + target.slice(home.length) : target
+}
+
 function warnIfNotOnPath(dir) {
   const entries = (process.env.PATH || "").split(path.delimiter)
   if (entries.includes(dir)) return
   process.stdout.write(`\n  note: ${tilde(dir)} is not in your PATH. Add this to your shell config:\n`)
-  process.stdout.write(`        export PATH="${tilde(dir)}:$PATH"\n`)
+  process.stdout.write(`        export PATH="${shellPath(dir)}:$PATH"\n`)
 }
 
 async function ensureBinary() {
