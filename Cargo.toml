@@ -23,7 +23,7 @@ toml = "0.8"
 ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
-rand = "0.9"
+rand = "0.10"
 serial_test = "3"
 
 # The profile that 'dist' will build with
