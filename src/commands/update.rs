@@ -184,11 +184,22 @@ impl HttpClient for UreqClient {
 fn sha256_hex(file_path: &Path) -> Result<String, SkulkError> {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
+    use std::io::Read as _;
     let mut file = std::fs::File::open(file_path)
         .map_err(|e| SkulkError::UpdateFailed(format!("Failed to open file for hashing: {e}")))?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| SkulkError::UpdateFailed(format!("Failed to hash file: {e}")))?;
+    // sha2 0.11 dropped the io::Write impl on hashers, so feed the file in
+    // chunks. A release tarball is several megabytes; this keeps it off the heap.
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| SkulkError::UpdateFailed(format!("Failed to hash file: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -540,6 +551,21 @@ mod tests {
         let result = verify_checksum(
             &tmp,
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        );
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_ok(), "verify_checksum failed: {result:?}");
+    }
+
+    #[test]
+    fn verify_checksum_accepts_a_file_larger_than_the_read_buffer() {
+        // 256 kB exercises several passes of the chunked read in sha256_hex.
+        // The expected digest comes from Python's hashlib, independent of sha2.
+        let data: Vec<u8> = (0..=255u8).cycle().take(256_000).collect();
+        let tmp = std::env::temp_dir().join(format!("skulk_chk_{}", rand::random::<u32>()));
+        std::fs::write(&tmp, &data).unwrap();
+        let result = verify_checksum(
+            &tmp,
+            "b57b64b198d5d59ce5a22a9b9f25e72a7d081476d432051aa923f3dbebb90934",
         );
         let _ = std::fs::remove_file(&tmp);
         assert!(result.is_ok(), "verify_checksum failed: {result:?}");
