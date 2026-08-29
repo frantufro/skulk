@@ -23,7 +23,7 @@ jobs:
       # Pinned: the pedantic lint set changes with every stable release, so a
       # floating toolchain turns an untouched tree red on rustc's schedule.
       # Bump this deliberately. The test jobs below track stable.
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
 
