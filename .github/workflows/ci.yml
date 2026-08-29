@@ -18,7 +18,7 @@ jobs:
     name: Format and lint
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Pinned: the pedantic lint set changes with every stable release, so a
       # floating toolchain turns an untouched tree red on rustc's schedule.
@@ -45,7 +45,7 @@ jobs:
         # Linux-only matrix covers one branch of it.
         runner: [ubuntu-22.04, macos-14]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -65,7 +65,7 @@ jobs:
         # publishes with. Both ends get exercised.
         node: [20, 24]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
