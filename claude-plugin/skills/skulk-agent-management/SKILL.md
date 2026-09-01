@@ -4,9 +4,10 @@ description: >
   Manage remote coding agents with skulk. Use this skill when the user
   wants to spin up coding agents on a remote server, monitor their progress,
   review their work, or ship their changes. Covers the full agent lifecycle:
-  create, monitor, interact, review, ship, and clean up. TRIGGER when: user
-  mentions skulk, remote agents, spinning up agents, parallel agents, or
-  managing a fleet of coding agents.
+  create, monitor, interact, review, ship, hand off between local and remote,
+  and clean up. TRIGGER when: user mentions skulk, remote agents, spinning up
+  agents, parallel agents, managing a fleet of coding agents, or moving a
+  session between their machine and a server.
 allowed-tools: [Bash, Read, Glob, Grep]
 ---
 
@@ -141,7 +142,39 @@ skulk ship <name>
 `skulk ship` requires `gh` and `claude` on the remote. It generates the PR
 description by running `claude -p` against the diff.
 
-### 6. Pause and Resume Agents
+### 6. Move Work Between Local and Remote
+
+```bash
+# Hand the current local branch and Claude session to a new remote agent
+skulk upload
+
+# Hand it to an existing agent's worktree instead
+skulk upload --to <name>
+
+# Overwrite that agent's existing Claude session
+skulk upload --to <name> --force
+
+# Bring a remote agent's branch and session down to a local worktree
+skulk download <name>
+
+# Overwrite an existing local worktree path or Claude session
+skulk download <name> --force
+```
+
+`skulk upload` ships the committed state of the current branch as a git
+bundle, so the remote works without access to a shared git remote. It copies
+the local Claude Code conversation history into the agent's project directory
+and launches a tmux session, so the agent resumes with your context already in
+place. With no `--to` it creates an agent named after the current branch. It
+requires a clean working tree on a named branch; detached HEAD is refused.
+
+`skulk download` reverses that. It creates a local git worktree at
+`../<branch>`, copies the agent's conversation files into the matching
+`~/.claude/projects/` directory, then archives the remote agent: the tmux
+session is killed, the worktree and branch are preserved. The local working
+tree must be clean.
+
+### 7. Pause and Resume Agents
 
 ```bash
 # Stop the agent but keep its worktree and branch intact
@@ -160,7 +193,7 @@ skulk restart <name> --remote-control
 worktree. Use `skulk send` or `claude --continue` inside the session to
 resume prior work.
 
-### 7. Replay an Agent's Task
+### 8. Replay an Agent's Task
 
 ```bash
 # Re-run the original prompt on a fresh worktree (auto-names task-2, task-3, …)
@@ -181,7 +214,7 @@ skulk replay <name> --as retry-sonnet --model sonnet
 with the same task. Useful for benchmarking, retrying with a different model,
 or getting a second opinion.
 
-### 8. Clean Up
+### 9. Clean Up
 
 ```bash
 # Destroy a specific agent (session + worktree + branch)
@@ -226,7 +259,13 @@ skulk init
 
 # Generate shell tab-completion script
 skulk completions bash   # or zsh, fish
+
+# Replace the running skulk binary with the latest GitHub release
+skulk update
 ```
+
+`skulk update` verifies the download against the release's `.sha256` sidecar
+before replacing the binary.
 
 ## Init Hook
 
@@ -267,6 +306,20 @@ skulk replay slow-agent --as fast-agent --model sonnet
 # Or archive and start fresh manually
 skulk archive slow-agent
 skulk new fast-agent --model sonnet --from tasks/same-task.md
+```
+
+### Hand a local session off to a remote agent
+```bash
+git commit -am "wip"           # upload ships committed state only
+skulk upload                   # new agent named after the current branch
+skulk logs <branch> --follow
+```
+
+### Take an agent's work over locally
+```bash
+skulk wait <name>              # let it finish the current turn
+skulk diff <name>              # see what it did
+skulk download <name>          # local worktree at ../<branch>, agent archived
 ```
 
 ### Check on agents and relay answers
