@@ -27,3 +27,6 @@ target
 .claude/settings.local.json
 .claude/worktrees/
 node_modules/
+
+# Claude Code scheduled-task lock (local only)
+.claude/scheduled_tasks.lock
