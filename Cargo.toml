@@ -24,7 +24,7 @@ ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
 rand = "0.10"
-serial_test = "3"
+serial_test = "4"
 
 # The profile that 'dist' will build with
 [profile.dist]
