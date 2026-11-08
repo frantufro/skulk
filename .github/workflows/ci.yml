@@ -45,11 +45,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 earns its place: `local_hostname()` in
+        # macos-latest earns its place: `local_hostname()` in
         # src/commands/download.rs reads $HOSTNAME and /etc/hostname, which are
         # absent on macOS, and falls back to the `hostname` command there. A
         # Linux-only matrix covers one branch of it.
-        runner: [ubuntu-22.04, macos-14]
+        runner: [ubuntu-22.04, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
