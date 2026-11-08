@@ -124,13 +124,16 @@ impl HttpClient for UreqClient {
     fn get_latest_release(&self) -> Result<ReleaseInfo, SkulkError> {
         let url = "https://api.github.com/repos/frantufro/skulk/releases/latest";
         let resp = ureq::get(url)
-            .set("User-Agent", "skulk")
-            .timeout(HTTP_TIMEOUT)
+            .header("User-Agent", "skulk")
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
             .call()
             .context("Failed to fetch release from GitHub")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
         let json: serde_json::Value = resp
-            .into_json()
+            .into_body()
+            .read_json()
             .context("Failed to parse release JSON")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
         let tag_name = json["tag_name"]
@@ -153,15 +156,17 @@ impl HttpClient for UreqClient {
 
     fn download_asset(&self, url: &str, dest: &Path) -> Result<(), SkulkError> {
         let resp = ureq::get(url)
-            .set("User-Agent", "skulk")
-            .timeout(HTTP_TIMEOUT)
+            .header("User-Agent", "skulk")
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
             .call()
             .context("Failed to download asset")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
         let mut file = std::fs::File::create(dest)
             .context("Failed to create temp file")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
-        std::io::copy(&mut resp.into_reader(), &mut file)
+        std::io::copy(&mut resp.into_body().into_reader(), &mut file)
             .context("Failed to write to temp file")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
         Ok(())
@@ -169,12 +174,15 @@ impl HttpClient for UreqClient {
 
     fn get_text(&self, url: &str) -> Result<String, SkulkError> {
         let resp = ureq::get(url)
-            .set("User-Agent", "skulk")
-            .timeout(HTTP_TIMEOUT)
+            .header("User-Agent", "skulk")
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
             .call()
             .context("Failed to fetch text asset")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
-        resp.into_string()
+        resp.into_body()
+            .read_to_string()
             .context("Failed to read response body")
             .map_err(|e| SkulkError::UpdateFailed(e.to_string()))
     }
