@@ -486,7 +486,7 @@ mod tests {
         let err = load_github_prompt(&ssh, "not-a-number", "skulk-x", &cfg).unwrap_err();
         assert!(matches!(err, SkulkError::Validation(_)));
         // No SSH call made
-        assert!(ssh.calls().is_empty());
+        assert_eq!(ssh.calls(), Vec::<String>::new());
     }
 
     #[test]

@@ -458,9 +458,9 @@ __BRANCHES_START__
 __BRANCHES_END__
 ";
         let inv = parse_inventory(raw, &cfg);
-        assert!(inv.sessions.is_empty());
+        assert_eq!(inv.sessions, Vec::<String>::new());
         assert!(inv.worktrees.is_empty());
-        assert!(inv.branches.is_empty());
+        assert_eq!(inv.branches, Vec::<String>::new());
     }
 
     #[test]

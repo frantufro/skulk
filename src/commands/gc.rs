@@ -327,8 +327,8 @@ mod tests {
         let inv = make_inventory(&["skulk-ghost"], &[], &[]);
         let orphans = gc_find_orphans(&inv);
         assert_eq!(orphans.sessions, vec!["skulk-ghost"]);
-        assert!(orphans.worktrees.is_empty());
-        assert!(orphans.branches.is_empty());
+        assert_eq!(orphans.worktrees, Vec::<String>::new());
+        assert_eq!(orphans.branches, Vec::<String>::new());
     }
 
     #[test]
@@ -337,9 +337,9 @@ mod tests {
         // branch (e.g. after a manual `git branch -D`). Still safe to reap.
         let inv = make_inventory(&[], &[("skulk-stale", "/path/skulk-stale")], &[]);
         let orphans = gc_find_orphans(&inv);
-        assert!(orphans.sessions.is_empty());
+        assert_eq!(orphans.sessions, Vec::<String>::new());
         assert_eq!(orphans.worktrees, vec!["skulk-stale"]);
-        assert!(orphans.branches.is_empty());
+        assert_eq!(orphans.branches, Vec::<String>::new());
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
             &["skulk-archived"],
         );
         let orphans = gc_find_orphans(&inv);
-        assert!(orphans.sessions.is_empty());
+        assert_eq!(orphans.sessions, Vec::<String>::new());
         assert!(
             orphans.worktrees.is_empty(),
             "archived worktree must not be reaped"
@@ -367,8 +367,8 @@ mod tests {
     fn gc_find_orphans_orphaned_branch() {
         let inv = make_inventory(&[], &[], &["skulk-leftover"]);
         let orphans = gc_find_orphans(&inv);
-        assert!(orphans.sessions.is_empty());
-        assert!(orphans.worktrees.is_empty());
+        assert_eq!(orphans.sessions, Vec::<String>::new());
+        assert_eq!(orphans.worktrees, Vec::<String>::new());
         assert_eq!(orphans.branches, vec!["skulk-leftover"]);
     }
 
@@ -386,7 +386,7 @@ mod tests {
         let orphans = gc_find_orphans(&inv);
         assert_eq!(orphans.sessions, vec!["skulk-ghost-sess"]);
         assert_eq!(orphans.worktrees, vec!["skulk-stale-wt"]);
-        assert!(orphans.branches.is_empty());
+        assert_eq!(orphans.branches, Vec::<String>::new());
     }
 
     #[test]
@@ -430,8 +430,8 @@ mod tests {
     fn gc_session_with_branch_not_orphaned() {
         let inv = make_inventory(&["skulk-running"], &[], &["skulk-running"]);
         let orphans = gc_find_orphans(&inv);
-        assert!(orphans.sessions.is_empty());
-        assert!(orphans.branches.is_empty());
+        assert_eq!(orphans.sessions, Vec::<String>::new());
+        assert_eq!(orphans.branches, Vec::<String>::new());
     }
 
     #[test]
