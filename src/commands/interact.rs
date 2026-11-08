@@ -549,7 +549,7 @@ mod tests {
         let result = cmd_push(&ssh, "test", &cfg);
         assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
             assert!(message.to_lowercase().contains("origin"));
-            assert!(!suggestion.is_empty());
+            assert_ne!(suggestion.len(), 0);
         });
     }
 
