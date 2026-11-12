@@ -3,7 +3,7 @@ use crate::commands::destroy::agent_destroy_session_command;
 use crate::commands::new::agent_create_tmux_command;
 use crate::config::{Config, DEFAULT_HARNESS};
 use crate::error::{SkulkError, classify_agent_error};
-use crate::inventory::fetch_inventory;
+use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::ssh::Ssh;
 use crate::util::{validate_model, validate_name};
 
@@ -33,21 +33,23 @@ pub(crate) fn cmd_restart(
     }
 
     let agent = AgentRef::new(name, cfg);
-    let session_name = agent.session_name();
     let branch = agent.branch_name();
     let worktree = agent.worktree_path(cfg);
 
     let inv = fetch_inventory(ssh, cfg)?;
 
-    if inv.sessions.contains(&session_name) {
-        return Err(SkulkError::Validation(format!(
-            "Agent '{name}' is already running. Use `skulk connect {name}` to attach."
-        )));
-    }
-    if !inv.worktrees.contains_key(&session_name) {
-        return Err(SkulkError::NotFound(format!(
-            "No worktree for agent '{name}'. Use `skulk new {name}` to create a new agent."
-        )));
+    match inv.lifecycle(&agent) {
+        Lifecycle::Archived => {}
+        Lifecycle::Running => {
+            return Err(SkulkError::Validation(format!(
+                "Agent '{name}' is already running. Use `skulk connect {name}` to attach."
+            )));
+        }
+        Lifecycle::Orphan(_) | Lifecycle::Absent => {
+            return Err(SkulkError::NotFound(format!(
+                "No worktree for agent '{name}'. Use `skulk new {name}` to create a new agent."
+            )));
+        }
     }
 
     // Tmux creation is a two-step shell pipeline (`new-session && send-keys`).

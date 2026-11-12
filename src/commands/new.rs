@@ -523,20 +523,8 @@ pub(crate) fn create_agent_with_prompt(
 
     // Step 2: Fetch inventory and check uniqueness
     let inv = fetch_inventory(ssh, cfg).map_err(|e| classify_agent_error(name, e, host))?;
-    let has_session = inv.sessions.contains(&session_name);
-    let has_worktree = inv.worktrees.contains_key(&session_name);
-    if has_session {
-        return Err(SkulkError::Validation(format!(
-            "Agent '{name}' already exists."
-        )));
-    }
-    if has_worktree {
-        return Err(SkulkError::Validation(format!(
-            "Agent '{name}' already has a worktree (archived or crashed).\n  \
-             Resume it: `skulk restart {name}`\n  \
-             Or wipe it: `skulk destroy {name}`"
-        )));
-    }
+    inv.lifecycle(&AgentRef::new(name, cfg))
+        .ensure_name_free(name)?;
 
     // Step 3: Create worktree
     ssh.run(&agent_create_worktree_command(name, cfg))?;

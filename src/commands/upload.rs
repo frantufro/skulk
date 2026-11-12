@@ -8,7 +8,7 @@ use crate::commands::new::{
 };
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
-use crate::inventory::fetch_inventory;
+use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::ssh::Ssh;
 use crate::util::{
     branch_to_agent_name, claude_project_dir_name, remote_claude_project_dir_command, validate_name,
@@ -80,21 +80,11 @@ pub(crate) fn cmd_upload(
     // Step 4: Validate remote state in a single inventory round-trip.
     let inv = fetch_inventory(ssh, cfg)?;
     let new_agent_mode = to.is_none();
+    let lifecycle = inv.lifecycle(&agent);
     if new_agent_mode {
         // Same uniqueness rules as `skulk new`.
-        if inv.sessions.contains(&session_name) {
-            return Err(SkulkError::Validation(format!(
-                "Agent '{agent_name}' already exists."
-            )));
-        }
-        if inv.worktrees.contains_key(&session_name) {
-            return Err(SkulkError::Validation(format!(
-                "Agent '{agent_name}' already has a worktree (archived or crashed).\n  \
-                 Resume it: `skulk restart {agent_name}`\n  \
-                 Or wipe it: `skulk destroy {agent_name}`"
-            )));
-        }
-    } else if !inv.worktrees.contains_key(&session_name) {
+        lifecycle.ensure_name_free(&agent_name)?;
+    } else if !matches!(lifecycle, Lifecycle::Running | Lifecycle::Archived) {
         return Err(SkulkError::Validation(format!(
             "Agent '{agent_name}' has no worktree on the remote. \
              Run `skulk new {agent_name}` first."

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::error::SkulkError;
-use crate::inventory::fetch_inventory;
+use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::ssh::Ssh;
 use crate::util::validate_name;
 
@@ -101,12 +101,13 @@ pub(crate) fn cmd_destroy(
 
     // Fetch inventory via shared probe
     let inv = fetch_inventory(ssh, cfg)?;
-    let session_name = AgentRef::new(name, cfg).session_name();
+    let agent = AgentRef::new(name, cfg);
+    let session_name = agent.session_name();
     let has_session = inv.sessions.contains(&session_name);
     let has_worktree = inv.worktrees.contains_key(&session_name);
     let has_branch = inv.branches.contains(&session_name);
 
-    if !has_session && !has_worktree && !has_branch {
+    if inv.lifecycle(&agent) == Lifecycle::Absent {
         return Err(SkulkError::NotFound(format!("No agent '{name}' found.")));
     }
 
