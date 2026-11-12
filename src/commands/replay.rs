@@ -95,6 +95,21 @@ pub(crate) fn derive_replay_name(
     }
 }
 
+/// Flags and arguments of `skulk replay`, as parsed from the command line.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ReplayOptions<'a> {
+    /// Source agent to replay.
+    pub(crate) name: &'a str,
+    /// Explicit name for the new agent (`--as`).
+    pub(crate) new_name: Option<&'a str>,
+    /// Launch the new agent with `--remote-control`.
+    pub(crate) remote_control: bool,
+    /// Model for the new agent's harness.
+    pub(crate) model: Option<&'a str>,
+    /// Extra flags appended to the new agent's Claude launch.
+    pub(crate) claude_args: Option<&'a str>,
+}
+
 /// Re-run the original prompt of an existing agent on a fresh agent.
 ///
 /// Reads the prompt persisted at `~/.skulk/prompts/<source_session>.txt` on
@@ -102,17 +117,19 @@ pub(crate) fn derive_replay_name(
 /// name, and delegates to [`create_agent_with_prompt`] with the same prompt.
 /// The new agent can run on a different `--model` or with different
 /// `--claude-args`, which is the primary motivation for replay.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_replay(
     ssh: &impl Ssh,
-    source_name: &str,
-    new_name_override: Option<&str>,
-    remote_control: bool,
-    model: Option<&str>,
-    claude_args: Option<&str>,
+    opts: &ReplayOptions,
     cfg: &Config,
     local_env_file: Option<&Path>,
 ) -> Result<(), SkulkError> {
+    let ReplayOptions {
+        name: source_name,
+        new_name: new_name_override,
+        remote_control,
+        model,
+        claude_args,
+    } = *opts;
     validate_name(source_name)?;
     if let Some(n) = new_name_override {
         validate_name(n)?;
@@ -336,7 +353,15 @@ mod tests {
             ssh_ok(),                                      // persist prompt
             ssh_ok(),                                      // send prompt
         ]);
-        let result = cmd_replay(&ssh, "task", None, false, None, None, &cfg, None);
+        let result = cmd_replay(
+            &ssh,
+            &ReplayOptions {
+                name: "task",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert!(result.is_ok(), "replay should succeed: {result:?}");
         // Second-to-last call is the persist; last is send.
         let calls = ssh.calls();
@@ -361,7 +386,19 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
         ]);
-        assert!(cmd_replay(&ssh, "task", None, false, Some("sonnet"), None, &cfg, None,).is_ok());
+        assert!(
+            cmd_replay(
+                &ssh,
+                &ReplayOptions {
+                    name: "task",
+                    model: Some("sonnet"),
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         // The tmux-create call lives at index 5 (read, inv, base, inv, worktree, tmux).
         let tmux_call = &ssh.calls()[5];
         assert!(
@@ -386,13 +423,13 @@ mod tests {
         assert!(
             cmd_replay(
                 &ssh,
-                "task",
-                Some("retry-opus"),
-                false,
-                None,
-                None,
+                &ReplayOptions {
+                    name: "task",
+                    new_name: Some("retry-opus"),
+                    ..Default::default()
+                },
                 &cfg,
-                None,
+                None
             )
             .is_ok()
         );
@@ -409,7 +446,15 @@ mod tests {
     fn cmd_replay_rejects_invalid_source_name_before_ssh() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
-        let result = cmd_replay(&ssh, "Bad Name", None, false, None, None, &cfg, None);
+        let result = cmd_replay(
+            &ssh,
+            &ReplayOptions {
+                name: "Bad Name",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Validation(_) => {});
         assert!(
             ssh.calls().is_empty(),
@@ -424,11 +469,11 @@ mod tests {
         let ssh = MockSsh::new(vec![]);
         let result = cmd_replay(
             &ssh,
-            "task",
-            Some("Bad Name"),
-            false,
-            None,
-            None,
+            &ReplayOptions {
+                name: "task",
+                new_name: Some("Bad Name"),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -440,7 +485,15 @@ mod tests {
     fn cmd_replay_missing_stored_prompt_returns_notfound() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("exit 1".into()))]);
-        let result = cmd_replay(&ssh, "task", None, false, None, None, &cfg, None);
+        let result = cmd_replay(
+            &ssh,
+            &ReplayOptions {
+                name: "task",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("task"));
         });
@@ -460,7 +513,16 @@ mod tests {
                 &["skulk-task", "skulk-retry"],
             )),
         ]);
-        let result = cmd_replay(&ssh, "task", Some("retry"), false, None, None, &cfg, None);
+        let result = cmd_replay(
+            &ssh,
+            &ReplayOptions {
+                name: "task",
+                new_name: Some("retry"),
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("retry"));
             assert!(msg.contains("already exists"));
@@ -499,7 +561,18 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
         ]);
-        assert!(cmd_replay(&ssh, "task", None, false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_replay(
+                &ssh,
+                &ReplayOptions {
+                    name: "task",
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         let calls = ssh.calls();
         assert!(
             calls
@@ -519,7 +592,15 @@ mod tests {
                 suggestion: "retry".into(),
             }),
         ]);
-        let result = cmd_replay(&ssh, "task", None, false, None, None, &cfg, None);
+        let result = cmd_replay(
+            &ssh,
+            &ReplayOptions {
+                name: "task",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Diagnostic { .. } => {});
     }
 
@@ -537,7 +618,18 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
         ]);
-        assert!(cmd_replay(&ssh, "task-2", None, false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_replay(
+                &ssh,
+                &ReplayOptions {
+                    name: "task-2",
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         let calls = ssh.calls();
         // Replaying `task-2` should land on `task-3`, not `task-2-2`.
         assert!(
@@ -568,13 +660,14 @@ mod tests {
         assert!(
             cmd_replay(
                 &ssh,
-                "task",
-                None,
-                true,
-                None,
-                Some("--verbose"),
+                &ReplayOptions {
+                    name: "task",
+                    remote_control: true,
+                    claude_args: Some("--verbose"),
+                    ..Default::default()
+                },
                 &cfg,
-                None,
+                None
             )
             .is_ok()
         );
