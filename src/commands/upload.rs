@@ -2,13 +2,10 @@ use std::path::Path;
 
 use crate::agent_ref::AgentRef;
 use crate::commands::local_ops::LocalOps;
-use crate::commands::new::{
-    agent_create_tmux_command, agent_create_worktree_hooks_command,
-    agent_rollback_worktree_command, format_rollback_failure_warning,
-};
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::{Lifecycle, fetch_inventory};
+use crate::remote::{self, LaunchOptions};
 use crate::ssh::Ssh;
 use crate::util::{
     branch_to_agent_name, claude_project_dir_name, remote_claude_project_dir_command, validate_name,
@@ -140,13 +137,8 @@ pub(crate) fn cmd_upload(
         // Step 7c: create the worktree pointed at the imported branch, with the
         // harness hooks installed. On failure, roll back the freshly-imported
         // branch and clean up both temp bundles.
-        if let Err(e) = ssh.run(&agent_create_worktree_hooks_command(&agent_name, cfg)) {
-            if ssh
-                .run(&agent_rollback_worktree_command(&agent_name, cfg))
-                .is_err()
-            {
-                eprintln!("{}", format_rollback_failure_warning(&agent_name));
-            }
+        if let Err(e) = remote::create_worktree_on_existing_branch(ssh, &agent_name, cfg) {
+            remote::roll_back_worktree(ssh, &agent_name, cfg);
             let _ = ssh.run(&format!("rm -f {remote_bundle}"));
             cleanup_local_bundle(local, &bundle_path);
             return Err(e);
@@ -184,19 +176,9 @@ pub(crate) fn cmd_upload(
     // Step 11: Launch a tmux session running the harness in the worktree. In
     // new-agent mode a tmux failure would strand the freshly-created worktree
     // and imported branch, so best-effort roll them back (mirroring `cmd_new`).
-    if let Err(e) = ssh.run(&agent_create_tmux_command(
-        &agent_name,
-        cfg,
-        false,
-        None,
-        None,
-    )) {
-        if new_agent_mode
-            && ssh
-                .run(&agent_rollback_worktree_command(&agent_name, cfg))
-                .is_err()
-        {
-            eprintln!("{}", format_rollback_failure_warning(&agent_name));
+    if let Err(e) = remote::start_session(ssh, &agent_name, cfg, &LaunchOptions::default()) {
+        if new_agent_mode {
+            remote::roll_back_worktree(ssh, &agent_name, cfg);
         }
         return Err(e);
     }

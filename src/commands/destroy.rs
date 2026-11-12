@@ -4,41 +4,9 @@ use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
+use crate::remote;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
-
-/// Build the SSH command to kill a tmux session for an agent.
-pub(crate) fn agent_destroy_session_command(name: &str, cfg: &Config) -> String {
-    let agent = AgentRef::new(name, cfg);
-    format!("tmux kill-session -t {}", agent.session_name())
-}
-
-/// Build the SSH command to remove an agent's git worktree.
-pub(crate) fn agent_destroy_worktree_command(name: &str, cfg: &Config) -> String {
-    let base_path = &cfg.base_path;
-    let agent = AgentRef::new(name, cfg);
-    format!(
-        "cd {base_path} && git worktree remove --force {}",
-        agent.worktree_path(cfg)
-    )
-}
-
-/// Build the SSH command to delete an agent's git branch.
-pub(crate) fn agent_destroy_branch_command(name: &str, cfg: &Config) -> String {
-    let base_path = &cfg.base_path;
-    let agent = AgentRef::new(name, cfg);
-    format!("cd {base_path} && git branch -D {}", agent.branch_name())
-}
-
-/// Build the SSH command to delete an agent's Stop-hook state file.
-///
-/// The file lives at `~/.skulk/state/<session_name>` and is written by the
-/// Claude Code `Stop` / `UserPromptSubmit` hooks (see `hooks_settings_json`).
-/// `rm -f` makes a missing file a no-op so callers fire this unconditionally.
-pub(crate) fn agent_destroy_state_file_command(name: &str, cfg: &Config) -> String {
-    let agent = AgentRef::new(name, cfg);
-    format!("rm -f ~/.skulk/state/{}", agent.session_name())
-}
 
 /// Run the branch-delete SSH command and record the outcome.
 ///
@@ -51,7 +19,7 @@ fn try_delete_branch<'a>(
     cleaned: &mut Vec<&'a str>,
     failed: &mut Vec<&'a str>,
 ) {
-    if ssh.run(&agent_destroy_branch_command(name, cfg)).is_ok() {
+    if remote::delete_branch(ssh, name, cfg).is_ok() {
         cleaned.push("branch");
     } else {
         failed.push("branch");
@@ -120,7 +88,7 @@ pub(crate) fn cmd_destroy(
     let mut failed: Vec<&str> = Vec::new();
 
     if has_session {
-        if ssh.run(&agent_destroy_session_command(name, cfg)).is_ok() {
+        if remote::kill_session(ssh, name, cfg).is_ok() {
             cleaned.push("tmux session");
         } else {
             failed.push("tmux session");
@@ -128,7 +96,7 @@ pub(crate) fn cmd_destroy(
     }
 
     if has_worktree {
-        if ssh.run(&agent_destroy_worktree_command(name, cfg)).is_ok() {
+        if remote::remove_worktree(ssh, name, cfg).is_ok() {
             cleaned.push("worktree");
         } else {
             failed.push("worktree");
@@ -142,7 +110,7 @@ pub(crate) fn cmd_destroy(
     // Always reap the Stop-hook state marker. It's invisible plumbing for
     // `skulk wait`, so we don't add it to `cleaned` / `failed`; `rm -f` makes
     // a missing file a no-op anyway.
-    let _ = ssh.run(&agent_destroy_state_file_command(name, cfg));
+    let _ = remote::remove_state_file(ssh, name, cfg);
 
     if !cleaned.is_empty() {
         println!("Destroyed agent '{name}' ({}).", cleaned.join(", "));
@@ -198,26 +166,22 @@ pub(crate) fn cmd_destroy_all(
         let _ = std::io::Write::flush(&mut std::io::stdout());
 
         let mut step_failed = false;
-        if inv.sessions.contains(&session_name)
-            && ssh.run(&agent_destroy_session_command(name, cfg)).is_err()
-        {
+        if inv.sessions.contains(&session_name) && remote::kill_session(ssh, name, cfg).is_err() {
             step_failed = true;
         }
         if inv.worktrees.contains_key(&session_name)
-            && ssh.run(&agent_destroy_worktree_command(name, cfg)).is_err()
+            && remote::remove_worktree(ssh, name, cfg).is_err()
         {
             step_failed = true;
         }
-        if inv.branches.contains(&session_name)
-            && ssh.run(&agent_destroy_branch_command(name, cfg)).is_err()
-        {
+        if inv.branches.contains(&session_name) && remote::delete_branch(ssh, name, cfg).is_err() {
             step_failed = true;
         }
 
         // Reap the Stop-hook state marker for this agent. Fire-and-forget;
         // `rm -f` makes missing files a no-op and state cleanup is invisible
         // plumbing, not something worth surfacing in the summary.
-        let _ = ssh.run(&agent_destroy_state_file_command(name, cfg));
+        let _ = remote::remove_state_file(ssh, name, cfg);
 
         if step_failed {
             println!("done (with warnings)");
@@ -239,36 +203,6 @@ mod tests {
         MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
         ssh_err, ssh_ok, test_config,
     };
-
-    #[test]
-    fn agent_destroy_session_command_generates_kill() {
-        let cfg = test_config();
-        let cmd = agent_destroy_session_command("my-task", &cfg);
-        assert_eq!(cmd, "tmux kill-session -t skulk-my-task");
-    }
-
-    #[test]
-    fn agent_destroy_worktree_command_generates_remove() {
-        let cfg = test_config();
-        let cmd = agent_destroy_worktree_command("my-task", &cfg);
-        assert!(cmd.contains("git worktree remove --force ~/test-project-worktrees/skulk-my-task"));
-        assert!(cmd.starts_with("cd ~/test-project"));
-    }
-
-    #[test]
-    fn agent_destroy_branch_command_generates_delete() {
-        let cfg = test_config();
-        let cmd = agent_destroy_branch_command("my-task", &cfg);
-        assert!(cmd.contains("git branch -D skulk-my-task"));
-        assert!(cmd.starts_with("cd ~/test-project"));
-    }
-
-    #[test]
-    fn agent_destroy_state_file_command_generates_rm_f() {
-        let cfg = test_config();
-        let cmd = agent_destroy_state_file_command("my-task", &cfg);
-        assert_eq!(cmd, "rm -f ~/.skulk/state/skulk-my-task");
-    }
 
     // ── partial-failure messaging ──────────────────────────────────────
     //
