@@ -7,6 +7,7 @@ use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::fetch_inventory;
+use crate::remote;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
 
@@ -26,7 +27,7 @@ pub(crate) fn json_wait_result(name: &str, success: bool, reason: Option<&str>) 
 /// Build the SSH command to read an agent's idle-marker file.
 ///
 /// The marker file is maintained by the Stop and `UserPromptSubmit` hooks
-/// installed at agent creation (see `commands::new::hooks_settings_json`).
+/// installed at agent creation (see `remote::hooks_settings_json`).
 /// It contains either `idle` or `busy`. If the file doesn't exist yet
 /// (the agent has never processed a turn) the command prints `missing`.
 pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
@@ -35,24 +36,6 @@ pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
         "cat ~/.skulk/state/{} 2>/dev/null || echo missing",
         agent.session_name()
     )
-}
-
-/// Build the SSH command used to confirm the agent's tmux session exists.
-pub(crate) fn has_session_command(name: &str, cfg: &Config) -> String {
-    let agent = AgentRef::new(name, cfg);
-    format!("tmux has-session -t {}", agent.session_name())
-}
-
-/// Build a shell snippet that atomically writes `busy` to the idle marker.
-///
-/// Prepended to `tmux send-keys` chains in `cmd_send` and `cmd_new` so the
-/// marker is set before the prompt is delivered. This closes the race where
-/// `skulk wait`, invoked immediately after `skulk send`, could observe a
-/// stale `idle` (or `missing`) marker and return prematurely — the agent's
-/// own `UserPromptSubmit` hook fires asynchronously after Claude Code reads
-/// the terminal input, which can be milliseconds to seconds after send-keys.
-pub(crate) fn mark_busy_command(session_name: &str) -> String {
-    format!("mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/{session_name}")
 }
 
 /// Block until the named agent is idle (finished its current turn).
@@ -77,7 +60,7 @@ pub(crate) fn cmd_wait(
     let host = &cfg.host;
     let session_name = AgentRef::new(name, cfg).session_name();
 
-    ssh.run(&has_session_command(name, cfg))
+    remote::ensure_session_exists(ssh, name, cfg)
         .map_err(|e| classify_agent_error(name, e, host))?;
 
     let start = Instant::now();
@@ -186,22 +169,6 @@ mod tests {
         let cfg = test_config();
         let cmd = wait_state_command("feat", &cfg);
         assert!(cmd.contains(&format!("{}feat", cfg.session_prefix)));
-    }
-
-    #[test]
-    fn has_session_command_generates_tmux_probe() {
-        let cfg = test_config();
-        let cmd = has_session_command("my-task", &cfg);
-        assert_eq!(cmd, "tmux has-session -t skulk-my-task");
-    }
-
-    #[test]
-    fn mark_busy_command_writes_busy_to_session_marker() {
-        let cmd = mark_busy_command("skulk-my-task");
-        assert_eq!(
-            cmd,
-            "mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/skulk-my-task"
-        );
     }
 
     #[test]
