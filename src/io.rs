@@ -18,11 +18,10 @@ use clap::Parser;
 
 use crate::commands::completions;
 use crate::commands::init::{self, InitOutcome, Prompter};
-use crate::commands::interact::logs_snapshot_deep_command;
-use crate::config::{self, Config, OutputFormat, load_config};
+use crate::config::{self, OutputFormat, load_config};
 use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
-use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
+use crate::error::{SkulkError, classify_ssh_error};
 use crate::ssh::Ssh;
 use crate::util::{confirm_from_reader, shell_escape};
 use crate::{Cli, Commands, run};
@@ -34,34 +33,6 @@ use crate::{Cli, Commands, run};
 /// other 127.0.0.0/8 addresses are not recognized. Extend if users ask.
 fn is_localhost(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-/// Find the index in `new_lines` where new content begins, relative to `old_lines`.
-///
-/// Uses suffix-matching: finds the longest suffix of `old_lines` that appears as a
-/// contiguous subsequence in `new_lines`. Everything after that match is new content.
-/// Returns 0 if no overlap (show all), or `new_lines.len()` if nothing changed.
-///
-/// Complexity is O(n^2 * m) but bounded by the follow buffer size (200 lines).
-fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
-    if old_lines.is_empty() {
-        return 0;
-    }
-
-    for start in 0..old_lines.len() {
-        let suffix = &old_lines[start..];
-        let suffix_len = suffix.len();
-
-        if suffix_len <= new_lines.len() {
-            for new_start in 0..=new_lines.len() - suffix_len {
-                if new_lines[new_start..new_start + suffix_len] == *suffix {
-                    return new_start + suffix_len;
-                }
-            }
-        }
-    }
-
-    0
 }
 
 /// Read a yes/no confirmation from stdin.
@@ -388,35 +359,6 @@ impl crate::commands::local_ops::LocalOps for RealLocalOps {
     }
 }
 
-/// Follow agent output in real-time via poll loop.
-pub(crate) fn cmd_logs_follow(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    let cmd = logs_snapshot_deep_command(name, 200, cfg);
-    let initial = ssh
-        .run(&cmd)
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
-    let mut last_lines: Vec<String> = initial.lines().map(ToString::to_string).collect();
-    eprintln!("Following {name} (Ctrl+C to stop)...");
-    for line in &last_lines {
-        println!("{line}");
-    }
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        match ssh.run(&cmd) {
-            Ok(output) => {
-                let current: Vec<String> = output.lines().map(ToString::to_string).collect();
-                let new_start = find_new_content_start(&last_lines, &current);
-                for line in &current[new_start..] {
-                    println!("{line}");
-                }
-                last_lines = current;
-            }
-            Err(e) => {
-                eprintln!("Warning: capture failed: {e}");
-            }
-        }
-    }
-}
-
 // ── Init support ───────────────────────────────────────────────────────────
 
 struct StdinPrompter;
@@ -678,66 +620,5 @@ mod tests {
     #[test]
     fn is_localhost_remote_host() {
         assert!(!is_localhost("myserver.example.com"));
-    }
-
-    // ── find_new_content_start tests ────────────────────────────────────
-
-    #[test]
-    fn find_new_content_start_partial_overlap() {
-        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let new = vec!["b".to_string(), "c".to_string(), "d".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 2);
-    }
-
-    #[test]
-    fn find_new_content_start_no_change() {
-        let old = vec!["a".to_string(), "b".to_string()];
-        let new = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 2);
-    }
-
-    #[test]
-    fn find_new_content_start_complete_change() {
-        let old = vec!["a".to_string(), "b".to_string()];
-        let new = vec!["x".to_string(), "y".to_string(), "z".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 0);
-    }
-
-    #[test]
-    fn find_new_content_start_empty_old() {
-        let old: Vec<String> = vec![];
-        let new = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(find_new_content_start(&old, &new), 0);
-    }
-
-    #[test]
-    fn find_new_content_start_suffix_match_at_last_iteration() {
-        let old = vec!["x".to_string(), "y".to_string(), "a".to_string()];
-        let new = vec![
-            "b".to_string(),
-            "c".to_string(),
-            "a".to_string(),
-            "d".to_string(),
-        ];
-        assert_eq!(find_new_content_start(&old, &new), 3);
-    }
-
-    #[test]
-    fn find_new_content_start_empty_new() {
-        let old = vec!["a".to_string(), "b".to_string()];
-        let new: Vec<String> = vec![];
-        assert_eq!(find_new_content_start(&old, &new), 0);
-    }
-
-    #[test]
-    fn find_new_content_start_partial_match_not_contiguous() {
-        let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let new = vec![
-            "a".to_string(),
-            "x".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ];
-        assert_eq!(find_new_content_start(&old, &new), 3);
     }
 }

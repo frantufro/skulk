@@ -255,7 +255,7 @@ pub(crate) fn cmd_logs(
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
     if follow {
-        return crate::io::cmd_logs_follow(ssh, name, cfg);
+        return crate::commands::follow::cmd_logs_follow(ssh, name, cfg);
     }
     let cmd = match lines {
         Some(n) => logs_snapshot_deep_command(name, n, cfg),
