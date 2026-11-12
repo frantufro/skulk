@@ -1,14 +1,11 @@
 use std::collections::HashSet;
 
 use crate::agent_ref::AgentRef;
-use crate::commands::destroy::{
-    agent_destroy_branch_command, agent_destroy_session_command, agent_destroy_state_file_command,
-    agent_destroy_worktree_command,
-};
 use crate::config::{Config, OutputFormat};
 use crate::display::{emit_json, format_gc_summary};
 use crate::error::SkulkError;
 use crate::inventory::{AgentInventory, GcOrphans, fetch_inventory};
+use crate::remote;
 use crate::ssh::Ssh;
 use crate::util::validate_name;
 
@@ -65,10 +62,7 @@ fn cleanup_stale_state_files(
     for name in &stale {
         let agent = AgentRef::from_qualified(name, cfg);
         eprint!("  Removing stale state file {name}... ");
-        if ssh
-            .run(&agent_destroy_state_file_command(agent.name(), cfg))
-            .is_ok()
-        {
+        if remote::remove_state_file(ssh, agent.name(), cfg).is_ok() {
             eprintln!("done");
         } else {
             eprintln!("failed");
@@ -164,10 +158,7 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     for session in &orphans.sessions {
         let agent = AgentRef::from_qualified(session, cfg);
         eprint!("  Killing orphaned session {session}... ");
-        if ssh
-            .run(&agent_destroy_session_command(agent.name(), cfg))
-            .is_ok()
-        {
+        if remote::kill_session(ssh, agent.name(), cfg).is_ok() {
             eprintln!("done");
         } else {
             eprintln!("failed");
@@ -178,12 +169,8 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     for worktree in &orphans.worktrees {
         let agent = AgentRef::from_qualified(worktree, cfg);
         eprint!("  Removing orphaned worktree {worktree}... ");
-        let wt_ok = ssh
-            .run(&agent_destroy_worktree_command(agent.name(), cfg))
-            .is_ok();
-        let br_ok = ssh
-            .run(&agent_destroy_branch_command(agent.name(), cfg))
-            .is_ok();
+        let wt_ok = remote::remove_worktree(ssh, agent.name(), cfg).is_ok();
+        let br_ok = remote::delete_branch(ssh, agent.name(), cfg).is_ok();
         if wt_ok && br_ok {
             eprintln!("done");
         } else {
@@ -195,10 +182,7 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     for branch in &orphans.branches {
         let agent = AgentRef::from_qualified(branch, cfg);
         eprint!("  Deleting orphaned branch {branch}... ");
-        if ssh
-            .run(&agent_destroy_branch_command(agent.name(), cfg))
-            .is_ok()
-        {
+        if remote::delete_branch(ssh, agent.name(), cfg).is_ok() {
             eprintln!("done");
         } else {
             eprintln!("failed");

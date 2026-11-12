@@ -5,6 +5,7 @@ mod display;
 mod error;
 mod inventory;
 mod io;
+mod remote;
 mod ssh;
 mod timings;
 mod util;

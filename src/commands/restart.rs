@@ -1,9 +1,8 @@
 use crate::agent_ref::AgentRef;
-use crate::commands::destroy::agent_destroy_session_command;
-use crate::commands::new::agent_create_tmux_command;
 use crate::config::{Config, DEFAULT_HARNESS};
 use crate::error::{SkulkError, classify_agent_error};
 use crate::inventory::{Lifecycle, fetch_inventory};
+use crate::remote::{self, LaunchOptions};
 use crate::ssh::Ssh;
 use crate::util::{validate_model, validate_name};
 
@@ -52,25 +51,21 @@ pub(crate) fn cmd_restart(
         }
     }
 
-    // Tmux creation is a two-step shell pipeline (`new-session && send-keys`).
-    // If `new-session` succeeds but `send-keys` fails, we leave an empty
-    // session that would block a subsequent restart with "already running".
-    // Best-effort kill on failure so retry stays clean; swallow the cleanup
-    // error (the original failure is the one the user needs to see).
-    if let Err(e) = ssh.run(&agent_create_tmux_command(
-        name,
-        cfg,
+    // Best-effort kill of a partial session keeps a retry clean; the original
+    // failure is the one the user needs to see.
+    let launch = LaunchOptions {
         remote_control,
         model,
         claude_args,
-    )) {
-        if ssh.run(&agent_destroy_session_command(name, cfg)).is_err() {
+    };
+    if let Err(failure) = remote::start_session_or_kill(ssh, name, cfg, &launch) {
+        if failure.cleanup_failed {
             eprintln!(
                 "Warning: failed to clean up partial tmux session for agent '{name}'. \
                  If `skulk restart {name}` reports 'already running', run `skulk destroy {name}` first."
             );
         }
-        return Err(classify_agent_error(name, e, &cfg.host));
+        return Err(classify_agent_error(name, failure.error, &cfg.host));
     }
 
     // Mirrors the Mode-line logic in `cmd_new`: for OpenCode the
