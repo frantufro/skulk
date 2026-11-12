@@ -5,7 +5,7 @@ use crate::commands::interact::cmd_archive;
 use crate::commands::local_ops::LocalOps;
 use crate::config::Config;
 use crate::error::{SkulkError, classify_agent_error};
-use crate::inventory::fetch_inventory;
+use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::ssh::Ssh;
 use crate::util::{claude_project_dir_name, remote_claude_project_dir_command, validate_name};
 
@@ -65,9 +65,11 @@ pub(crate) fn cmd_download(
 
     // Step 3: Verify remote agent exists.
     let agent = AgentRef::new(name, cfg);
-    let session_name = agent.session_name();
     let inv = fetch_inventory(ssh, cfg).map_err(|e| classify_agent_error(name, e, &cfg.host))?;
-    if !inv.worktrees.contains_key(&session_name) {
+    if !matches!(
+        inv.lifecycle(&agent),
+        Lifecycle::Running | Lifecycle::Archived
+    ) {
         return Err(SkulkError::NotFound(format!(
             "Agent '{name}' not found on the remote."
         )));
