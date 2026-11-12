@@ -1,11 +1,10 @@
 use std::time::Duration;
 
 use crate::agent_ref::AgentRef;
-use crate::commands::destroy::agent_destroy_session_command;
-use crate::commands::wait::{has_session_command, mark_busy_command};
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
 use crate::error::{SkulkError, classify_agent_error};
+use crate::remote::{self, mark_busy_command};
 use crate::ssh::Ssh;
 use crate::util::{shell_escape, validate_name};
 
@@ -84,17 +83,6 @@ pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -
         "tmux capture-pane -p -t {} -S -{lines}",
         agent.session_name()
     )
-}
-
-/// Build the SSH command to archive an agent -- kill its tmux session only.
-///
-/// Archive is the full operation: the worktree and branch are left intact on
-/// purpose, so the agent's work can be reviewed or resumed later. Delegates to
-/// [`agent_destroy_session_command`] because the shell command is identical;
-/// the semantic distinction ("archive" vs "destroy") lives at the `cmd_*`
-/// orchestration layer, not in the single-session kill command.
-pub(crate) fn archive_command(name: &str, cfg: &Config) -> String {
-    agent_destroy_session_command(name, cfg)
 }
 
 /// Build the SSH command to write an archive reason sidecar file.
@@ -204,7 +192,7 @@ pub(crate) fn cmd_connect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
     // Pre-check that the session exists before launching interactive SSH,
     // because ssh_interactive replaces the process and tmux errors don't
     // propagate as non-zero exit codes in non-interactive contexts.
-    ssh.run(&has_session_command(name, cfg))
+    remote::ensure_session_exists(ssh, name, cfg)
         .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     let cmd = connect_command(name, cfg);
     let status = ssh.interactive(&cmd)?;
@@ -260,8 +248,7 @@ pub(crate) fn cmd_archive(
     cfg: &Config,
 ) -> Result<(), SkulkError> {
     validate_name(name)?;
-    ssh.run(&archive_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    remote::kill_session(ssh, name, cfg).map_err(|e| classify_agent_error(name, e, &cfg.host))?;
     if let Some(text) = reason {
         let session_name = AgentRef::new(name, cfg).session_name();
         if let Err(e) = ssh.run(&archive_reason_command(&session_name, text)) {
@@ -797,29 +784,6 @@ mod tests {
             Err(SkulkError::SshFailed("connection lost".into())),
         ]);
         assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
-    }
-
-    #[test]
-    fn archive_command_generates_tmux_kill_session() {
-        let cfg = test_config();
-        let cmd = archive_command("my-task", &cfg);
-        assert_eq!(cmd, "tmux kill-session -t skulk-my-task");
-    }
-
-    #[test]
-    fn archive_command_uses_session_prefix() {
-        let cfg = test_config();
-        let cmd = archive_command("test", &cfg);
-        assert!(cmd.contains(&*cfg.session_prefix));
-    }
-
-    #[test]
-    fn archive_command_does_not_touch_worktree_or_branch() {
-        let cfg = test_config();
-        let cmd = archive_command("my-task", &cfg);
-        assert!(!cmd.contains("worktree"));
-        assert!(!cmd.contains("branch"));
-        assert!(!cmd.contains("git"));
     }
 
     #[test]
