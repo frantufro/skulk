@@ -3,9 +3,10 @@
 use std::io::Write;
 use std::time::Duration;
 
+use crate::agent::Agent;
 use crate::commands::interact::logs_snapshot_deep_command;
 use crate::config::Config;
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::ssh::Ssh;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -39,10 +40,14 @@ fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
 }
 
 /// Follow agent output in real-time via poll loop. Runs until interrupted.
-pub(crate) fn cmd_logs_follow(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+pub(crate) fn cmd_logs_follow(
+    ssh: &impl Ssh,
+    agent: &Agent,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
     follow_logs(
         ssh,
-        name,
+        agent,
         cfg,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
@@ -58,16 +63,15 @@ pub(crate) fn cmd_logs_follow(ssh: &impl Ssh, name: &str, cfg: &Config) -> Resul
 /// returns `true`.
 fn follow_logs(
     ssh: &impl Ssh,
-    name: &str,
+    agent: &Agent,
     cfg: &Config,
     out: &mut dyn Write,
     err: &mut dyn Write,
     wait: &mut dyn FnMut() -> bool,
 ) -> Result<(), SkulkError> {
+    let name = agent.name();
     let cmd = logs_snapshot_deep_command(name, 200, cfg);
-    let initial = ssh
-        .run(&cmd)
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    let initial = ssh.run(&cmd).map_err(|e| agent.classify(e))?;
     let mut last_lines: Vec<String> = initial.lines().map(ToString::to_string).collect();
     let _ = writeln!(err, "Following {name} (Ctrl+C to stop)...");
     for line in &last_lines {
@@ -108,18 +112,13 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let mut remaining = polls;
-        let result = follow_logs(
-            &ssh,
-            "alpha",
-            &test_config(),
-            &mut out,
-            &mut err,
-            &mut || {
-                let go = remaining > 0;
-                remaining = remaining.saturating_sub(1);
-                go
-            },
-        );
+        let cfg = test_config();
+        let agent = Agent::resolve("alpha", &cfg).unwrap();
+        let result = follow_logs(&ssh, &agent, &cfg, &mut out, &mut err, &mut || {
+            let go = remaining > 0;
+            remaining = remaining.saturating_sub(1);
+            go
+        });
         (
             result,
             String::from_utf8_lossy(&out).into_owned(),

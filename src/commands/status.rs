@@ -1,12 +1,13 @@
 use serde::Serialize;
 
+use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::config::{Config, OutputFormat};
 use crate::display::{emit_json, format_uptime, use_color};
-use crate::error::{SkulkError, classify_agent_error, is_tmux_no_server};
+use crate::error::{SkulkError, is_tmux_no_server};
 use crate::inventory::{AgentState, parse_sessions, resolve_agent_state, worktree_map_from_output};
 use crate::ssh::Ssh;
-use crate::util::{extract_section, validate_name};
+use crate::util::extract_section;
 
 const TMUX_FORMAT: &str = "#{session_name}\t#{session_created}\t#{session_attached}";
 
@@ -298,10 +299,10 @@ pub(crate) fn json_agent_status(view: &StatusView, remote_now: i64) -> AgentStat
 }
 
 pub(crate) fn cmd_status(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     let raw = ssh
         .run(&status_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     let remote_now = raw
         .lines()
         .find(|l| l.contains("__EPOCH__"))

@@ -1,13 +1,13 @@
 use std::process::Command as ProcessCommand;
 
-use crate::agent_ref::AgentRef;
+use crate::agent::Agent;
 use crate::commands::interact::cmd_archive;
 use crate::commands::local_ops::LocalOps;
 use crate::config::Config;
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::ssh::Ssh;
-use crate::util::{claude_project_dir_name, remote_claude_project_dir_command, validate_name};
+use crate::util::{claude_project_dir_name, remote_claude_project_dir_command};
 
 /// Resolve the local machine's hostname for the auto-archive reason annotation.
 ///
@@ -51,8 +51,8 @@ pub(crate) fn cmd_download(
     force: bool,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    // Step 1: Validate agent name.
-    validate_name(name)?;
+    // Step 1: Resolve the agent (validates the name).
+    let agent = Agent::resolve(name, cfg)?;
 
     // Step 2: Check local git clean state.
     let status = local.git_status()?;
@@ -64,10 +64,9 @@ pub(crate) fn cmd_download(
     }
 
     // Step 3: Verify remote agent exists.
-    let agent = AgentRef::new(name, cfg);
-    let inv = fetch_inventory(ssh, cfg).map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    let inv = fetch_inventory(ssh, cfg).map_err(|e| agent.classify(e))?;
     if !matches!(
-        inv.lifecycle(&agent),
+        agent.lifecycle(&inv),
         Lifecycle::Running | Lifecycle::Archived
     ) {
         return Err(SkulkError::NotFound(format!(
@@ -114,11 +113,11 @@ pub(crate) fn cmd_download(
     let remote_encoded = ssh
         .run(&remote_claude_project_dir_command(&worktree_path))
         .map(|s| s.trim().to_owned())
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     let remote_session_dir = format!("~/.claude/projects/{remote_encoded}");
     let listing = ssh
         .run(&format!("ls {remote_session_dir} 2>/dev/null || true"))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     let filenames: Vec<String> = listing
         .lines()
         .map(str::trim)
@@ -142,7 +141,7 @@ pub(crate) fn cmd_download(
             if let Err(e) = ssh.download_file(&remote_file, &local_file) {
                 local.remove_local_worktree(&local_worktree);
                 let _ = local.remove_dir_all(&local_session_dir);
-                return Err(classify_agent_error(name, e, &cfg.host));
+                return Err(agent.classify(e));
             }
         }
     }

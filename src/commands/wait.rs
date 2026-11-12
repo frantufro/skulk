@@ -2,14 +2,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::inventory::fetch_inventory;
 use crate::remote;
 use crate::ssh::Ssh;
-use crate::util::validate_name;
 
 /// Build the JSON result value for a wait operation.
 ///
@@ -56,18 +56,28 @@ pub(crate) fn cmd_wait(
     poll_interval: Duration,
     timeout: Duration,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
-    let host = &cfg.host;
-    let session_name = AgentRef::new(name, cfg).session_name();
+    let agent = Agent::resolve(name, cfg)?;
+    wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)
+}
 
-    remote::ensure_session_exists(ssh, name, cfg)
-        .map_err(|e| classify_agent_error(name, e, host))?;
+/// The wait loop for an already-resolved agent.
+fn wait_for_agent(
+    ssh: &impl Ssh,
+    agent: &Agent,
+    cfg: &Config,
+    poll_interval: Duration,
+    timeout: Duration,
+) -> Result<(), SkulkError> {
+    let name = agent.name();
+    let session_name = agent.session_name();
+
+    remote::ensure_session_exists(ssh, name, cfg).map_err(|e| agent.classify(e))?;
 
     let start = Instant::now();
     loop {
         let state = ssh
             .run(&wait_state_command(name, cfg))
-            .map_err(|e| classify_agent_error(name, e, host))?;
+            .map_err(|e| agent.classify(e))?;
         let trimmed = state.trim();
         if trimmed == "idle" || trimmed == "missing" {
             if cfg.output_format == OutputFormat::Json {
@@ -119,8 +129,8 @@ pub(crate) fn cmd_wait_all(
         return Ok(());
     }
     for session in &inv.sessions {
-        let agent = AgentRef::from_qualified(session, cfg);
-        cmd_wait(ssh, agent.name(), cfg, poll_interval, timeout)?;
+        let agent = Agent::from_qualified(session, cfg);
+        wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)?;
     }
     Ok(())
 }

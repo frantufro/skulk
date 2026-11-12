@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 
+use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::commands::prompt_source;
 use crate::config::{Config, DEFAULT_HARNESS};
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::inventory::fetch_inventory;
 use crate::remote::{self, LaunchOptions, STARTUP_DELAY};
 use crate::ssh::Ssh;
-use crate::util::{check_base_clone, validate_model, validate_name};
+use crate::util::{check_base_clone, validate_model};
 
 /// Result of delivering a prompt to a newly-created agent.
 enum PromptStatus {
@@ -122,13 +123,11 @@ pub(crate) fn create_agent_with_prompt(
 ) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
     let host = &cfg.host;
-    let agent = AgentRef::new(name, cfg);
+    // Step 2: Resolve the agent (validates the name) and validate the model
+    let agent = Agent::resolve(name, cfg)?;
     let session_name = agent.session_name();
     let branch = agent.branch_name();
     let worktree = agent.worktree_path(cfg);
-
-    // Step 2: Validate name and (if provided) model
-    validate_name(name)?;
     if let Some(m) = model {
         validate_model(m)?;
     }
@@ -141,9 +140,8 @@ pub(crate) fn create_agent_with_prompt(
     })?;
 
     // Step 2: Fetch inventory and check uniqueness
-    let inv = fetch_inventory(ssh, cfg).map_err(|e| classify_agent_error(name, e, host))?;
-    inv.lifecycle(&AgentRef::new(name, cfg))
-        .ensure_name_free(name)?;
+    let inv = fetch_inventory(ssh, cfg).map_err(|e| agent.classify(e))?;
+    agent.lifecycle(&inv).ensure_name_free(name)?;
 
     // Step 3: Create worktree
     remote::create_worktree(ssh, name, cfg)?;

@@ -1,10 +1,10 @@
+use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::commands::interact::push_command;
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::ssh::Ssh;
-use crate::util::validate_name;
 
 /// Build the SSH command that verifies `gh` and `claude` exist on the remote.
 ///
@@ -154,9 +154,8 @@ pub(crate) fn json_ship_result(name: &str, pr_url: &str) -> serde_json::Value {
 /// `format_post_push_pr_failure`). The returned error tells the user what
 /// state they're in and how to recover.
 pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     let host = &cfg.host;
-    let agent = AgentRef::new(name, cfg);
     let branch = agent.branch_name();
 
     let missing = ssh.run(&precheck_command())?;
@@ -165,10 +164,10 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     }
 
     ssh.run(&push_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, host))?;
+        .map_err(|e| agent.classify(e))?;
 
     let output = ssh.run(&ship_command(name, cfg)).map_err(|e| {
-        let classified = classify_agent_error(name, e, host);
+        let classified = agent.classify(e);
         format_post_push_pr_failure(&branch, name, &classified)
     })?;
 
