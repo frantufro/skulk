@@ -19,7 +19,6 @@ use clap::Parser;
 use crate::commands::completions;
 use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::config::{self, OutputFormat, load_config};
-use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_ssh_error};
 use crate::ssh::Ssh;
@@ -434,70 +433,7 @@ fn run_init() -> Result<InitOutcome, SkulkError> {
         return Ok(InitOutcome::Aborted);
     };
 
-    // Write config under .skulk/
-    let toml_content = init::generate_config_toml(&answers);
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            SkulkError::Validation(format!("Failed to create {}: {e}", parent.display()))
-        })?;
-    }
-    std::fs::write(&config_path, toml_content).map_err(|e| {
-        SkulkError::Validation(format!("Failed to write {}: {e}", config_path.display()))
-    })?;
-    eprintln!(
-        "\n  Writing {}/{}... {}",
-        config::CONFIG_DIR,
-        config::CONFIG_FILENAME,
-        checkmark(color)
-    );
-    if legacy_path.is_file() {
-        match std::fs::remove_file(&legacy_path) {
-            Ok(()) => eprintln!("  Removed legacy .skulk.toml."),
-            Err(e) => eprintln!("  warning: failed to remove legacy .skulk.toml: {e}"),
-        }
-    }
-
-    // Write .skulk/init.sh.example so users have a template to rename.
-    let skulk_dir = cwd.join(".skulk");
-    std::fs::create_dir_all(&skulk_dir).map_err(|e| {
-        SkulkError::Validation(format!("Failed to create {}: {e}", skulk_dir.display()))
-    })?;
-    let example_path = skulk_dir.join("init.sh.example");
-    if !example_path.exists() {
-        std::fs::write(&example_path, init::init_script_example_content()).map_err(|e| {
-            SkulkError::Validation(format!("Failed to write {}: {e}", example_path.display()))
-        })?;
-        eprintln!("  Writing .skulk/init.sh.example... {}", checkmark(color));
-    }
-
-    // Add .skulk/.env to local .gitignore so secrets don't get committed.
-    // Distinguish "file doesn't exist" (treat as empty) from other read errors
-    // (surface to the user) — otherwise a perm-denied read would silently be
-    // treated as empty and the subsequent write could clobber the real file.
-    let gitignore_path = cwd.join(".gitignore");
-    let existing = match std::fs::read_to_string(&gitignore_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(SkulkError::Validation(format!(
-                "Failed to read {}: {e}",
-                gitignore_path.display()
-            )));
-        }
-    };
-    if let Some(updated) = init::ensure_gitignore_entry(&existing) {
-        std::fs::write(&gitignore_path, updated).map_err(|e| {
-            SkulkError::Validation(format!(
-                "Failed to update {}: {e}",
-                gitignore_path.display()
-            ))
-        })?;
-        eprintln!(
-            "  Updating .gitignore ({}) ... {}",
-            init::GITIGNORE_ENV_ENTRY,
-            checkmark(color)
-        );
-    }
+    init::write_local_files(&cwd, &answers, color)?;
 
     // Remote setup if requested
     if answers.run_setup {

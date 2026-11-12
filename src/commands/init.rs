@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::path::Path;
 
-use crate::config::{DEFAULT_HARNESS, validate_shell_safe};
+use crate::config::{self, DEFAULT_HARNESS, validate_shell_safe};
 use crate::display::{bold, checkmark, crossmark, dim, green};
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
@@ -478,6 +479,83 @@ pub(crate) fn ensure_gitignore_entry(existing: &str) -> Option<String> {
     let needs_newline = !existing.is_empty() && !existing.ends_with('\n');
     let separator = if needs_newline { "\n" } else { "" };
     Some(format!("{existing}{separator}{GITIGNORE_ENV_ENTRY}\n"))
+}
+
+/// Write the local files `skulk init` produces under `cwd`: the config
+/// (replacing a legacy `.skulk.toml` when present), the `init.sh.example`
+/// template, and the `.gitignore` entry for `.skulk/.env`. Progress goes to
+/// stderr.
+pub(crate) fn write_local_files(
+    cwd: &Path,
+    answers: &InitAnswers,
+    color: bool,
+) -> Result<(), SkulkError> {
+    let config_path = config::config_path_in(cwd);
+    let legacy_path = cwd.join(".skulk.toml");
+
+    let toml_content = generate_config_toml(answers);
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            SkulkError::Validation(format!("Failed to create {}: {e}", parent.display()))
+        })?;
+    }
+    std::fs::write(&config_path, toml_content).map_err(|e| {
+        SkulkError::Validation(format!("Failed to write {}: {e}", config_path.display()))
+    })?;
+    eprintln!(
+        "\n  Writing {}/{}... {}",
+        config::CONFIG_DIR,
+        config::CONFIG_FILENAME,
+        checkmark(color)
+    );
+    if legacy_path.is_file() {
+        match std::fs::remove_file(&legacy_path) {
+            Ok(()) => eprintln!("  Removed legacy .skulk.toml."),
+            Err(e) => eprintln!("  warning: failed to remove legacy .skulk.toml: {e}"),
+        }
+    }
+
+    // Write .skulk/init.sh.example so users have a template to rename.
+    let skulk_dir = cwd.join(".skulk");
+    std::fs::create_dir_all(&skulk_dir).map_err(|e| {
+        SkulkError::Validation(format!("Failed to create {}: {e}", skulk_dir.display()))
+    })?;
+    let example_path = skulk_dir.join("init.sh.example");
+    if !example_path.exists() {
+        std::fs::write(&example_path, init_script_example_content()).map_err(|e| {
+            SkulkError::Validation(format!("Failed to write {}: {e}", example_path.display()))
+        })?;
+        eprintln!("  Writing .skulk/init.sh.example... {}", checkmark(color));
+    }
+
+    // Add .skulk/.env to local .gitignore so secrets don't get committed.
+    // A missing file counts as empty. Other read errors surface to the user,
+    // because treating a permission-denied read as empty would let the write
+    // below clobber the real file.
+    let gitignore_path = cwd.join(".gitignore");
+    let existing = match std::fs::read_to_string(&gitignore_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(SkulkError::Validation(format!(
+                "Failed to read {}: {e}",
+                gitignore_path.display()
+            )));
+        }
+    };
+    if let Some(updated) = ensure_gitignore_entry(&existing) {
+        std::fs::write(&gitignore_path, updated).map_err(|e| {
+            SkulkError::Validation(format!(
+                "Failed to update {}: {e}",
+                gitignore_path.display()
+            ))
+        })?;
+        eprintln!(
+            "  Updating .gitignore ({GITIGNORE_ENV_ENTRY}) ... {}",
+            checkmark(color)
+        );
+    }
+    Ok(())
 }
 
 // ── Remote setup ───────────────────────────────────────────────────────────
@@ -1488,5 +1566,79 @@ mod tests {
     fn ensure_gitignore_entry_returns_none_when_present_with_whitespace() {
         let existing = "target/\n  .skulk/.env  \n";
         assert!(ensure_gitignore_entry(existing).is_none());
+    }
+
+    // ── write_local_files ──────────────────────────────────────────────
+
+    fn temp_project_dir() -> std::path::PathBuf {
+        let dir = crate::testutil::unique_temp_path("skulk_init_files");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_local_files_creates_config_example_and_gitignore() {
+        let dir = temp_project_dir();
+
+        write_local_files(&dir, &test_answers(), false).unwrap();
+
+        assert!(config::config_path_in(&dir).is_file());
+        assert!(dir.join(".skulk/init.sh.example").is_file());
+        let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(gitignore, format!("{GITIGNORE_ENV_ENTRY}\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_local_files_removes_legacy_config() {
+        let dir = temp_project_dir();
+        std::fs::write(dir.join(".skulk.toml"), "host = \"old\"\n").unwrap();
+
+        write_local_files(&dir, &test_answers(), false).unwrap();
+
+        assert!(!dir.join(".skulk.toml").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_local_files_keeps_existing_example_and_appends_to_gitignore() {
+        let dir = temp_project_dir();
+        std::fs::create_dir_all(dir.join(".skulk")).unwrap();
+        std::fs::write(dir.join(".skulk/init.sh.example"), "custom").unwrap();
+        std::fs::write(dir.join(".gitignore"), "target").unwrap();
+
+        write_local_files(&dir, &test_answers(), false).unwrap();
+
+        let example = std::fs::read_to_string(dir.join(".skulk/init.sh.example")).unwrap();
+        assert_eq!(example, "custom");
+        let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(gitignore, format!("target\n{GITIGNORE_ENV_ENTRY}\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_local_files_leaves_gitignore_alone_when_entry_present() {
+        let dir = temp_project_dir();
+        let original = format!("{GITIGNORE_ENV_ENTRY}\n");
+        std::fs::write(dir.join(".gitignore"), &original).unwrap();
+
+        write_local_files(&dir, &test_answers(), false).unwrap();
+
+        let gitignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(gitignore, original);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_local_files_errors_when_gitignore_is_unreadable() {
+        let dir = temp_project_dir();
+        // A directory at the .gitignore path makes read_to_string fail with a
+        // non-NotFound error.
+        std::fs::create_dir_all(dir.join(".gitignore")).unwrap();
+
+        let result = write_local_files(&dir, &test_answers(), false);
+
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
