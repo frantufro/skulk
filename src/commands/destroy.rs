@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
+use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::remote;
 use crate::ssh::Ssh;
-use crate::util::validate_name;
 
 /// Run the branch-delete SSH command and record the outcome.
 ///
@@ -65,17 +65,16 @@ pub(crate) fn cmd_destroy(
     cfg: &Config,
     confirm: &dyn Fn(&str) -> bool,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
 
     // Fetch inventory via shared probe
     let inv = fetch_inventory(ssh, cfg)?;
-    let agent = AgentRef::new(name, cfg);
     let session_name = agent.session_name();
     let has_session = inv.sessions.contains(&session_name);
     let has_worktree = inv.worktrees.contains_key(&session_name);
     let has_branch = inv.branches.contains(&session_name);
 
-    if inv.lifecycle(&agent) == Lifecycle::Absent {
+    if agent.lifecycle(&inv) == Lifecycle::Absent {
         return Err(SkulkError::NotFound(format!("No agent '{name}' found.")));
     }
 

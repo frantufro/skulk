@@ -1,14 +1,15 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::commands::prompt_source;
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::remote::{self, mark_busy_command};
 use crate::ssh::Ssh;
-use crate::util::{shell_escape, validate_name};
+use crate::util::shell_escape;
 
 /// Output format for `skulk diff`, mapped from the mutually-exclusive CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,10 +159,10 @@ pub(crate) fn cmd_diff(
     format: DiffFormat,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     let output = ssh
         .run(&diff_command(name, format, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     match cfg.output_format {
         OutputFormat::Json => emit_json(&serde_json::json!({
             "agent": name,
@@ -174,26 +175,23 @@ pub(crate) fn cmd_diff(
 
 /// Push an agent's branch to `origin` with upstream tracking.
 pub(crate) fn cmd_push(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     let output = ssh
         .run(&push_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     if !output.is_empty() {
         print!("{output}");
     }
-    eprintln!(
-        "Pushed {} to origin.",
-        AgentRef::new(name, cfg).branch_name()
-    );
+    eprintln!("Pushed {} to origin.", agent.branch_name());
     Ok(())
 }
 
 /// Show `git log` of commits on an agent's branch not in the default branch.
 pub(crate) fn cmd_git_log(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     let output = ssh
         .run(&git_log_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     print!("{output}");
     Ok(())
 }
@@ -204,25 +202,21 @@ pub(crate) fn cmd_git_log(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
 /// session) and the local `Ctrl+B D` keybinding is unavailable. The agent
 /// keeps running -- only the attached clients are kicked off.
 pub(crate) fn cmd_disconnect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     ssh.run(&disconnect_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
-    eprintln!(
-        "Detached all clients from {}.",
-        AgentRef::new(name, cfg).session_name()
-    );
+        .map_err(|e| agent.classify(e))?;
+    eprintln!("Detached all clients from {}.", agent.session_name());
     Ok(())
 }
 
 /// Attach to an agent's live tmux session via interactive SSH.
 pub(crate) fn cmd_connect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
-    validate_name(name)?;
-    let session_name = AgentRef::new(name, cfg).session_name();
+    let agent = Agent::resolve(name, cfg)?;
+    let session_name = agent.session_name();
     // Pre-check that the session exists before launching interactive SSH,
     // because ssh_interactive replaces the process and tmux errors don't
     // propagate as non-zero exit codes in non-interactive contexts.
-    remote::ensure_session_exists(ssh, name, cfg)
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    remote::ensure_session_exists(ssh, name, cfg).map_err(|e| agent.classify(e))?;
     let cmd = connect_command(name, cfg);
     let status = ssh.interactive(&cmd)?;
     if status.success() {
@@ -241,17 +235,15 @@ pub(crate) fn cmd_logs(
     lines: Option<u32>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     if follow {
-        return crate::commands::follow::cmd_logs_follow(ssh, name, cfg);
+        return crate::commands::follow::cmd_logs_follow(ssh, &agent, cfg);
     }
     let cmd = match lines {
         Some(n) => logs_snapshot_deep_command(name, n, cfg),
         None => capture_pane_command(name, cfg),
     };
-    let output = ssh
-        .run(&cmd)
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    let output = ssh.run(&cmd).map_err(|e| agent.classify(e))?;
     match cfg.output_format {
         OutputFormat::Json => emit_json(&serde_json::json!({
             "agent": name,
@@ -276,10 +268,10 @@ pub(crate) fn cmd_archive(
     reason: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
-    remote::kill_session(ssh, name, cfg).map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    let agent = Agent::resolve(name, cfg)?;
+    remote::kill_session(ssh, name, cfg).map_err(|e| agent.classify(e))?;
     if let Some(text) = reason {
-        let session_name = AgentRef::new(name, cfg).session_name();
+        let session_name = agent.session_name();
         if let Err(e) = ssh.run(&archive_reason_command(&session_name, text)) {
             eprintln!("Warning: failed to write archive reason for '{name}': {e}");
         }
@@ -313,10 +305,10 @@ pub(crate) fn cmd_transcript(
     output: Option<&std::path::Path>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     let content = ssh
         .run(&logs_snapshot_deep_command(name, TRANSCRIPT_MAX_LINES, cfg))
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+        .map_err(|e| agent.classify(e))?;
     match output {
         Some(path) => {
             std::fs::write(path, &content).map_err(|e| {
@@ -340,14 +332,13 @@ pub(crate) fn cmd_send(
     cfg: &Config,
     verify_delay: Duration,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
-    let session_name = AgentRef::new(name, cfg).session_name();
-    let host = &cfg.host;
+    let agent = Agent::resolve(name, cfg)?;
+    let session_name = agent.session_name();
     let before = ssh
         .run(&capture_pane_command(name, cfg))
-        .map_err(|e| classify_agent_error(name, e, host))?;
+        .map_err(|e| agent.classify(e))?;
     ssh.run(&send_command(name, prompt, cfg))
-        .map_err(|e| classify_agent_error(name, e, host))?;
+        .map_err(|e| agent.classify(e))?;
     std::thread::sleep(verify_delay);
     match ssh.run(&capture_pane_command(name, cfg)) {
         Ok(after) if after == before => {
