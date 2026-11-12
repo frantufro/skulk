@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
@@ -14,6 +15,68 @@ pub(crate) struct AgentInventory {
     pub worktrees: HashMap<String, String>,
     /// branch names with session prefix
     pub branches: Vec<String>,
+}
+
+/// Which resource of an orphaned agent is left standing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Orphan {
+    /// A tmux session with no worktree.
+    Session,
+    /// A branch with neither session nor worktree.
+    Branch,
+}
+
+/// Where an agent stands in its lifecycle, derived from the inventory.
+///
+/// Commands match on this value. The rules for running, archived, orphan and
+/// absent agents live in [`AgentInventory::lifecycle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lifecycle {
+    /// Session and worktree both exist.
+    Running,
+    /// The worktree survives and the session is gone; `skulk restart` revives it.
+    Archived,
+    /// Leftover resources whose companions are gone; `skulk gc` reaps them.
+    Orphan(Orphan),
+    /// No session, worktree or branch carries the name.
+    Absent,
+}
+
+impl Lifecycle {
+    /// Succeeds when `skulk new` and `skulk upload` may create an agent under
+    /// `name`. Running and archived agents are refused with the message that
+    /// tells the developer how to proceed.
+    pub(crate) fn ensure_name_free(self, name: &str) -> Result<(), SkulkError> {
+        match self {
+            Lifecycle::Running | Lifecycle::Orphan(Orphan::Session) => Err(SkulkError::Validation(
+                format!("Agent '{name}' already exists."),
+            )),
+            Lifecycle::Archived => Err(SkulkError::Validation(format!(
+                "Agent '{name}' already has a worktree (archived or crashed).\n  \
+                 Resume it: `skulk restart {name}`\n  \
+                 Or wipe it: `skulk destroy {name}`"
+            ))),
+            Lifecycle::Orphan(Orphan::Branch) | Lifecycle::Absent => Ok(()),
+        }
+    }
+}
+
+impl AgentInventory {
+    /// Classify one agent from the sessions, worktrees and branches present.
+    pub(crate) fn lifecycle(&self, agent: &AgentRef) -> Lifecycle {
+        let qualified = agent.session_name();
+        let has_session = self.sessions.contains(&qualified);
+        let has_worktree = self.worktrees.contains_key(&qualified);
+        match (has_session, has_worktree) {
+            (true, true) => Lifecycle::Running,
+            (false, true) => Lifecycle::Archived,
+            (true, false) => Lifecycle::Orphan(Orphan::Session),
+            (false, false) if self.branches.contains(&qualified) => {
+                Lifecycle::Orphan(Orphan::Branch)
+            }
+            (false, false) => Lifecycle::Absent,
+        }
+    }
 }
 
 /// Lifecycle state of a Skulk agent.
@@ -136,6 +199,14 @@ pub(crate) fn get_worktree_map(porcelain_output: &str, cfg: &Config) -> HashMap<
     map
 }
 
+/// Extract the `__WORKTREES_START__` section from a probe's raw output and
+/// parse it with [`get_worktree_map`]. Shared by every probe that includes
+/// the worktrees section.
+pub(crate) fn worktree_map_from_output(raw: &str, cfg: &Config) -> HashMap<String, String> {
+    let section = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
+    get_worktree_map(section, cfg)
+}
+
 /// Build the SSH command that gathers all agent state in one round-trip.
 /// Returns a shell command string that outputs delimited sections for
 /// tmux sessions, git worktrees, and git branches.
@@ -172,8 +243,7 @@ pub(crate) fn parse_inventory(raw: &str, cfg: &Config) -> AgentInventory {
         .collect();
 
     // Worktrees: parse porcelain output between markers
-    let worktrees_raw = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
-    let worktrees = get_worktree_map(worktrees_raw, cfg);
+    let worktrees = worktree_map_from_output(raw, cfg);
 
     // Branches: lines between markers, trimmed, filtered to session prefix
     let branches_raw = extract_section(raw, "__BRANCHES_START__\n", "\n__BRANCHES_END__");
@@ -205,6 +275,80 @@ pub(crate) fn fetch_inventory(ssh: &impl Ssh, cfg: &Config) -> Result<AgentInven
 mod tests {
     use super::*;
     use crate::testutil::test_config;
+
+    // ── lifecycle ───────────────────────────────────────────────────────
+
+    fn lifecycle_of(inv: &AgentInventory, name: &str) -> Lifecycle {
+        let cfg = test_config();
+        inv.lifecycle(&AgentRef::new(name, &cfg))
+    }
+
+    #[test]
+    fn lifecycle_running_when_session_and_worktree_exist() {
+        let inv = crate::testutil::make_inventory(
+            &["skulk-a"],
+            &[("skulk-a", "/wt/skulk-a")],
+            &["skulk-a"],
+        );
+        assert_eq!(lifecycle_of(&inv, "a"), Lifecycle::Running);
+    }
+
+    #[test]
+    fn lifecycle_archived_when_worktree_survives_without_session() {
+        let inv = crate::testutil::make_inventory(&[], &[("skulk-a", "/wt/skulk-a")], &["skulk-a"]);
+        assert_eq!(lifecycle_of(&inv, "a"), Lifecycle::Archived);
+    }
+
+    #[test]
+    fn lifecycle_orphan_session_when_only_session_exists() {
+        let inv = crate::testutil::make_inventory(&["skulk-a"], &[], &[]);
+        assert_eq!(lifecycle_of(&inv, "a"), Lifecycle::Orphan(Orphan::Session));
+    }
+
+    #[test]
+    fn lifecycle_orphan_branch_when_only_branch_exists() {
+        let inv = crate::testutil::make_inventory(&[], &[], &["skulk-a"]);
+        assert_eq!(lifecycle_of(&inv, "a"), Lifecycle::Orphan(Orphan::Branch));
+    }
+
+    #[test]
+    fn lifecycle_absent_when_nothing_exists() {
+        let inv = crate::testutil::make_inventory(&["skulk-b"], &[], &[]);
+        assert_eq!(lifecycle_of(&inv, "a"), Lifecycle::Absent);
+    }
+
+    #[test]
+    fn ensure_name_free_rejects_running_with_already_exists() {
+        let err = Lifecycle::Running.ensure_name_free("a").unwrap_err();
+        assert_eq!(err.to_string(), "Agent 'a' already exists.");
+    }
+
+    #[test]
+    fn ensure_name_free_rejects_archived_with_resume_hint() {
+        let err = Lifecycle::Archived.ensure_name_free("a").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Agent 'a' already has a worktree (archived or crashed)."));
+        assert!(msg.contains("`skulk restart a`"));
+        assert!(msg.contains("`skulk destroy a`"));
+    }
+
+    #[test]
+    fn ensure_name_free_accepts_absent_and_orphan_branch() {
+        assert!(Lifecycle::Absent.ensure_name_free("a").is_ok());
+        assert!(
+            Lifecycle::Orphan(Orphan::Branch)
+                .ensure_name_free("a")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn worktree_map_from_output_reads_the_worktrees_section() {
+        let cfg = test_config();
+        let raw = crate::testutil::mock_inventory(&[], &[("skulk-a", "/wt/skulk-a")], &[]);
+        let map = worktree_map_from_output(&raw, &cfg);
+        assert_eq!(map.get("skulk-a").map(String::as_str), Some("/wt/skulk-a"));
+    }
 
     // ── parse_sessions ──────────────────────────────────────────────────
 
