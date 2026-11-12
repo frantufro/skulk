@@ -166,10 +166,16 @@ pub(crate) fn create_agent_with_prompt(
         model,
         claude_args,
     };
-    if let Err(e) = remote::start_session(ssh, name, cfg, &launch) {
+    if let Err(failure) = remote::start_session_or_kill(ssh, name, cfg, &launch) {
+        if failure.cleanup_failed {
+            eprintln!(
+                "Warning: failed to clean up partial tmux session for agent '{name}'. \
+                 Run `skulk destroy {name}` to remove it."
+            );
+        }
         // Attempt rollback (best-effort)
         remote::roll_back_worktree(ssh, name, cfg);
-        return Err(e);
+        return Err(failure.error);
     }
 
     // Step 5.5: Update the persisted prompt file so `skulk replay <name>`
@@ -646,7 +652,8 @@ mod tests {
             Ok(mock_empty_inventory()),
             ssh_ok(),
             Err(SkulkError::SshFailed("tmux failed".into())),
-            ssh_ok(),
+            ssh_ok(), // kill partial session
+            ssh_ok(), // rollback worktree
         ]);
         let result = cmd_new(
             &ssh,
@@ -661,6 +668,35 @@ mod tests {
     }
 
     #[test]
+    fn cmd_new_tmux_failure_kills_partial_session_before_rolling_back_worktree() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(),
+            Err(SkulkError::SshFailed("send-keys failed".into())),
+            ssh_ok(),
+            ssh_ok(),
+        ]);
+
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
+
+        assert!(result.is_err());
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 6, "got: {calls:?}");
+        assert!(calls[4].contains("tmux kill-session -t skulk-test"));
+        assert!(calls[5].contains("git worktree remove --force"));
+    }
+
+    #[test]
     fn cmd_new_tmux_fails_rollback_also_fails() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
@@ -668,6 +704,7 @@ mod tests {
             Ok(mock_empty_inventory()),
             ssh_ok(),
             Err(SkulkError::SshFailed("tmux creation failed".into())),
+            ssh_ok(), // kill partial session
             Err(SkulkError::SshFailed("rollback also failed".into())),
         ]);
         let result = cmd_new(
