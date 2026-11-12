@@ -4,7 +4,7 @@ use crate::agent_ref::AgentRef;
 use crate::config::{Config, OutputFormat};
 use crate::display::{emit_json, format_uptime, use_color};
 use crate::error::{SkulkError, classify_agent_error, is_tmux_no_server};
-use crate::inventory::{AgentState, get_worktree_map, parse_sessions, resolve_agent_state};
+use crate::inventory::{AgentState, parse_sessions, resolve_agent_state, worktree_map_from_output};
 use crate::ssh::Ssh;
 use crate::util::{extract_section, validate_name};
 
@@ -143,8 +143,9 @@ pub(crate) fn parse_status_output(
         .into_iter()
         .find(|s| s.name == session_name);
 
-    let wt_raw = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
-    let worktree = get_worktree_map(wt_raw, cfg).get(&session_name).cloned();
+    let worktree = worktree_map_from_output(raw, cfg)
+        .get(&session_name)
+        .cloned();
 
     let be_raw = extract_section(raw, "__BRANCH_EXISTS_START__\n", "\n__BRANCH_EXISTS_END__");
     let branch_exists = be_raw.lines().any(|l| l.trim() == "yes");

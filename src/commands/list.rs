@@ -5,7 +5,7 @@ use crate::config::{Config, OutputFormat};
 use crate::display::{emit_json, format_sessions_table};
 use crate::error::{SkulkError, is_tmux_no_server};
 use crate::inventory::{
-    AgentState, Session, get_worktree_map, parse_sessions, resolve_agent_state,
+    AgentState, Session, parse_sessions, resolve_agent_state, worktree_map_from_output,
 };
 use crate::ssh::Ssh;
 use crate::util::extract_section;
@@ -80,8 +80,7 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
         .collect();
 
     // Parse worktree map
-    let worktrees_raw = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
-    let worktree_map = get_worktree_map(worktrees_raw, cfg);
+    let worktree_map = worktree_map_from_output(raw, cfg);
 
     // Parse Stop-hook state files — optional; empty when the wait infrastructure
     // hasn't run yet.
