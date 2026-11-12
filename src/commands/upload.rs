@@ -1,14 +1,14 @@
 use std::path::Path;
 
-use crate::agent_ref::AgentRef;
+use crate::agent::Agent;
 use crate::commands::local_ops::LocalOps;
 use crate::config::Config;
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::remote::{self, LaunchOptions};
 use crate::ssh::Ssh;
 use crate::util::{
-    branch_to_agent_name, claude_project_dir_name, remote_claude_project_dir_command, validate_name,
+    branch_to_agent_name, claude_project_dir_name, remote_claude_project_dir_command,
 };
 
 /// Transfer the current local branch and Claude Code conversation history to a
@@ -66,9 +66,7 @@ pub(crate) fn cmd_upload(
         Some(name) => name.to_string(),
         None => branch_to_agent_name(local_branch),
     };
-    validate_name(&agent_name)?;
-
-    let agent = AgentRef::new(&agent_name, cfg);
+    let agent = Agent::resolve(&agent_name, cfg)?;
     let session_name = agent.session_name();
     let branch_name = agent.branch_name();
     let worktree_path = agent.worktree_path(cfg);
@@ -77,7 +75,7 @@ pub(crate) fn cmd_upload(
     // Step 4: Validate remote state in a single inventory round-trip.
     let inv = fetch_inventory(ssh, cfg)?;
     let new_agent_mode = to.is_none();
-    let lifecycle = inv.lifecycle(&agent);
+    let lifecycle = agent.lifecycle(&inv);
     if new_agent_mode {
         // Same uniqueness rules as `skulk new`.
         lifecycle.ensure_name_free(&agent_name)?;
@@ -120,7 +118,7 @@ pub(crate) fn cmd_upload(
         let remote_bundle = format!("/tmp/skulk-upload-{session_name}.bundle");
         if let Err(e) = ssh.upload_file(&bundle_path, &remote_bundle) {
             cleanup_local_bundle(local, &bundle_path);
-            return Err(classify_agent_error(&agent_name, e, host));
+            return Err(agent.classify(e));
         }
 
         // Step 7b: import the branch from the bundle. On failure, clean up both
@@ -168,7 +166,7 @@ pub(crate) fn cmd_upload(
             };
             let remote_path = format!("{remote_session_dir}/{}", filename.to_string_lossy());
             if let Err(e) = ssh.upload_file(&file, &remote_path) {
-                return Err(classify_agent_error(&agent_name, e, host));
+                return Err(agent.classify(e));
             }
         }
     }

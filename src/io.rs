@@ -16,13 +16,14 @@ use std::sync::atomic::Ordering;
 
 use clap::Parser;
 
+use crate::agent::Agent;
 use crate::commands::completions;
 use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::commands::interact::logs_snapshot_deep_command;
 use crate::config::{self, Config, OutputFormat, load_config};
 use crate::display::checkmark;
 use crate::display::{COLOR_ENABLED, use_color};
-use crate::error::{SkulkError, classify_agent_error, classify_ssh_error};
+use crate::error::{SkulkError, classify_ssh_error};
 use crate::ssh::Ssh;
 use crate::util::{confirm_from_reader, shell_escape};
 use crate::{Cli, Commands, run};
@@ -389,11 +390,14 @@ impl crate::commands::local_ops::LocalOps for RealLocalOps {
 }
 
 /// Follow agent output in real-time via poll loop.
-pub(crate) fn cmd_logs_follow(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+pub(crate) fn cmd_logs_follow(
+    ssh: &impl Ssh,
+    agent: &Agent,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
+    let name = agent.name();
     let cmd = logs_snapshot_deep_command(name, 200, cfg);
-    let initial = ssh
-        .run(&cmd)
-        .map_err(|e| classify_agent_error(name, e, &cfg.host))?;
+    let initial = ssh.run(&cmd).map_err(|e| agent.classify(e))?;
     let mut last_lines: Vec<String> = initial.lines().map(ToString::to_string).collect();
     eprintln!("Following {name} (Ctrl+C to stop)...");
     for line in &last_lines {

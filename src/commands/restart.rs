@@ -1,10 +1,10 @@
-use crate::agent_ref::AgentRef;
+use crate::agent::Agent;
 use crate::config::{Config, DEFAULT_HARNESS};
-use crate::error::{SkulkError, classify_agent_error};
+use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::remote::{self, LaunchOptions};
 use crate::ssh::Ssh;
-use crate::util::{validate_model, validate_name};
+use crate::util::validate_model;
 
 /// Restart an agent in its existing worktree with a fresh Claude session.
 ///
@@ -26,18 +26,17 @@ pub(crate) fn cmd_restart(
     claude_args: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    validate_name(name)?;
+    let agent = Agent::resolve(name, cfg)?;
     if let Some(m) = model {
         validate_model(m)?;
     }
 
-    let agent = AgentRef::new(name, cfg);
     let branch = agent.branch_name();
     let worktree = agent.worktree_path(cfg);
 
     let inv = fetch_inventory(ssh, cfg)?;
 
-    match inv.lifecycle(&agent) {
+    match agent.lifecycle(&inv) {
         Lifecycle::Archived => {}
         Lifecycle::Running => {
             return Err(SkulkError::Validation(format!(
@@ -65,7 +64,7 @@ pub(crate) fn cmd_restart(
                  If `skulk restart {name}` reports 'already running', run `skulk destroy {name}` first."
             );
         }
-        return Err(classify_agent_error(name, failure.error, &cfg.host));
+        return Err(agent.classify(failure.error));
     }
 
     // Mirrors the Mode-line logic in `cmd_new`: for OpenCode the

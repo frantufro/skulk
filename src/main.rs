@@ -1,3 +1,4 @@
+mod agent;
 mod agent_ref;
 mod commands;
 mod config;
