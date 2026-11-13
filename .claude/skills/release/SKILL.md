@@ -55,15 +55,34 @@ can pass here and fail there. `rustup update stable` closes the gap.
 
 ## 4. Open the PR
 
+Write what the release carries to a file under `.git`, so the working tree
+stays clean. The list is the commits on `main` since the last tag, without the
+release commits and the task-board commits (`chore: finish`, `chore: sync cubil`):
+
 ```bash
-git commit -m "release: bump to X.Y.Z"
-git push -u origin release/vX.Y.Z
-gh pr create --title "release: bump to X.Y.Z" --body-file <file>
+version=X.Y.Z
+notes=.git/release-notes-v$version.md
+previous=$(git describe --tags --abbrev=0 --match 'v*' main)
+{
+  printf '## What is in %s\n\n' "$version"
+  git log --no-merges --format='- %s (%h)' "$previous..main" \
+    | grep -v -e '^- release: ' -e '^- chore: finish ' -e '^- chore: sync cubil' || true
+  printf '\nFull diff: https://github.com/frantufro/skulk/compare/%s...v%s\n' "$previous" "$version"
+} > "$notes"
+```
+
+Read the file and tidy it if a line needs context. Then:
+
+```bash
+git commit -m "release: bump to $version"
+git push -u origin release/v$version
+gh pr create --title "release: bump to $version" --body-file "$notes"
 gh pr checks <PR> --watch --fail-fast
 ```
 
-The body should say what the release carries — the commits already on `main`
-since the last tag, in prose. `git log --oneline vX.Y.Z-1..main` is the source.
+The GitHub release gets its own notes: `release.yml` sets
+`generate_release_notes: true`, so GitHub lists the merged PRs since the
+previous tag when the tag is pushed.
 
 ## 5. Merge
 
@@ -105,7 +124,7 @@ gh run watch <run-id> --exit-status
 | --- | --- | --- |
 | `verify` | — | Four versions agree with the tag, then `cargo test --locked` and `npm test` |
 | `build` | `verify` | `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` natively, `aarch64-unknown-linux-gnu` under `cross`; each tarball gets a `.sha256` sidecar |
-| `release` | `build` | GitHub Release carrying the tarballs and the sidecars |
+| `release` | `build` | GitHub Release carrying the tarballs, the sidecars and generated notes listing the merged PRs |
 | `publish-npm` | `release` | `npm publish --access public` for `@frantufro/skulk` |
 | `publish-homebrew-formula` | `release` | Regenerates `Formula/skulk.rb` in `frantufro/homebrew-tap` |
 
