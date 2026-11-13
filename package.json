@@ -1,6 +1,6 @@
 {
   "name": "@frantufro/skulk",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Install the skulk agent-management skill into OpenCode, with the skulk binary",
   "license": "MIT",
   "author": "frantufro",
