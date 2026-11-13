@@ -1,7 +1,9 @@
+use std::path::Path;
 use std::time::Duration;
 
 use crate::agent_ref::AgentRef;
 use crate::commands::destroy::agent_destroy_session_command;
+use crate::commands::prompt_source;
 use crate::commands::wait::{has_session_command, mark_busy_command};
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
@@ -18,6 +20,33 @@ pub(crate) enum DiffFormat {
     Stat,
     /// Changed file paths only -- `git diff --name-only`.
     NameOnly,
+}
+
+impl DiffFormat {
+    /// Interpret the `--stat` / `--name-only` flags (clap makes them mutually exclusive).
+    pub(crate) fn from_flags(stat: bool, name_only: bool) -> Self {
+        match (stat, name_only) {
+            (true, _) => DiffFormat::Stat,
+            (_, true) => DiffFormat::NameOnly,
+            _ => DiffFormat::Default,
+        }
+    }
+}
+
+/// Resolve the text for `skulk send` from its two mutually exclusive sources.
+///
+/// `--from <file>` is read verbatim (trailing newlines trimmed); otherwise the
+/// positional prompt is used. clap requires exactly one of the two, so a
+/// missing positional prompt only arises for callers that bypass clap, and
+/// yields an empty prompt that `cmd_send` hands to the agent unchanged.
+pub(crate) fn resolve_send_prompt(
+    prompt: Option<String>,
+    from: Option<&Path>,
+) -> Result<String, SkulkError> {
+    match from {
+        Some(path) => prompt_source::load_file_raw(path),
+        None => Ok(prompt.unwrap_or_default()),
+    }
 }
 
 /// Build the SSH command to attach to an agent's live tmux session.
@@ -549,7 +578,7 @@ mod tests {
         let result = cmd_push(&ssh, "test", &cfg);
         assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
             assert!(message.to_lowercase().contains("origin"));
-            assert!(!suggestion.is_empty());
+            assert_ne!(suggestion.len(), 0);
         });
     }
 
@@ -1098,5 +1127,33 @@ mod tests {
         cfg.output_format = OutputFormat::Human;
         let ssh = MockSsh::new(vec![Ok("diff --git a/foo b/foo\n+hello".into())]);
         assert!(cmd_diff(&ssh, "test", DiffFormat::Default, &cfg).is_ok());
+    }
+
+    #[test]
+    fn diff_format_from_flags_maps_each_flag() {
+        assert_eq!(DiffFormat::from_flags(false, false), DiffFormat::Default);
+        assert_eq!(DiffFormat::from_flags(true, false), DiffFormat::Stat);
+        assert_eq!(DiffFormat::from_flags(false, true), DiffFormat::NameOnly);
+    }
+
+    #[test]
+    fn resolve_send_prompt_uses_positional_text() {
+        let result = resolve_send_prompt(Some("fix it".into()), None);
+        assert_eq!(result.ok().as_deref(), Some("fix it"));
+    }
+
+    #[test]
+    fn resolve_send_prompt_reads_file_and_trims_trailing_newline() {
+        let path = std::env::temp_dir().join("skulk_resolve_send_prompt_test.txt");
+        std::fs::write(&path, "line one\nline two\n").expect("write temp prompt file");
+        let result = resolve_send_prompt(None, Some(&path));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.ok().as_deref(), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn resolve_send_prompt_reports_missing_file_as_validation_error() {
+        let result = resolve_send_prompt(None, Some(Path::new("/nonexistent/skulk_absent.txt")));
+        assert_err!(result, SkulkError::Validation(_) => {});
     }
 }

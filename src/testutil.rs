@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::init::Prompter;
 use crate::commands::local_ops::LocalOps;
@@ -29,6 +31,17 @@ macro_rules! assert_err {
     };
 }
 pub(crate) use assert_err;
+
+/// A path in the system temp dir that is unique per process, call and moment.
+/// The directory is not created.
+pub(crate) fn unique_temp_path(prefix: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    std::env::temp_dir().join(format!("{prefix}_{}_{nanos}_{n}", std::process::id()))
+}
 
 /// Short-hand for a successful, empty SSH response.
 ///

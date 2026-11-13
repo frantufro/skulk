@@ -3,7 +3,6 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::SkulkError;
-use anyhow::Context;
 
 /// Cache duration for version check (24 hours)
 const CACHE_DURATION: Duration = Duration::from_hours(24);
@@ -54,9 +53,34 @@ fn write_cache(version: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
-/// Parse a semantic version, accepting an optional leading `v`.
-fn parse_version(s: &str) -> Result<semver::Version, semver::Error> {
-    semver::Version::parse(s.strip_prefix('v').unwrap_or(s))
+/// Build an update error from a context message and its underlying cause.
+fn update_err(context: &str, cause: &dyn std::fmt::Display) -> SkulkError {
+    SkulkError::UpdateFailed(format!("{context}: {cause}"))
+}
+
+/// A release version as `(major, minor, patch)`. Tuples compare field by field.
+type Version = (u64, u64, u64);
+
+/// Parse a `MAJOR.MINOR.PATCH` version, accepting an optional leading `v`.
+/// Build metadata (`+...`) is ignored. Pre-release suffixes (`-rc1`) are rejected.
+fn parse_version(s: &str) -> Result<Version, String> {
+    let s = s.strip_prefix('v').unwrap_or(s);
+    let core = s.split_once('+').map_or(s, |(core, _)| core);
+    let mut parts = core.split('.').map(|part| {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid version \"{s}\""));
+        }
+        part.parse::<u64>()
+            .map_err(|_| format!("invalid version \"{s}\""))
+    });
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(format!(
+            "invalid version \"{s}\": expected MAJOR.MINOR.PATCH"
+        ));
+    };
+    Ok((major?, minor?, patch?))
 }
 
 /// Check if a newer version is available. Returns `(latest_version, current_version)` if update exists.
@@ -124,15 +148,16 @@ impl HttpClient for UreqClient {
     fn get_latest_release(&self) -> Result<ReleaseInfo, SkulkError> {
         let url = "https://api.github.com/repos/frantufro/skulk/releases/latest";
         let resp = ureq::get(url)
-            .set("User-Agent", "skulk")
-            .timeout(HTTP_TIMEOUT)
+            .header("User-Agent", "skulk")
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
             .call()
-            .context("Failed to fetch release from GitHub")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
+            .map_err(|e| update_err("Failed to fetch release from GitHub", &e))?;
         let json: serde_json::Value = resp
-            .into_json()
-            .context("Failed to parse release JSON")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
+            .into_body()
+            .read_json()
+            .map_err(|e| update_err("Failed to parse release JSON", &e))?;
         let tag_name = json["tag_name"]
             .as_str()
             .ok_or_else(|| SkulkError::UpdateFailed("Missing tag_name in release response".into()))?
@@ -153,30 +178,30 @@ impl HttpClient for UreqClient {
 
     fn download_asset(&self, url: &str, dest: &Path) -> Result<(), SkulkError> {
         let resp = ureq::get(url)
-            .set("User-Agent", "skulk")
-            .timeout(HTTP_TIMEOUT)
+            .header("User-Agent", "skulk")
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
             .call()
-            .context("Failed to download asset")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
+            .map_err(|e| update_err("Failed to download asset", &e))?;
         let mut file = std::fs::File::create(dest)
-            .context("Failed to create temp file")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
-        std::io::copy(&mut resp.into_reader(), &mut file)
-            .context("Failed to write to temp file")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
+            .map_err(|e| update_err("Failed to create temp file", &e))?;
+        std::io::copy(&mut resp.into_body().into_reader(), &mut file)
+            .map_err(|e| update_err("Failed to write to temp file", &e))?;
         Ok(())
     }
 
     fn get_text(&self, url: &str) -> Result<String, SkulkError> {
         let resp = ureq::get(url)
-            .set("User-Agent", "skulk")
-            .timeout(HTTP_TIMEOUT)
+            .header("User-Agent", "skulk")
+            .config()
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .build()
             .call()
-            .context("Failed to fetch text asset")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))?;
-        resp.into_string()
-            .context("Failed to read response body")
-            .map_err(|e| SkulkError::UpdateFailed(e.to_string()))
+            .map_err(|e| update_err("Failed to fetch text asset", &e))?;
+        resp.into_body()
+            .read_to_string()
+            .map_err(|e| update_err("Failed to read response body", &e))
     }
 }
 
@@ -315,7 +340,8 @@ pub(crate) fn cmd_update(client: &impl HttpClient) -> Result<(), SkulkError> {
     std::fs::rename(&new_binary_path, &current_exe)
         .map_err(|e| SkulkError::UpdateFailed(format!("Failed to replace binary: {e}")))?;
 
-    println!("Updated skulk to v{latest_ver}");
+    let (major, minor, patch) = latest_ver;
+    println!("Updated skulk to v{major}.{minor}.{patch}");
     Ok(())
 }
 
@@ -356,6 +382,37 @@ fn extract_binary(archive_path: &Path, binary_name: &str, dest: &Path) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::unique_temp_path;
+
+    #[test]
+    fn parse_version_accepts_optional_v_prefix_and_build_metadata() {
+        assert_eq!(parse_version("1.2.3"), Ok((1, 2, 3)));
+        assert_eq!(parse_version("v10.0.21"), Ok((10, 0, 21)));
+        assert_eq!(parse_version("v1.2.3+build.5"), Ok((1, 2, 3)));
+    }
+
+    #[test]
+    fn parse_version_rejects_malformed_input() {
+        for bad in [
+            "",
+            "v",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "1.2.x",
+            "1..3",
+            "1.2.3-rc1",
+            "-1.2.3",
+            "+1.2.3",
+        ] {
+            assert!(parse_version(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn parse_version_orders_numerically() {
+        assert!(parse_version("0.10.0").unwrap() > parse_version("0.9.0").unwrap());
+    }
     use serial_test::serial;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -398,8 +455,7 @@ mod tests {
     #[test]
     #[serial]
     fn check_staleness_returns_none_when_current_is_latest() {
-        let test_dir =
-            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let test_dir = unique_temp_path("skulk_test_cache");
         let _ = std::fs::create_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
@@ -430,10 +486,9 @@ mod tests {
         // stays correct as we bump the version. Bumping major+1 is unambiguous
         // under semver: it cannot accidentally be equal to or less than current.
         let current_ver = parse_version(env!("CARGO_PKG_VERSION")).unwrap();
-        let mock_latest = format!("v{}.0.0", current_ver.major + 1);
+        let mock_latest = format!("v{}.0.0", current_ver.0 + 1);
 
-        let test_dir =
-            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let test_dir = unique_temp_path("skulk_test_cache");
         let _ = std::fs::create_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
@@ -463,8 +518,7 @@ mod tests {
     #[test]
     #[serial]
     fn check_staleness_returns_none_on_fetch_error() {
-        let test_dir =
-            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let test_dir = unique_temp_path("skulk_test_cache");
         let _ = std::fs::create_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
@@ -487,8 +541,7 @@ mod tests {
     #[test]
     #[serial]
     fn check_staleness_handles_unparseable_versions() {
-        let test_dir =
-            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let test_dir = unique_temp_path("skulk_test_cache");
         let _ = std::fs::create_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
@@ -546,7 +599,7 @@ mod tests {
     #[test]
     fn verify_checksum_accepts_matching_hash() {
         // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b16...
-        let tmp = std::env::temp_dir().join(format!("skulk_chk_{}", rand::random::<u32>()));
+        let tmp = unique_temp_path("skulk_chk");
         std::fs::write(&tmp, b"hello").unwrap();
         let result = verify_checksum(
             &tmp,
@@ -561,7 +614,7 @@ mod tests {
         // 256 kB exercises several passes of the chunked read in sha256_hex.
         // The expected digest comes from Python's hashlib, independent of sha2.
         let data: Vec<u8> = (0..=255u8).cycle().take(256_000).collect();
-        let tmp = std::env::temp_dir().join(format!("skulk_chk_{}", rand::random::<u32>()));
+        let tmp = unique_temp_path("skulk_chk");
         std::fs::write(&tmp, &data).unwrap();
         let result = verify_checksum(
             &tmp,
@@ -573,7 +626,7 @@ mod tests {
 
     #[test]
     fn verify_checksum_rejects_mismatched_hash() {
-        let tmp = std::env::temp_dir().join(format!("skulk_chk_{}", rand::random::<u32>()));
+        let tmp = unique_temp_path("skulk_chk");
         std::fs::write(&tmp, b"hello").unwrap();
         let result = verify_checksum(
             &tmp,
@@ -586,8 +639,7 @@ mod tests {
     #[test]
     #[serial]
     fn cache_write_and_read() {
-        let test_dir =
-            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let test_dir = unique_temp_path("skulk_test_cache");
         let _ = std::fs::create_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
@@ -613,8 +665,7 @@ mod tests {
     #[test]
     #[serial]
     fn cache_expired_after_24h() {
-        let test_dir =
-            std::env::temp_dir().join(format!("skulk_test_cache_{}", rand::random::<u32>()));
+        let test_dir = unique_temp_path("skulk_test_cache");
         let _ = std::fs::create_dir_all(&test_dir);
         // SAFETY: #[serial] ensures no concurrent env access from other tests.
         unsafe {
@@ -659,7 +710,7 @@ mod tests {
     #[test]
     fn extract_binary_pulls_named_entry_from_tarball() {
         use std::io::Read;
-        let tmp = std::env::temp_dir().join(format!("skulk_extract_{}", rand::random::<u32>()));
+        let tmp = unique_temp_path("skulk_extract");
         std::fs::create_dir_all(&tmp).unwrap();
         let archive = tmp.join("release.tar.gz");
         let dest = tmp.join("skulk.new");
@@ -679,7 +730,7 @@ mod tests {
 
     #[test]
     fn extract_binary_errors_when_entry_missing() {
-        let tmp = std::env::temp_dir().join(format!("skulk_extract_{}", rand::random::<u32>()));
+        let tmp = unique_temp_path("skulk_extract");
         std::fs::create_dir_all(&tmp).unwrap();
         let archive = tmp.join("release.tar.gz");
         let dest = tmp.join("skulk.new");

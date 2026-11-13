@@ -350,7 +350,7 @@ mod tests {
         let sessions = vec![sess("skulk-wt", 1_000_000, AgentState::Detached, None)];
         let result = format_sessions_table(&sessions, 1_000_090, &cfg);
         let data_lines: Vec<&str> = result.lines().skip(1).collect();
-        assert!(!data_lines.is_empty());
+        assert_ne!(data_lines.len(), 0);
         for line in data_lines {
             assert!(line.contains('-'));
         }

@@ -18,8 +18,8 @@ use clap::{Parser, Subcommand};
 
 use commands::local_ops::LocalOps;
 use commands::{
-    completions, destroy, doctor, download, gc, interact, list, new, prompt_source, pull, replay,
-    restart, ship, status, update, upload, wait,
+    completions, destroy, doctor, download, gc, interact, list, new, pull, replay, restart, ship,
+    status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -499,17 +499,15 @@ pub(crate) fn run(
             claude_args,
         } => {
             let env_file = new::resolve_local_env_file(cfg);
-            new::cmd_new(
-                ssh,
-                &name,
-                github.as_deref(),
-                from.as_deref(),
+            let opts = new::NewOptions {
+                name: &name,
+                github: github.as_deref(),
+                from: from.as_deref(),
                 remote_control,
-                model.as_deref(),
-                claude_args.as_deref(),
-                cfg,
-                env_file.as_deref(),
-            )
+                model: model.as_deref(),
+                claude_args: claude_args.as_deref(),
+            };
+            new::cmd_new(ssh, &opts, cfg, env_file.as_deref())
         }
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
@@ -519,14 +517,12 @@ pub(crate) fn run(
             name,
             stat,
             name_only,
-        } => {
-            let format = match (stat, name_only) {
-                (true, _) => interact::DiffFormat::Stat,
-                (_, true) => interact::DiffFormat::NameOnly,
-                _ => interact::DiffFormat::Default,
-            };
-            interact::cmd_diff(ssh, &name, format, cfg)
-        }
+        } => interact::cmd_diff(
+            ssh,
+            &name,
+            interact::DiffFormat::from_flags(stat, name_only),
+            cfg,
+        ),
         Commands::Disconnect { name } => interact::cmd_disconnect(ssh, &name, cfg),
         Commands::Logs {
             name,
@@ -534,21 +530,7 @@ pub(crate) fn run(
             lines,
         } => interact::cmd_logs(ssh, &name, follow, lines, cfg),
         Commands::Send { name, prompt, from } => {
-            // clap's `required_unless_present`/`conflicts_with` make None+None
-            // and Some+Some unreachable from the CLI, but we surface a
-            // Validation error rather than panic to keep the contract
-            // type-safe for non-CLI callers (mirrors the Wait arm above).
-            let resolved = match (prompt, from) {
-                (None, Some(path)) => prompt_source::load_file_raw(&path),
-                (Some(p), None) => Ok(p),
-                (Some(_), Some(_)) => Err(SkulkError::Validation(
-                    "--from conflicts with positional prompt; pass only one".into(),
-                )),
-                (None, None) => Err(SkulkError::Validation(
-                    "must provide prompt text or --from <file>".into(),
-                )),
-            };
-            resolved
+            interact::resolve_send_prompt(prompt, from.as_deref())
                 .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
@@ -576,16 +558,14 @@ pub(crate) fn run(
             claude_args,
         } => {
             let env_file = new::resolve_local_env_file(cfg);
-            replay::cmd_replay(
-                ssh,
-                &name,
-                new_name.as_deref(),
+            let opts = replay::ReplayOptions {
+                name: &name,
+                new_name: new_name.as_deref(),
                 remote_control,
-                model.as_deref(),
-                claude_args.as_deref(),
-                cfg,
-                env_file.as_deref(),
-            )
+                model: model.as_deref(),
+                claude_args: claude_args.as_deref(),
+            };
+            replay::cmd_replay(ssh, &opts, cfg, env_file.as_deref())
         }
         Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
         Commands::Ship { name } => ship::cmd_ship(ssh, &name, cfg),
@@ -593,22 +573,14 @@ pub(crate) fn run(
         Commands::Transcript { name, output } => {
             interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
         }
-        Commands::Wait { name, all, timeout } => {
-            let timeout = Duration::from_secs(timeout);
-            if all {
-                wait::cmd_wait_all(ssh, cfg, timings.wait_poll_interval, timeout)
-            } else {
-                // clap's `required_unless_present = "all"` makes `None` unreachable,
-                // but we return a validation error rather than panic to keep the
-                // contract type-safe instead of trusting clap's runtime invariant.
-                match name {
-                    Some(n) => wait::cmd_wait(ssh, &n, cfg, timings.wait_poll_interval, timeout),
-                    None => Err(SkulkError::Validation(
-                        "must specify an agent name or --all".into(),
-                    )),
-                }
-            }
-        }
+        Commands::Wait { name, all, timeout } => wait::run_wait(
+            ssh,
+            name.as_deref(),
+            all,
+            cfg,
+            timings.wait_poll_interval,
+            Duration::from_secs(timeout),
+        ),
         Commands::Update => update::cmd_update(&update::UreqClient),
         Commands::Upload { to, force } => upload::cmd_upload(ssh, local, to.as_deref(), force, cfg),
         Commands::Download { name, force } => download::cmd_download(ssh, local, &name, force, cfg),

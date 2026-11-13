@@ -32,8 +32,8 @@ cargo check                                      # Prefer over cargo build durin
 
 ## Error Handling
 
-- No `.unwrap()` or `.expect()` in production code — use `thiserror` + `anyhow`
-- Every `?` gets `.context("meaningful message")`
+- No `.unwrap()` or `.expect()` in production code — use `thiserror` and map errors into `SkulkError`
+- Every fallible call gets a meaningful message via `map_err` into `SkulkError`
 - Domain-specific error enum `SkulkError` in `error.rs`
 
 ## Testing

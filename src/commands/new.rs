@@ -421,6 +421,23 @@ pub(crate) fn format_rollback_failure_warning(name: &str) -> String {
     )
 }
 
+/// Flags and arguments of `skulk new`, as parsed from the command line.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct NewOptions<'a> {
+    /// Agent name.
+    pub(crate) name: &'a str,
+    /// GitHub issue number to load the initial prompt from.
+    pub(crate) github: Option<&'a str>,
+    /// Local file to load the initial prompt from.
+    pub(crate) from: Option<&'a Path>,
+    /// Launch Claude with `--remote-control`.
+    pub(crate) remote_control: bool,
+    /// Model name passed through as `--model`.
+    pub(crate) model: Option<&'a str>,
+    /// Extra flags appended to the Claude launch command.
+    pub(crate) claude_args: Option<&'a str>,
+}
+
 /// Create a new agent with worktree isolation and optional initial prompt.
 ///
 /// Orchestration sequence:
@@ -438,24 +455,20 @@ pub(crate) fn format_rollback_failure_warning(name: &str) -> String {
 /// 9. Send prompt if provided
 ///    - On failure: warn user, keep agent alive
 /// 10. Print success output
-//
-// Explicitly allow `too_many_arguments` / `too_many_lines`: `cmd_new` is the
-// top-level orchestrator for the `new` command, and each argument is a distinct
-// externally-supplied input required by one of the steps above. Grouping
-// them into a struct or splitting the function would hide the linear sequence
-// that makes this function easy to follow.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_new(
     ssh: &impl Ssh,
-    name: &str,
-    github: Option<&str>,
-    from: Option<&Path>,
-    remote_control: bool,
-    model: Option<&str>,
-    claude_args: Option<&str>,
+    opts: &NewOptions,
     cfg: &Config,
     local_env_file: Option<&Path>,
 ) -> Result<(), SkulkError> {
+    let NewOptions {
+        name,
+        github,
+        from,
+        remote_control,
+        model,
+        claude_args,
+    } = *opts;
     let agent = AgentRef::new(name, cfg);
     let branch = agent.branch_name();
 
@@ -1179,12 +1192,11 @@ mod tests {
         std::fs::write(&prompt_file, "fix the bug").unwrap();
         let result = cmd_new(
             &ssh,
-            "task",
-            None,
-            Some(&prompt_file),
-            false,
-            None,
-            None,
+            &NewOptions {
+                name: "task",
+                from: Some(&prompt_file),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -1226,7 +1238,18 @@ mod tests {
             ssh_ok(), // tmux create
             ssh_ok(), // clear stale prompt
         ]);
-        assert!(cmd_new(&ssh, "task", None, None, false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                &NewOptions {
+                    name: "task",
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         let calls = ssh.calls();
         let clear_call = calls
             .iter()
@@ -1259,12 +1282,11 @@ mod tests {
         std::fs::write(&prompt_file, "fix it").unwrap();
         let result = cmd_new(
             &ssh,
-            "task",
-            None,
-            Some(&prompt_file),
-            false,
-            None,
-            None,
+            &NewOptions {
+                name: "task",
+                from: Some(&prompt_file),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -1291,7 +1313,18 @@ mod tests {
             ssh_ok(), // tmux create
             ssh_ok(), // clear stale stored prompt
         ]);
-        assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                &NewOptions {
+                    name: "test",
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1309,12 +1342,11 @@ mod tests {
         std::fs::write(&prompt_file, "fix the bug").unwrap();
         let result = cmd_new(
             &ssh,
-            "test",
-            None,
-            Some(&prompt_file),
-            false,
-            None,
-            None,
+            &NewOptions {
+                name: "test",
+                from: Some(&prompt_file),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -1332,7 +1364,19 @@ mod tests {
             ssh_ok(), // tmux create
             ssh_ok(), // clear stale stored prompt
         ]);
-        assert!(cmd_new(&ssh, "test", None, None, true, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                &NewOptions {
+                    name: "test",
+                    remote_control: true,
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         // Fourth SSH call is the tmux-create command; verify the flag landed there.
         let tmux_call = &ssh.calls()[3];
         assert!(
@@ -1351,7 +1395,18 @@ mod tests {
             ssh_ok(), // tmux create
             ssh_ok(), // clear stale stored prompt
         ]);
-        assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                &NewOptions {
+                    name: "test",
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         let tmux_call = &ssh.calls()[3];
         assert!(
             !tmux_call.contains("--remote-control"),
@@ -1372,12 +1427,11 @@ mod tests {
         assert!(
             cmd_new(
                 &ssh,
-                "test",
-                None,
-                None,
-                false,
-                Some("opus"),
-                None,
+                &NewOptions {
+                    name: "test",
+                    model: Some("opus"),
+                    ..Default::default()
+                },
                 &cfg,
                 None
             )
@@ -1397,12 +1451,11 @@ mod tests {
         let ssh = MockSsh::new(vec![]);
         let result = cmd_new(
             &ssh,
-            "test",
-            None,
-            None,
-            false,
-            Some("opus; rm -rf /"),
-            None,
+            &NewOptions {
+                name: "test",
+                model: Some("opus; rm -rf /"),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -1429,14 +1482,13 @@ mod tests {
         assert!(
             cmd_new(
                 &ssh,
-                "test",
-                None,
-                None,
-                false,
-                None,
-                Some("--allowed-tools Bash"),
+                &NewOptions {
+                    name: "test",
+                    claude_args: Some("--allowed-tools Bash"),
+                    ..Default::default()
+                },
                 &cfg,
-                None,
+                None
             )
             .is_ok()
         );
@@ -1454,7 +1506,15 @@ mod tests {
             Ok("exists".into()),
             Ok(mock_inventory_single_agent("skulk-dupe")),
         ]);
-        let result = cmd_new(&ssh, "dupe", None, None, false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "dupe",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("already exists"));
         });
@@ -1472,7 +1532,15 @@ mod tests {
                 &["skulk-zombie"],
             )),
         ]);
-        let result = cmd_new(&ssh, "zombie", None, None, false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "zombie",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(
                 msg.contains("skulk restart zombie"),
@@ -1489,7 +1557,15 @@ mod tests {
     fn cmd_new_missing_base_clone_returns_error() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
-        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("Base clone not found"));
         });
@@ -1505,7 +1581,15 @@ mod tests {
             Err(SkulkError::SshFailed("tmux failed".into())),
             ssh_ok(),
         ]);
-        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -1519,7 +1603,15 @@ mod tests {
             Err(SkulkError::SshFailed("tmux creation failed".into())),
             Err(SkulkError::SshFailed("rollback also failed".into())),
         ]);
-        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::SshFailed(msg) => {
             assert!(msg.contains("tmux creation failed"));
         });
@@ -1571,12 +1663,11 @@ mod tests {
         std::fs::write(&prompt_file, "fix the bug").unwrap();
         let result = cmd_new(
             &ssh,
-            "test",
-            None,
-            Some(&prompt_file),
-            false,
-            None,
-            None,
+            &NewOptions {
+                name: "test",
+                from: Some(&prompt_file),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -1764,12 +1855,10 @@ mod tests {
         assert!(
             cmd_new(
                 &ssh,
-                "test",
-                None,
-                None,
-                false,
-                None,
-                None,
+                &NewOptions {
+                    name: "test",
+                    ..Default::default()
+                },
                 &cfg,
                 Some(&env_path)
             )
@@ -1795,7 +1884,18 @@ mod tests {
             ssh_ok(), // tmux create
             ssh_ok(), // clear stale stored prompt
         ]);
-        assert!(cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None).is_ok());
+        assert!(
+            cmd_new(
+                &ssh,
+                &NewOptions {
+                    name: "test",
+                    ..Default::default()
+                },
+                &cfg,
+                None
+            )
+            .is_ok()
+        );
         let calls = ssh.calls();
         assert!(
             !calls.iter().any(|c| c.starts_with("UPLOAD ")),
@@ -1819,12 +1919,10 @@ mod tests {
         assert!(
             cmd_new(
                 &ssh,
-                "test",
-                None,
-                None,
-                false,
-                None,
-                None,
+                &NewOptions {
+                    name: "test",
+                    ..Default::default()
+                },
                 &cfg,
                 Some(&env_path)
             )
@@ -1876,7 +1974,15 @@ mod tests {
             message: "Connection refused.".into(),
             suggestion: "SSH not running.".into(),
         })]);
-        let result = cmd_new(&ssh, "test", None, None, false, None, None, &cfg, None);
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
         assert_err!(result, SkulkError::Diagnostic { message, .. } => {
             assert!(message.contains("refused"));
         });
@@ -1896,12 +2002,11 @@ mod tests {
         let ssh = MockSsh::new(vec![Ok("SKULK_GH_MISSING".into())]);
         let result = cmd_new(
             &ssh,
-            "test",
-            Some("42"),
-            None,
-            false,
-            None,
-            None,
+            &NewOptions {
+                name: "test",
+                github: Some("42"),
+                ..Default::default()
+            },
             &cfg,
             None,
         );
@@ -1934,12 +2039,11 @@ mod tests {
         ]);
         let result = cmd_new(
             &ssh,
-            "test",
-            Some("999"),
-            None,
-            false,
-            None,
-            None,
+            &NewOptions {
+                name: "test",
+                github: Some("999"),
+                ..Default::default()
+            },
             &cfg,
             None,
         );

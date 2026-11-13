@@ -142,6 +142,26 @@ pub(crate) fn cmd_wait_all(
     Ok(())
 }
 
+/// Dispatch `skulk wait` between a single agent and `--all`.
+///
+/// clap requires a name unless `--all` is given, so a missing name reaches
+/// `cmd_wait` only for callers that bypass clap; it fails there with the
+/// empty-name validation error.
+pub(crate) fn run_wait(
+    ssh: &impl Ssh,
+    name: Option<&str>,
+    all: bool,
+    cfg: &Config,
+    poll_interval: Duration,
+    timeout: Duration,
+) -> Result<(), SkulkError> {
+    if all {
+        cmd_wait_all(ssh, cfg, poll_interval, timeout)
+    } else {
+        cmd_wait(ssh, name.unwrap_or_default(), cfg, poll_interval, timeout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +376,51 @@ mod tests {
                 "expected timeout message, got: {message}"
             );
         });
+    }
+
+    #[test]
+    fn run_wait_with_name_waits_for_that_agent() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle".into())]);
+        let result = run_wait(
+            &ssh,
+            Some("test"),
+            false,
+            &cfg,
+            Duration::ZERO,
+            Duration::from_secs(5),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_wait_with_all_walks_the_inventory() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
+        let result = run_wait(
+            &ssh,
+            None,
+            true,
+            &cfg,
+            Duration::ZERO,
+            Duration::from_secs(5),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_wait_without_name_or_all_fails_validation_before_ssh() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+        let result = run_wait(
+            &ssh,
+            None,
+            false,
+            &cfg,
+            Duration::ZERO,
+            Duration::from_secs(5),
+        );
+        assert_err!(result, SkulkError::Validation(_) => {});
+        assert_eq!(ssh.calls().len(), 0);
     }
 }
