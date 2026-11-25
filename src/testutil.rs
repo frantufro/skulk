@@ -565,6 +565,9 @@ impl PrivateTmux {
             NEXT_PRIVATE_TMUX.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("create private tmux dir");
+        // On macOS `/tmp` is a symlink to `/private/tmp` and tmux reports
+        // the resolved path, so keep the canonical one for comparisons.
+        let dir = std::fs::canonicalize(&dir).expect("resolve private tmux dir");
         let tmux = Self { dir };
         // A keeper session holds the server open; `-f /dev/null` ignores the
         // user's config so window numbering is predictable.
