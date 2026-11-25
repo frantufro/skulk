@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::time::Duration;
 
 use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
@@ -9,6 +8,7 @@ use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::remote::{self, mark_pending_command};
 use crate::ssh::Ssh;
+use crate::submit::{Submission, SubmitPacing, confirm_submission, settle_delay, sleep_arg};
 use crate::util::{shell_escape, shell_quote_path, validate_window_name};
 
 /// Output format for `skulk diff`, mapped from the mutually-exclusive CLI flags.
@@ -166,13 +166,6 @@ pub(crate) fn json_git_log_result(
     }))
 }
 
-/// Build the SSH command to capture the visible pane content of an agent's tmux session.
-///
-/// Used by both `logs` (snapshot mode) and `send` (delivery verification).
-pub(crate) fn capture_pane_command(name: &str, cfg: &Config) -> String {
-    logs_command(name, None, None, cfg)
-}
-
 /// Build the SSH command to capture N lines of scrollback from an agent's tmux session.
 pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -> String {
     logs_command(name, None, Some(lines), cfg)
@@ -214,19 +207,21 @@ pub(crate) fn archive_reason_command(session_name: &str, reason: &str) -> String
 /// [`mark_pending_command`]) so a subsequent `skulk wait` can't race past a
 /// stale `idle` marker while the agent's own `UserPromptSubmit` hook is
 /// still propagating. Then splits the actual send into two `tmux send-keys`
-/// calls with a short sleep in between: the first types the prompt text,
-/// the second submits with Enter. The gap defeats Claude Code's
-/// paste-detection, which otherwise swallows the trailing Enter as a
-/// newline inside the input box instead of submitting.
+/// calls with a sleep in between, longer for a larger prompt (see
+/// [`settle_delay`]): the first types the prompt text, the second submits
+/// with Enter. The gap defeats Claude Code's paste-detection, which
+/// otherwise swallows the trailing Enter as a newline inside the input box
+/// instead of submitting.
 pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_name = AgentRef::new(name, cfg).session_name();
     let mark_pending = mark_pending_command(&session_name);
     let resolve = remote::resolve_agent_window(&session_name);
+    let settle = sleep_arg(settle_delay(prompt.len()));
     format!(
         "{mark_pending} && {resolve} && \
          tmux send-keys -t \"$skulk_win\" '{escaped}' && \
-         sleep 0.1 && \
+         sleep {settle} && \
          tmux send-keys -t \"$skulk_win\" Enter"
     )
 }
@@ -538,44 +533,51 @@ pub(crate) fn cmd_transcript(
     Ok(())
 }
 
-/// Send a prompt to a running agent with delivery verification.
+/// Send a prompt to a running agent and confirm the harness submitted it,
+/// pressing Enter again while it has not (see [`confirm_submission`]).
 ///
-/// `verify_delay` controls how long to wait before checking pane content changed.
-/// Production callers should use 500ms; tests can pass `Duration::ZERO`.
+/// A prompt left in the input box is reported, not an error: it reached the
+/// agent, and the user can submit it by hand.
 pub(crate) fn cmd_send(
     ssh: &impl Ssh,
     name: &str,
     prompt: &str,
     cfg: &Config,
-    verify_delay: Duration,
+    pacing: &SubmitPacing,
 ) -> Result<(), SkulkError> {
     let agent = Agent::resolve(name, cfg)?;
     let session_name = agent.session_name();
-    let before = ssh
-        .run(&capture_pane_command(name, cfg))
-        .map_err(|e| agent.classify(e))?;
     ssh.run(&send_command(name, prompt, cfg))
         .map_err(|e| agent.classify(e))?;
-    std::thread::sleep(verify_delay);
-    match ssh.run(&capture_pane_command(name, cfg)) {
-        Ok(after) if after == before => {
-            eprintln!(
-                "Warning: Prompt sent to {session_name} but delivery could not be confirmed."
-            );
-        }
-        Ok(_) => {
-            eprintln!("Prompt delivered to {session_name}.");
-        }
-        Err(_) => {
-            eprintln!("Warning: Prompt sent, but post-send verification failed.");
-        }
+    let submission = confirm_submission(ssh, &session_name, cfg, pacing);
+    if cfg.output_format == OutputFormat::Json {
+        emit_json(&json_send_result(name, submission));
+        return Ok(());
+    }
+    match submission {
+        Submission::Submitted => eprintln!("Prompt delivered to {session_name}."),
+        Submission::NotSubmitted => eprintln!(
+            "Warning: Prompt typed into {session_name} but not submitted; it is still in the \
+             input box. Inspect with `skulk connect {name}` and press Enter."
+        ),
     }
     Ok(())
+}
+
+/// Build the JSON result for `send`. `ok` is true once the prompt reached the
+/// agent's input box; `prompt` says whether the harness submitted it.
+fn json_send_result(name: &str, submission: Submission) -> serde_json::Value {
+    let prompt = match submission {
+        Submission::Submitted => "delivered",
+        Submission::NotSubmitted => "not_submitted",
+    };
+    serde_json::json!({"ok": true, "agent": name, "prompt": prompt})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::submit::probe_frame;
     use crate::testutil::PrivateTmux;
     use crate::testutil::{MockSsh, assert_err, ssh_err, ssh_ok, test_config, test_config_json};
 
@@ -869,23 +871,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_pane_command_generates_capture() {
-        let cfg = test_config();
-        let cmd = capture_pane_command("my-task", &cfg);
-        assert_eq!(
-            cmd,
-            "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && tmux capture-pane -p -t \"$skulk_win\""
-        );
-    }
-
-    #[test]
-    fn capture_pane_command_includes_print_flag() {
-        let cfg = test_config();
-        let cmd = capture_pane_command("my-task", &cfg);
-        assert!(cmd.contains("-p"));
-    }
-
-    #[test]
     fn logs_snapshot_deep_command_generates_capture_with_scrollback() {
         let cfg = test_config();
         let cmd = logs_snapshot_deep_command("my-task", 500, &cfg);
@@ -918,7 +903,7 @@ mod tests {
             "mkdir -p ~/.skulk/state && printf pending > ~/.skulk/state/skulk-my-task && \
              skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && \
              tmux send-keys -t \"$skulk_win\" 'fix the bug' && \
-             sleep 0.1 && \
+             sleep 0.200 && \
              tmux send-keys -t \"$skulk_win\" Enter"
         );
     }
@@ -936,7 +921,7 @@ mod tests {
 
         tmux.sh(&send_command("my-task", "MARK-SEND", &cfg));
 
-        let logs = tmux.sh_until(&capture_pane_command("my-task", &cfg), "MARK-SEND");
+        let logs = tmux.sh_until(&logs_command("my-task", None, None, &cfg), "MARK-SEND");
         assert!(logs.contains("MARK-SEND"), "logs: {logs}");
         let deep = tmux.sh(&logs_snapshot_deep_command("my-task", 50, &cfg));
         assert!(deep.contains("MARK-SEND"), "deep logs: {deep}");
@@ -1109,7 +1094,7 @@ mod tests {
             "BOOT-1",
         );
         assert!(first.contains("BOOT-1"), "server log: {first}");
-        let agent = tmux.sh(&capture_pane_command("my-task", &cfg));
+        let agent = tmux.sh(&logs_command("my-task", None, None, &cfg));
         assert!(!agent.contains("BOOT-1"), "agent window: {agent}");
 
         tmux.sh(&remote_respawn_for_test("my-task", "server", &cfg));
@@ -1226,25 +1211,66 @@ mod tests {
     }
 
     #[test]
-    fn cmd_send_succeeds_with_delivery_confirmed() {
+    fn cmd_send_succeeds_when_hook_confirms_submission() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![
-            Ok("old pane content".into()),
-            ssh_ok(),
-            Ok("new pane content".into()),
-        ]);
-        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
+        let ssh = MockSsh::new(vec![ssh_ok(), probe_frame("busy", "")]);
+
+        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, &SubmitPacing::zero()).is_ok());
+        assert_eq!(ssh.calls().len(), 2);
     }
 
     #[test]
-    fn cmd_send_succeeds_with_unconfirmed_delivery() {
+    fn cmd_send_resends_enter_when_the_first_is_swallowed() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![
-            Ok("same pane content".into()),
             ssh_ok(),
-            Ok("same pane content".into()),
+            probe_frame("pending", "> fix the bug"),
+            ssh_ok(), // second Enter
+            probe_frame("pending", "✻ Working… (esc to interrupt)"),
         ]);
-        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
+
+        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, &SubmitPacing::zero()).is_ok());
+        assert!(ssh.calls()[2].ends_with("tmux send-keys -t \"$skulk_win\" Enter"));
+    }
+
+    #[test]
+    fn cmd_send_still_succeeds_when_prompt_is_not_submitted() {
+        let cfg = test_config();
+        let stuck = || probe_frame("pending", "> fix the bug");
+        let ssh = MockSsh::new(vec![
+            ssh_ok(),
+            stuck(),
+            ssh_ok(),
+            stuck(),
+            ssh_ok(),
+            stuck(),
+        ]);
+
+        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, &SubmitPacing::zero()).is_ok());
+        assert_eq!(ssh.calls().len(), 6);
+    }
+
+    #[test]
+    fn json_send_result_reports_delivered_or_not_submitted() {
+        let delivered = json_send_result("my-task", Submission::Submitted);
+        let stuck = json_send_result("my-task", Submission::NotSubmitted);
+
+        assert_eq!(delivered["ok"], true);
+        assert_eq!(delivered["agent"], "my-task");
+        assert_eq!(delivered["prompt"], "delivered");
+        assert_eq!(stuck["ok"], true);
+        assert_eq!(stuck["prompt"], "not_submitted");
+    }
+
+    #[test]
+    fn send_command_lets_a_large_prompt_settle_longer_before_enter() {
+        let cfg = test_config();
+        let cmd = send_command("my-task", &"x".repeat(10 * 1024), &cfg);
+        assert!(
+            cmd.contains("sleep 1.200 && "),
+            "{}",
+            &cmd[cmd.len() - 200..]
+        );
     }
 
     #[test]
@@ -1253,7 +1279,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find session: skulk-gone".into(),
         ))]);
-        let result = cmd_send(&ssh, "gone", "hello", &cfg, Duration::ZERO);
+        let result = cmd_send(&ssh, "gone", "hello", &cfg, &SubmitPacing::zero());
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("gone"));
         });
@@ -1265,21 +1291,10 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find pane: skulk-missing".into(),
         ))]);
-        let result = cmd_send(&ssh, "missing", "hello", &cfg, Duration::ZERO);
+        let result = cmd_send(&ssh, "missing", "hello", &cfg, &SubmitPacing::zero());
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("missing"));
         });
-    }
-
-    #[test]
-    fn cmd_send_verification_ssh_failure_does_not_false_positive() {
-        let cfg = test_config();
-        let ssh = MockSsh::new(vec![
-            Ok("old pane content".into()),
-            ssh_ok(),
-            Err(SkulkError::SshFailed("connection lost".into())),
-        ]);
-        assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, Duration::ZERO).is_ok());
     }
 
     #[test]

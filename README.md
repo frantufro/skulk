@@ -470,6 +470,7 @@ result could not be encoded; it never reaches stdout).
 | `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch, url}` |
 | `status` | `name`, `status`, `branch`, `uptime_secs`, `session_created_epoch`, `queried_at`, `url` |
 | `new`, `replay` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control`, `prompt` (`delivered` / `not_submitted` / `failed` / `none`), `warnings` |
+| `send` | `ok`, `agent`, `prompt` (`delivered` / `not_submitted`) |
 | `restart` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control` |
 | `archive` | `ok`, `agent`, `branch`, `worktree`, `reason`, `warnings` |
 | `destroy` | `ok`, `agent`, `cleaned`: list of `session` / `worktree` / `branch` |
