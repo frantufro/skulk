@@ -324,6 +324,10 @@ fn relative_suffix<'a>(kind: Kind, rel: &str, path: &'a str) -> Option<&'a str> 
 }
 
 /// Download every staged file and return the absolute local destination.
+///
+/// Files are downloaded into a temp directory next to the destination and
+/// renamed into place only once all of them arrived, so a failed download
+/// leaves nothing partial behind.
 fn copy_out(
     ssh: &impl Ssh,
     agent: &Agent,
@@ -337,18 +341,51 @@ fn copy_out(
         .ok_or_else(|| SkulkError::SshFailed("the remote walk staged no files to copy.".into()))?;
     let root = local_root(listing.kind, rel, dest);
     let root = std::path::absolute(&root).map_err(|e| local_error(&root, &e))?;
+    let parent = root
+        .parent()
+        .ok_or_else(|| SkulkError::Validation(format!("Cannot write to '{}'.", root.display())))?;
+    std::fs::create_dir_all(parent).map_err(|e| local_error(parent, &e))?;
+    let temp = parent.join(temp_name());
+    std::fs::create_dir(&temp).map_err(|e| local_error(&temp, &e))?;
+    let result = download_then_place(ssh, agent, listing, rel, staging, &root, &temp);
+    let _ = std::fs::remove_dir_all(&temp);
+    result.map(|()| root)
+}
+
+fn download_then_place(
+    ssh: &impl Ssh,
+    agent: &Agent,
+    listing: &Listing,
+    rel: &str,
+    staging: &str,
+    root: &Path,
+    temp: &Path,
+) -> Result<(), SkulkError> {
+    for entry in &listing.files {
+        let local = temp.join(entry.index.to_string());
+        ssh.download_file(&format!("{staging}/{}", entry.index), &local)
+            .map_err(|e| agent.classify(e))?;
+    }
     if listing.kind == Kind::Dir {
-        std::fs::create_dir_all(&root).map_err(|e| local_error(&root, &e))?;
+        std::fs::create_dir_all(root).map_err(|e| local_error(root, &e))?;
     }
     for entry in &listing.files {
-        let target = local_target(listing, rel, &root, &entry.path);
+        let target = local_target(listing, rel, root, &entry.path);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| local_error(parent, &e))?;
         }
-        ssh.download_file(&format!("{staging}/{}", entry.index), &target)
-            .map_err(|e| agent.classify(e))?;
+        std::fs::rename(temp.join(entry.index.to_string()), &target)
+            .map_err(|e| local_error(&target, &e))?;
     }
-    Ok(root)
+    Ok(())
+}
+
+/// A temp directory name unique to this process and moment.
+fn temp_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(".skulk-get-{}-{nanos}", std::process::id())
 }
 
 fn local_error(path: &Path, err: &std::io::Error) -> SkulkError {
@@ -399,26 +436,44 @@ mod tests {
     // ── cmd_get ─────────────────────────────────────────────────────────
 
     #[test]
-    fn downloads_staged_file_then_removes_staging() {
+    fn leaves_nothing_at_dest_when_a_download_fails() {
         let dir = temp_dir("skulk_get_dest");
-        let dest = dir.join("shot.png");
+        let dest = dir.join("media");
         let ssh = MockSsh::new(vec![
             Ok(format!(
-                "{HEADER}\tfile\t/tmp/skulk-get.abc\n5\ttmp/shot.png\n"
+                "{HEADER}\tdir\t/tmp/skulk-get.abc\n1\tmedia/a\n1\tmedia/b\n"
             )),
             Ok(String::new()),
+        ])
+        .with_download_responses(vec![
+            Ok(()),
+            Err(SkulkError::SshFailed("scp: broken".into())),
         ]);
+        let mut req = request("media", Some(&dest));
+        req.recursive = true;
 
-        let result = cmd_get(&ssh, &request("tmp/shot.png", Some(&dest)), &test_config());
+        let result = cmd_get(&ssh, &req, &test_config());
 
-        assert!(result.is_ok(), "{result:?}");
+        assert!(result.is_err());
         let calls = ssh.calls();
-        assert_eq!(calls.len(), 3);
-        assert_eq!(
-            calls[1],
-            format!("DOWNLOAD /tmp/skulk-get.abc/0:{}", dest.display())
+        assert!(
+            calls[1].starts_with(&format!(
+                "DOWNLOAD /tmp/skulk-get.abc/0:{}/.skulk-get-",
+                dir.display()
+            )),
+            "downloads go to a temp dir next to dest: {}",
+            calls[1]
         );
-        assert_eq!(calls[2], "rm -rf '/tmp/skulk-get.abc'");
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some("rm -rf '/tmp/skulk-get.abc'")
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dest parent")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
