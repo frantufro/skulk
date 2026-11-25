@@ -549,7 +549,7 @@ pub(crate) fn cmd_send(
     let session_name = agent.session_name();
     ssh.run(&send_command(name, prompt, cfg))
         .map_err(|e| agent.classify(e))?;
-    let submission = confirm_submission(ssh, &session_name, cfg, pacing);
+    let submission = confirm_submission(ssh, &session_name, prompt, cfg, pacing);
     if cfg.output_format == OutputFormat::Json {
         emit_json(&json_send_result(name, submission));
         return Ok(());

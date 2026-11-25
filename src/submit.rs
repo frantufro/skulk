@@ -26,6 +26,12 @@ const STATUS_LINES: usize = 3;
 /// Lines a harness shows below its input box (mode, shortcuts hint).
 const MAX_FOOTER_LINES: usize = 4;
 
+/// Characters of the prompt's first line that identify it in the pane.
+const PROMPT_HEAD_CHARS: usize = 20;
+
+/// Placeholder Claude Code shows in its input box for a large paste.
+const PASTE_PLACEHOLDER: &str = "[Pasted text";
+
 /// Settle delay before the first Enter for a prompt of zero bytes.
 const SETTLE_BASE_MS: u64 = 200;
 /// Extra settle delay per KiB of prompt.
@@ -129,6 +135,9 @@ struct PaneView<'a> {
     /// The few lines just above the input box, where a harness shows that it
     /// is working. Without an input box, the last non-empty lines.
     status: Vec<&'a str>,
+    /// The input box's text, its side edges and prompt character removed;
+    /// `None` when no input box was found.
+    input: Option<Vec<&'a str>>,
 }
 
 impl<'a> PaneView<'a> {
@@ -141,10 +150,17 @@ impl<'a> PaneView<'a> {
         while lines.last().is_some_and(|l| l.trim().is_empty()) {
             lines.pop();
         }
-        let above = match find_input_box(&lines) {
+        let input_box = find_input_box(&lines);
+        let above = match input_box {
             Some((top, _, _)) => &lines[..top],
             None => &lines[..],
         };
+        let input = input_box.map(|(_, prompt, bottom)| {
+            let first = after_prompt_char(lines[prompt]).unwrap_or_default();
+            std::iter::once(first)
+                .chain(lines[prompt + 1..bottom].iter().map(|l| strip_box(l)))
+                .collect()
+        });
         let status = above
             .iter()
             .rev()
@@ -152,7 +168,19 @@ impl<'a> PaneView<'a> {
             .take(STATUS_LINES)
             .copied()
             .collect();
-        Self { status }
+        Self { status, input }
+    }
+
+    /// Whether the prompt skulk sent is still waiting to be submitted: the
+    /// input box (or, without one, the last lines) holds the paste
+    /// placeholder, a `↑ N more` overflow line, or the prompt's start.
+    /// Anything else, such as a dialog or a placeholder hint, means another
+    /// Enter could land somewhere it should not.
+    fn shows_prompt_unsent(&self, prompt_head: &str) -> bool {
+        let text = self.input.as_ref().unwrap_or(&self.status).concat();
+        text.contains(PASTE_PLACEHOLDER)
+            || has_more_marker(&text)
+            || (!prompt_head.is_empty() && text.contains(prompt_head))
     }
 
     /// Whether the status lines show the harness working on a turn.
@@ -161,6 +189,27 @@ impl<'a> PaneView<'a> {
             .iter()
             .any(|l| WORKING_INDICATORS.iter().any(|w| l.contains(w)))
     }
+}
+
+/// Whether `text` holds Claude Code's `↑ N more` overflow marker.
+fn has_more_marker(text: &str) -> bool {
+    text.match_indices("↑ ").any(|(i, m)| {
+        let rest = &text[i + m.len()..];
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && rest[digits..].starts_with(" more")
+    })
+}
+
+/// The start of the prompt's first non-empty line, as the pane shows it.
+fn prompt_head(prompt: &str) -> String {
+    prompt
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .take(PROMPT_HEAD_CHARS)
+        .collect()
 }
 
 /// Locate the input box as (top border, prompt line, bottom border) indices.
@@ -188,31 +237,39 @@ fn probe_shows_submission(raw: &str, cfg: &Config) -> bool {
     PaneView::parse(pane).shows_working() || (cfg.harness == DEFAULT_HARNESS && hook_fired)
 }
 
-/// Watch for proof that the prompt just sent with Enter was submitted,
+/// Watch for proof that `prompt`, just sent with Enter, was submitted,
 /// pressing Enter again while there is none, up to `pacing.max_enters`.
 ///
+/// Enter is pressed again only when the last probe still shows the prompt
+/// waiting in the input box, so it can never confirm a dialog or a menu.
 /// A failed probe or resend counts as no proof yet rather than as an error:
 /// the prompt is already in the harness's input box, and the caller reports
 /// what happened instead of failing.
 pub(crate) fn confirm_submission(
     ssh: &impl Ssh,
     session_name: &str,
+    prompt: &str,
     cfg: &Config,
     pacing: &SubmitPacing,
 ) -> Submission {
     let probe = probe_command(session_name);
+    let head = prompt_head(prompt);
+    let mut unsent = false;
     for enter in 0..pacing.max_enters.max(1) {
-        if enter > 0 {
+        if enter > 0 && unsent {
             let _ = ssh.run(&resend_enter_command(session_name));
         }
         for _ in 0..pacing.polls_per_enter.max(1) {
             std::thread::sleep(pacing.poll_interval);
-            if ssh
-                .run(&probe)
-                .is_ok_and(|raw| probe_shows_submission(&raw, cfg))
-            {
+            let Ok(raw) = ssh.run(&probe) else {
+                unsent = false;
+                continue;
+            };
+            if probe_shows_submission(&raw, cfg) {
                 return Submission::Submitted;
             }
+            let pane = raw.split_once(PANE_DELIMITER).map_or("", |(_, p)| p);
+            unsent = PaneView::parse(pane).shows_prompt_unsent(&head);
         }
     }
     Submission::NotSubmitted
@@ -238,6 +295,8 @@ mod tests {
             ..test_config()
         }
     }
+
+    const PROMPT: &str = "never press esc to interrupt the migration";
 
     /// Claude Code with a large paste still sitting in its input box.
     const STUCK_PANE: &str = "⏺ Ready when you are.\n\n\
@@ -286,7 +345,13 @@ mod tests {
     fn submitted_when_hook_flips_pending_to_busy() {
         let ssh = MockSsh::new(vec![probe_frame("busy", STUCK_PANE)]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &SubmitPacing::zero());
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
 
         assert_eq!(result, Submission::Submitted);
         assert_eq!(ssh.calls().len(), 1);
@@ -296,7 +361,13 @@ mod tests {
     fn submitted_when_a_short_turn_already_ended() {
         let ssh = MockSsh::new(vec![probe_frame("idle", "")]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &SubmitPacing::zero());
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
 
         assert_eq!(result, Submission::Submitted);
     }
@@ -305,7 +376,13 @@ mod tests {
     fn submitted_when_pane_shows_claude_working() {
         let ssh = MockSsh::new(vec![probe_frame("pending", WORKING_PANE)]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &SubmitPacing::zero());
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
 
         assert_eq!(result, Submission::Submitted);
     }
@@ -322,7 +399,7 @@ mod tests {
         };
         let ssh = MockSsh::new(vec![probe_frame("pending", pane)]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &pacing);
+        let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
 
         assert_eq!(result, Submission::NotSubmitted);
     }
@@ -352,7 +429,13 @@ mod tests {
             probe_frame("busy", ""),
         ]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &SubmitPacing::zero());
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
 
         assert_eq!(result, Submission::Submitted);
         let calls = ssh.calls();
@@ -370,7 +453,13 @@ mod tests {
             probe_frame("pending", STUCK_PANE),
         ]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &SubmitPacing::zero());
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
 
         assert_eq!(result, Submission::NotSubmitted);
         let enters = ssh.calls().iter().filter(|c| c.ends_with("Enter")).count();
@@ -389,7 +478,7 @@ mod tests {
             probe_frame("busy", ""),
         ]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &pacing);
+        let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
 
         assert_eq!(result, Submission::Submitted);
         assert!(ssh.calls().iter().all(|c| !c.ends_with("Enter")));
@@ -403,9 +492,95 @@ mod tests {
         };
         let ssh = MockSsh::new(vec![ssh_err("connection lost")]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &test_config(), &pacing);
+        let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
 
         assert_eq!(result, Submission::NotSubmitted);
+    }
+
+    #[test]
+    fn never_presses_enter_again_on_a_dialog() {
+        let dialog = "╭──────────────────────────────╮\n\
+            │ Do you trust the files in this folder? │\n\
+            │ ❯ 1. Yes, proceed               │\n\
+            │   2. No, exit                   │\n\
+            ╰──────────────────────────────╯\n";
+        let ssh = MockSsh::new(vec![
+            probe_frame("pending", dialog),
+            probe_frame("pending", dialog),
+            probe_frame("pending", dialog),
+        ]);
+
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
+
+        assert_eq!(result, Submission::NotSubmitted);
+        assert!(
+            ssh.calls().iter().all(|c| !c.ends_with("Enter")),
+            "{:?}",
+            ssh.calls()
+        );
+    }
+
+    #[test]
+    fn no_enter_again_on_an_input_box_holding_only_a_hint() {
+        let hint = "────────────────────────────────\n\
+            > Try \"write a test for foo\"\n\
+            ────────────────────────────────\n";
+        let pacing = SubmitPacing {
+            max_enters: 2,
+            ..SubmitPacing::zero()
+        };
+        let ssh = MockSsh::new(vec![
+            probe_frame("pending", hint),
+            probe_frame("pending", hint),
+        ]);
+
+        let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
+
+        assert_eq!(result, Submission::NotSubmitted);
+        assert_eq!(ssh.calls().len(), 2, "two probes, no Enter");
+    }
+
+    #[test]
+    fn no_enter_again_after_a_failed_probe() {
+        let pacing = SubmitPacing {
+            max_enters: 2,
+            ..SubmitPacing::zero()
+        };
+        let ssh = MockSsh::new(vec![ssh_err("connection lost"), probe_frame("busy", "")]);
+
+        let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
+
+        assert_eq!(result, Submission::Submitted);
+        assert!(ssh.calls().iter().all(|c| !c.ends_with("Enter")));
+    }
+
+    #[test]
+    fn prompt_start_in_the_input_box_counts_as_unsent() {
+        let pane = "────────────────\n> never press esc to inter\n  rupt the migration\n────────────────\n";
+
+        assert!(PaneView::parse(pane).shows_prompt_unsent(&prompt_head(PROMPT)));
+    }
+
+    #[test]
+    fn more_marker_needs_a_count() {
+        assert!(has_more_marker("  ↑ 79 more"));
+        assert!(!has_more_marker("↑ more"));
+        assert!(!has_more_marker("↑ 3 lines"));
+    }
+
+    #[test]
+    fn prompt_head_is_the_start_of_the_first_non_empty_line() {
+        assert_eq!(
+            prompt_head("\n  fix the flaky login test today please\nmore"),
+            "fix the flaky login "
+        );
+        assert_eq!(prompt_head(""), "");
     }
 
     #[test]
@@ -418,7 +593,7 @@ mod tests {
         };
         let ssh = MockSsh::new(vec![probe_frame("idle", STUCK_PANE)]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &opencode_config(), &pacing);
+        let result = confirm_submission(&ssh, "skulk-t", PROMPT, &opencode_config(), &pacing);
 
         assert_eq!(result, Submission::NotSubmitted);
     }
@@ -427,7 +602,13 @@ mod tests {
     fn opencode_submitted_when_pane_shows_it_working() {
         let ssh = MockSsh::new(vec![probe_frame("pending", "working…  esc interrupt")]);
 
-        let result = confirm_submission(&ssh, "skulk-t", &opencode_config(), &SubmitPacing::zero());
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &opencode_config(),
+            &SubmitPacing::zero(),
+        );
 
         assert_eq!(result, Submission::Submitted);
     }
