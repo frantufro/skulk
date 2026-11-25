@@ -8,21 +8,39 @@ use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::remote;
 use crate::ssh::Ssh;
 
-/// Run the branch-delete SSH command and record the outcome.
-///
-/// Used by both the `has_worktree` arm (worktree + branch cleanup) and the
-/// orphaned-branch arm (branch only), which share identical push logic.
-fn try_delete_branch<'a>(
-    ssh: &impl Ssh,
-    name: &str,
-    cfg: &Config,
-    cleaned: &mut Vec<&'a str>,
-    failed: &mut Vec<&'a str>,
-) {
-    if remote::delete_branch(ssh, name, cfg).is_ok() {
-        cleaned.push("branch");
-    } else {
-        failed.push("branch");
+/// A piece of an agent that `destroy` removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Resource {
+    Session,
+    Worktree,
+    Branch,
+}
+
+impl Resource {
+    /// Wording used in human-readable output.
+    fn label(self) -> &'static str {
+        match self {
+            Resource::Session => "tmux session",
+            Resource::Worktree => "worktree",
+            Resource::Branch => "branch",
+        }
+    }
+}
+
+/// What a single-agent destroy removed and what it failed to remove.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DestroyOutcome {
+    pub(crate) cleaned: Vec<Resource>,
+    pub(crate) failed: Vec<Resource>,
+}
+
+impl DestroyOutcome {
+    fn record(&mut self, resource: Resource, succeeded: bool) {
+        if succeeded {
+            self.cleaned.push(resource);
+        } else {
+            self.failed.push(resource);
+        }
     }
 }
 
@@ -83,39 +101,44 @@ pub(crate) fn cmd_destroy(
         return Ok(());
     }
 
-    let mut cleaned: Vec<&str> = Vec::new();
-    let mut failed: Vec<&str> = Vec::new();
-
+    let mut outcome = DestroyOutcome::default();
     if has_session {
-        if remote::kill_session(ssh, name, cfg).is_ok() {
-            cleaned.push("tmux session");
-        } else {
-            failed.push("tmux session");
-        }
+        outcome.record(
+            Resource::Session,
+            remote::kill_session(ssh, name, cfg).is_ok(),
+        );
     }
-
     if has_worktree {
-        if remote::remove_worktree(ssh, name, cfg).is_ok() {
-            cleaned.push("worktree");
-        } else {
-            failed.push("worktree");
-        }
-        try_delete_branch(ssh, name, cfg, &mut cleaned, &mut failed);
-    } else if has_branch {
-        // Orphaned branch (no worktree)
-        try_delete_branch(ssh, name, cfg, &mut cleaned, &mut failed);
+        outcome.record(
+            Resource::Worktree,
+            remote::remove_worktree(ssh, name, cfg).is_ok(),
+        );
+    }
+    // A branch whose worktree is gone is an orphan and is deleted too.
+    if has_worktree || has_branch {
+        outcome.record(
+            Resource::Branch,
+            remote::delete_branch(ssh, name, cfg).is_ok(),
+        );
     }
 
     // Always reap the Stop-hook state marker. It's invisible plumbing for
-    // `skulk wait`, so we don't add it to `cleaned` / `failed`; `rm -f` makes
-    // a missing file a no-op anyway.
+    // `skulk wait`, so it isn't part of the outcome; `rm -f` makes a missing
+    // file a no-op anyway.
     let _ = remote::remove_state_file(ssh, name, cfg);
 
-    if !cleaned.is_empty() {
-        println!("Destroyed agent '{name}' ({}).", cleaned.join(", "));
+    let labels = |rs: &[Resource]| rs.iter().map(|r| r.label()).collect::<Vec<_>>();
+    if !outcome.cleaned.is_empty() {
+        println!(
+            "Destroyed agent '{name}' ({}).",
+            labels(&outcome.cleaned).join(", ")
+        );
     }
-    if !failed.is_empty() {
-        eprintln!("{}", format_partial_destroy_warning(name, &failed));
+    if !outcome.failed.is_empty() {
+        eprintln!(
+            "{}",
+            format_partial_destroy_warning(name, &labels(&outcome.failed))
+        );
     }
     Ok(())
 }
