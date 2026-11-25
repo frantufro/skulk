@@ -1066,3 +1066,139 @@ fn events_exits_non_zero_when_the_connection_drops() {
 
     assert!(!status.success(), "expected a non-zero exit, got {status}");
 }
+
+// ── git-log ─────────────────────────────────────────────────────────────
+
+impl Project {
+    fn commit_in_agent(&self, name: &str, subject: &str) {
+        let worktree = self.root.join("worktrees").join(format!("skulk-{name}"));
+        git(
+            &worktree,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "--allow-empty-message",
+                "-m",
+                subject,
+            ],
+        );
+    }
+}
+
+#[test]
+fn git_log_emits_empty_commits_for_a_branch_with_none() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("quiet");
+
+    let out = project.skulk(&["git-log", "quiet"]);
+
+    let json = json_success(&out);
+    assert_eq!(json["agent"], "quiet");
+    assert_eq!(json["base"], "main");
+    assert_eq!(json["commits"], serde_json::json!([]));
+}
+
+#[test]
+fn git_log_emits_one_commit_with_all_fields() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("one");
+    project.commit_in_agent("one", "add thing");
+
+    let json = json_success(&project.skulk(&["git-log", "one"]));
+
+    let commits = json["commits"].as_array().expect("commits array");
+    assert_eq!(commits.len(), 1);
+    let c = &commits[0];
+    assert_eq!(c["subject"], "add thing");
+    assert_eq!(c["author"], "skulk-test");
+    let sha = c["sha"].as_str().expect("sha");
+    assert_eq!(sha.len(), 40);
+    assert!(sha.starts_with(c["short"].as_str().expect("short")));
+    for key in ["authored_at", "committed_at"] {
+        let ts = c[key].as_str().expect("timestamp");
+        assert!(
+            ts.len() >= 20 && ts.as_bytes()[10] == b'T',
+            "{key} is not ISO 8601: {ts}"
+        );
+    }
+}
+
+#[test]
+fn git_log_lists_several_commits_newest_first_and_honours_limit() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("many");
+    for subject in ["first", "second", "third"] {
+        project.commit_in_agent("many", subject);
+    }
+
+    let all = json_success(&project.skulk(&["git-log", "many"]));
+    let subjects: Vec<&str> = all["commits"]
+        .as_array()
+        .expect("commits array")
+        .iter()
+        .map(|c| c["subject"].as_str().expect("subject"))
+        .collect();
+    assert_eq!(subjects, ["third", "second", "first"]);
+
+    let limited = json_success(&project.skulk(&["git-log", "many", "--limit", "2"]));
+    assert_eq!(limited["commits"].as_array().map(Vec::len), Some(2));
+    assert_eq!(limited["commits"][0]["subject"], "third");
+}
+
+#[test]
+fn git_log_preserves_quotes_and_unicode_in_subjects() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("odd");
+    let subject = "fix \"quoted\" 'single' \\ café 日本語 🎉 $HOME `x`";
+    project.commit_in_agent("odd", subject);
+
+    let json = json_success(&project.skulk(&["git-log", "odd"]));
+
+    assert_eq!(json["commits"][0]["subject"], subject);
+}
+
+#[test]
+fn git_log_emits_json_error_when_agent_is_missing() {
+    let project = Project::with_base_clone();
+
+    let err = json_failure(&project.skulk(&["git-log", "ghost"]));
+
+    assert_eq!(err["code"], "not_found");
+}
+
+#[test]
+fn git_log_keeps_a_subject_containing_the_field_separator() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("sep");
+    let subject = "a\u{1f}b\u{1f}\u{1f}c";
+    project.commit_in_agent("sep", subject);
+
+    let json = json_success(&project.skulk(&["git-log", "sep"]));
+
+    assert_eq!(json["commits"][0]["subject"], subject);
+    assert_eq!(json["commits"][0]["author"], "skulk-test");
+}
+
+#[test]
+fn git_log_reports_an_empty_subject() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("blank");
+    project.commit_in_agent("blank", "");
+
+    let json = json_success(&project.skulk(&["git-log", "blank"]));
+
+    assert_eq!(json["commits"][0]["subject"], "");
+    assert_eq!(json["commits"][0]["author"], "skulk-test");
+}
+
+#[test]
+fn git_log_limit_zero_emits_no_commits() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("zero");
+    project.commit_in_agent("zero", "something");
+
+    let json = json_success(&project.skulk(&["git-log", "zero", "--limit", "0"]));
+
+    assert_eq!(json["commits"], serde_json::json!([]));
+}

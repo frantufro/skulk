@@ -342,9 +342,15 @@ pub(crate) enum Commands {
     ///
     /// Runs `git log <default_branch>..<session_prefix><name> --oneline` on the remote.
     /// Named `git-log` (not `log`) to avoid collision with `logs`, which shows tmux output.
+    ///
+    /// With --json, prints each commit's sha, subject, author and timestamps,
+    /// newest first. The text output is always `--oneline`.
     GitLog {
         /// Agent name
         name: String,
+        /// Maximum number of commits in the --json output (text output is not limited)
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
     },
 
     /// Push an agent's branch and open a PR with a Claude-authored description
@@ -658,7 +664,7 @@ pub(crate) fn run(
             };
             replay::cmd_replay(ssh, &opts, cfg, env_file.as_deref())
         }
-        Commands::GitLog { name } => interact::cmd_git_log(ssh, &name, cfg),
+        Commands::GitLog { name, limit } => interact::cmd_git_log(ssh, &name, limit, cfg),
         Commands::Ship { name } => ship::cmd_ship(ssh, &name, cfg),
         Commands::Status { name } => status::cmd_status(ssh, &name, cfg),
         Commands::Transcript { name, output } => {
@@ -1472,6 +1478,7 @@ mod tests {
             config: None,
             command: Commands::GitLog {
                 name: "test".into(),
+                limit: 200,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());

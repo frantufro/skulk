@@ -222,7 +222,7 @@ skulk gc --dry-run
 | `skulk restart-window <name> <window>` | Restart one window of the agent's session (e.g. the dev server in `server`) with the command it was created with — see [Init Hook](#per-agent-setup-init-hook) |
 | **Review** | |
 | `skulk diff <name>` | Show git diff against the default branch (`--stat`, `--name-only`) |
-| `skulk git-log <name>` | Show commits on the agent's branch not in the default branch |
+| `skulk git-log <name>` | Show commits on the agent's branch not in the default branch; `--json` adds per-commit details, `--limit N` caps them |
 | `skulk transcript <name>` | Dump full tmux scrollback (`--output` to write to a file) |
 | **Ship** | |
 | `skulk push <name>` | Push the agent's branch to origin |

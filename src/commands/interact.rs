@@ -9,7 +9,7 @@ use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::remote::{self, mark_busy_command};
 use crate::ssh::Ssh;
-use crate::util::{shell_escape, validate_window_name};
+use crate::util::{shell_escape, shell_quote_path, validate_window_name};
 
 /// Output format for `skulk diff`, mapped from the mutually-exclusive CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +102,63 @@ pub(crate) fn git_log_command(name: &str, cfg: &Config) -> String {
         "cd {base_path} && git log {default_branch}..{} --oneline",
         agent.branch_name()
     )
+}
+
+/// Field separator inside a `git log -z` record (ASCII unit separator).
+const GIT_LOG_FIELD_SEP: char = '\u{1f}';
+
+/// Number of fields in one `git log` JSON record.
+const GIT_LOG_FIELDS: usize = 6;
+
+/// Build the SSH command for `git-log --json`: one NUL-terminated record per
+/// commit, fields split by the unit separator. The subject comes last so that
+/// [`json_git_log_result`] can keep it whole even if it contains the separator.
+pub(crate) fn git_log_json_command(name: &str, limit: u32, cfg: &Config) -> String {
+    let base_path = shell_quote_path(&cfg.base_path);
+    let range = format!(
+        "{}..{}",
+        cfg.default_branch,
+        AgentRef::new(name, cfg).branch_name()
+    );
+    format!(
+        "cd {base_path} && git log '{}' -n {limit} -z \
+         --format='%H%x1f%h%x1f%aI%x1f%cI%x1f%an%x1f%s'",
+        shell_escape(&range)
+    )
+}
+
+/// Parse the output of [`git_log_json_command`] into the `git-log --json` payload.
+pub(crate) fn json_git_log_result(
+    name: &str,
+    cfg: &Config,
+    output: &str,
+) -> Result<serde_json::Value, SkulkError> {
+    let mut commits = Vec::new();
+    for record in output.split('\0').map(|r| r.trim_matches('\n')) {
+        if record.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = record.splitn(GIT_LOG_FIELDS, GIT_LOG_FIELD_SEP).collect();
+        let [sha, short, authored_at, committed_at, author, subject] = fields[..] else {
+            return Err(SkulkError::SshFailed(format!(
+                "Unexpected git log record: {record:?}"
+            )));
+        };
+        commits.push(serde_json::json!({
+            "sha": sha,
+            "short": short,
+            "subject": subject,
+            "author": author,
+            "authored_at": authored_at,
+            "committed_at": committed_at,
+        }));
+    }
+    Ok(serde_json::json!({
+        "v": crate::display::JSON_SCHEMA_VERSION,
+        "agent": name,
+        "base": cfg.default_branch,
+        "commits": commits,
+    }))
 }
 
 /// Build the SSH command to capture the visible pane content of an agent's tmux session.
@@ -220,12 +277,27 @@ pub(crate) fn json_push_result(name: &str, cfg: &Config, output: &str) -> serde_
 }
 
 /// Show `git log` of commits on an agent's branch not in the default branch.
-pub(crate) fn cmd_git_log(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
+///
+/// `limit` caps the commits in the JSON output only; text output is unchanged.
+pub(crate) fn cmd_git_log(
+    ssh: &impl Ssh,
+    name: &str,
+    limit: u32,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
     let agent = Agent::resolve(name, cfg)?;
-    let output = ssh
-        .run(&git_log_command(name, cfg))
-        .map_err(|e| agent.classify(e))?;
-    print!("{output}");
+    let json = matches!(cfg.output_format, OutputFormat::Json);
+    let command = if json {
+        git_log_json_command(name, limit, cfg)
+    } else {
+        git_log_command(name, cfg)
+    };
+    let output = ssh.run(&command).map_err(|e| agent.classify(e))?;
+    if json {
+        emit_json(&json_git_log_result(name, cfg, &output)?);
+    } else {
+        print!("{output}");
+    }
     Ok(())
 }
 
@@ -1387,17 +1459,85 @@ mod tests {
     }
 
     #[test]
+    fn git_log_json_command_limits_and_uses_nul_separated_format() {
+        let cfg = test_config();
+        let cmd = git_log_json_command("feat", 5, &cfg);
+        assert!(
+            cmd.starts_with("cd \"$HOME\"/'test-project' && git log 'main..skulk-feat' -n 5 -z"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("--format='%H%x1f%h%x1f%aI%x1f%cI%x1f%an%x1f%s'"));
+    }
+
+    #[test]
+    fn git_log_json_command_quotes_base_path_and_branch() {
+        let mut cfg = test_config();
+        cfg.base_path = "/srv/my proj's".into();
+        cfg.default_branch = "rel/1;x".into();
+        let cmd = git_log_json_command("feat", 1, &cfg);
+        assert!(cmd.starts_with("cd '/srv/my proj'\\''s' && git log 'rel/1;x..skulk-feat'"));
+    }
+
+    #[test]
+    fn json_git_log_result_parses_records_in_order() {
+        let cfg = test_config();
+        let out = "aaa\u{1f}a\u{1f}2026-01-01T00:00:00+00:00\u{1f}2026-01-02T00:00:00+00:00\u{1f}Ann\u{1f}say \"hi\" é\0\
+                   bbb\u{1f}b\u{1f}2025-01-01T00:00:00+00:00\u{1f}2025-01-01T00:00:00+00:00\u{1f}Bob\u{1f}first\0";
+        let v = json_git_log_result("feat", &cfg, out).expect("parses");
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["agent"], "feat");
+        assert_eq!(v["base"], "main");
+        assert_eq!(v["commits"][0]["subject"], "say \"hi\" é");
+        assert_eq!(v["commits"][0]["author"], "Ann");
+        assert_eq!(v["commits"][0]["authored_at"], "2026-01-01T00:00:00+00:00");
+        assert_eq!(v["commits"][0]["committed_at"], "2026-01-02T00:00:00+00:00");
+        assert_eq!(v["commits"][1]["short"], "b");
+        assert_eq!(v["commits"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn json_git_log_result_keeps_subject_containing_the_separator() {
+        let cfg = test_config();
+        let out = "aaa\u{1f}a\u{1f}t1\u{1f}t2\u{1f}Ann\u{1f}one\u{1f}two\u{1f}\u{1f}three\0";
+        let v = json_git_log_result("feat", &cfg, out).expect("parses");
+        assert_eq!(v["commits"][0]["subject"], "one\u{1f}two\u{1f}\u{1f}three");
+        assert_eq!(v["commits"][0]["author"], "Ann");
+    }
+
+    #[test]
+    fn json_git_log_result_accepts_an_empty_subject() {
+        let cfg = test_config();
+        let out = "aaa\u{1f}a\u{1f}t1\u{1f}t2\u{1f}Ann\u{1f}\0";
+        let v = json_git_log_result("feat", &cfg, out).expect("parses");
+        assert_eq!(v["commits"][0]["subject"], "");
+        assert_eq!(v["commits"][0]["author"], "Ann");
+    }
+
+    #[test]
+    fn json_git_log_result_is_empty_for_no_output() {
+        let cfg = test_config();
+        let v = json_git_log_result("feat", &cfg, "").expect("parses");
+        assert_eq!(v["commits"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn json_git_log_result_rejects_record_with_too_few_fields() {
+        let cfg = test_config();
+        assert!(json_git_log_result("feat", &cfg, "only\u{1f}two\0").is_err());
+    }
+
+    #[test]
     fn cmd_git_log_succeeds_and_prints_output() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("abc1234 first commit\ndef5678 second".into())]);
-        assert!(cmd_git_log(&ssh, "test", &cfg).is_ok());
+        assert!(cmd_git_log(&ssh, "test", 200, &cfg).is_ok());
     }
 
     #[test]
     fn cmd_git_log_returns_empty_output_when_no_commits() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![ssh_ok()]);
-        assert!(cmd_git_log(&ssh, "test", &cfg).is_ok());
+        assert!(cmd_git_log(&ssh, "test", 200, &cfg).is_ok());
     }
 
     #[test]
@@ -1406,7 +1546,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "fatal: ambiguous argument 'main..skulk-nope': unknown revision or path not in the working tree".into(),
         ))]);
-        let result = cmd_git_log(&ssh, "nope", &cfg);
+        let result = cmd_git_log(&ssh, "nope", 200, &cfg);
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("nope"));
         });
@@ -1416,7 +1556,7 @@ mod tests {
     fn cmd_git_log_rejects_invalid_name() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![]);
-        let result = cmd_git_log(&ssh, "../bad", &cfg);
+        let result = cmd_git_log(&ssh, "../bad", 200, &cfg);
         assert!(matches!(result, Err(SkulkError::Validation(_))));
     }
 
