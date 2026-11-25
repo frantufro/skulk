@@ -24,6 +24,31 @@ pub(crate) trait Ssh {
     /// Used by `skulk events`, which holds one connection open for its whole
     /// lifetime. Dropping the stream ends the command.
     fn stream(&self, cmd: &str) -> Result<Box<dyn LineStream>, SkulkError>;
+
+    /// Run `cmd` with `input` written to its stdin, without a terminal.
+    ///
+    /// Stdin stays open until the command exits, so the remote side reads EOF
+    /// only when skulk or the connection goes away. Stdout is captured or
+    /// inherited per `stdout`; each stderr line (newline included) is handed
+    /// to `on_stderr` as it arrives. Returns the exit code (`None` when the
+    /// process was killed by a signal) and the captured stdout.
+    ///
+    /// Used by `skulk exec`, which sends the agent's environment on stdin so
+    /// secrets never appear on a command line.
+    fn run_with_input(
+        &self,
+        cmd: &str,
+        input: &[u8],
+        stdout: StdoutMode,
+        on_stderr: &mut dyn FnMut(&[u8]),
+    ) -> Result<(Option<i32>, Vec<u8>), SkulkError>;
+}
+
+/// What [`Ssh::run_with_input`] does with the command's stdout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StdoutMode {
+    Capture,
+    Inherit,
 }
 
 /// One read from a [`LineStream`].

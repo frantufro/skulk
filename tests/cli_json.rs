@@ -1413,3 +1413,76 @@ fn exec_human_mode_reports_timeout_and_exits_124() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn exec_reads_dotenv_as_data_without_running_it() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    let worktree = project.exec_agent(&name);
+    std::fs::write(
+        worktree.join(".env"),
+        "A=$(touch pwned)\nB=\"quoted `touch pwned2` value\"\n",
+    )
+    .expect("write .env");
+
+    let result = json_success(&project.skulk(&[
+        "exec",
+        &name,
+        "--",
+        "sh",
+        "-c",
+        "printf '%s|%s' \"$A\" \"$B\"",
+    ]));
+
+    assert_eq!(
+        result["stdout"],
+        "$(touch pwned)|quoted `touch pwned2` value"
+    );
+    assert!(!worktree.join("pwned").exists(), ".env was executed");
+    assert!(!worktree.join("pwned2").exists(), ".env was executed");
+}
+
+#[test]
+fn exec_stops_the_command_when_skulk_goes_away() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    let worktree = project.exec_agent(&name);
+    let mut skulk = Command::new(env!("CARGO_BIN_EXE_skulk"))
+        .args(["--json", "--config", path(&project.root)])
+        .args([
+            "exec",
+            &name,
+            "--",
+            "sh",
+            "-c",
+            "echo $$ > cmd.pid; exec sleep 60",
+        ])
+        .env("SKULK_NO_UPDATE_CHECK", "1")
+        .env("HOME", project.home())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn skulk");
+    let pid_file = worktree.join("cmd.pid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pid_file.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let pid = std::fs::read_to_string(&pid_file).expect("command pid");
+
+    skulk.kill().expect("kill skulk");
+    let _ = skulk.wait();
+
+    let alive = || {
+        Command::new("kill")
+            .args(["-0", pid.trim()])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(), "command {} outlived skulk", pid.trim());
+}
