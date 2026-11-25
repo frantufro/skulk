@@ -8,22 +8,29 @@ use crate::inventory::{AgentState, GcOrphans, Session};
 ///
 /// Schema: `{"error": "<msg>", "code": "<snake_case_variant>"}`
 pub(crate) fn emit_json_error(msg: &str, err: &crate::error::SkulkError) {
-    eprintln!(
-        "{}",
-        serde_json::json!({
-            "error": msg,
-            "code": err.code_str()
-        })
-    );
+    eprintln!("{}", render_json(&json_error(msg, err.code_str())));
+}
+
+/// Build the JSON error object printed to stderr on failure.
+pub(crate) fn json_error(msg: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "error": msg,
+        "code": code,
+    })
 }
 
 /// Serialize `value` as compact JSON and print it to stdout.
 pub(crate) fn emit_json(value: &impl serde::Serialize) {
+    println!("{}", render_json(value));
+}
+
+/// Render `value` as the compact JSON line `emit_json` prints.
+pub(crate) fn render_json(value: &impl serde::Serialize) -> String {
     // serde_json::to_string only fails for types that have non-string map keys
     // or custom serializers that return errors — neither applies here.
     match serde_json::to_string(value) {
-        Ok(json) => println!("{json}"),
-        Err(e) => println!("{{\"error\":\"json serialization failed: {e}\"}}"),
+        Ok(json) => json,
+        Err(e) => format!("{{\"error\":\"json serialization failed: {e}\"}}"),
     }
 }
 
