@@ -22,7 +22,7 @@ pub(crate) const STARTUP_DELAY: u32 = 5;
 /// (e.g. the `server` window an init hook opens) can become the active one, so
 /// everything that types into or reads the harness targets this window rather
 /// than the bare session.
-const AGENT_WINDOW: &str = "agent";
+pub(crate) const AGENT_WINDOW: &str = "agent";
 
 /// Shell assignment that stores the harness window of a running session in
 /// `$skulk_win`: `<session>:agent` when that window exists, otherwise
@@ -50,6 +50,20 @@ pub(crate) fn resolve_window(session: &str, window: Option<&str>) -> String {
         Some(w) => format!("skulk_win={}", named_window_target(session, w)),
         None => resolve_agent_window(session),
     }
+}
+
+/// Build the SSH command that restarts a window of the agent's session.
+///
+/// `respawn-window -k` kills whatever runs in the window and starts the
+/// command the window was created with again, so the window must have been
+/// opened with its command (`tmux new-window -n server 'bin/dev'`), not as a
+/// shell that was then typed into.
+fn respawn_window_command(name: &str, window: &str, cfg: &Config) -> String {
+    let session = AgentRef::new(name, cfg).session_name();
+    format!(
+        "tmux respawn-window -k -t {}",
+        named_window_target(&session, window)
+    )
 }
 
 /// Build the SSH command to kill a tmux session for an agent.
@@ -176,6 +190,18 @@ pub(crate) fn start_session_or_kill(
 /// Kill the agent's tmux session.
 pub(crate) fn kill_session(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), SkulkError> {
     ssh.run(&kill_session_command(name, cfg)).map(|_| ())
+}
+
+/// Restart the named window of the agent's session with the command it was
+/// created with (see [`respawn_window_command`]).
+pub(crate) fn respawn_window(
+    ssh: &impl Ssh,
+    name: &str,
+    window: &str,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
+    ssh.run(&respawn_window_command(name, window, cfg))
+        .map(|_| ())
 }
 
 /// Force-remove the agent's git worktree.
@@ -1072,6 +1098,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn respawn_window_command_kills_and_respawns_the_named_window() {
+        let cfg = test_config();
+        assert_eq!(
+            respawn_window_command("my-task", "server", &cfg),
+            "tmux respawn-window -k -t 'skulk-my-task:=server'"
+        );
+    }
+
+    #[test]
+    fn respawn_window_runs_one_command() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![ssh_ok()]);
+        respawn_window(&ssh, "my-task", "server", &cfg).expect("respawn succeeds");
+        assert_eq!(
+            ssh.calls(),
+            vec!["tmux respawn-window -k -t 'skulk-my-task:=server'".to_string()]
+        );
+    }
+
     // ── named windows on a private tmux server ─────────────────────
 
     #[test]
@@ -1110,6 +1156,59 @@ mod tests {
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("can't find window"), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn respawned_window_reruns_its_command_and_leaves_the_agent_alone() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        let counter = tmux.dir().join("starts");
+        let counter = counter.display();
+        tmux.sh(&format!(
+            "tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux new-window -d -t skulk-my-task -n server \
+               'echo start >> {counter}; echo SERVER-UP; exec cat' && \
+             tmux set-option -w -t skulk-my-task:=server remain-on-exit on"
+        ));
+        tmux.sh_until("tmux capture-pane -p -t skulk-my-task:server", "SERVER-UP");
+        let agent_pid = tmux.sh("tmux display-message -p -t skulk-my-task:agent '#{pane_pid}'");
+        let cfg = test_config();
+
+        tmux.sh(&respawn_window_command("my-task", "server", &cfg));
+
+        let starts = tmux.sh_until(&format!("cat {counter}"), "start\nstart");
+        assert_eq!(starts, "start\nstart\n");
+        let agent_pid_after =
+            tmux.sh("tmux display-message -p -t skulk-my-task:agent '#{pane_pid}'");
+        assert_eq!(
+            agent_pid, agent_pid_after,
+            "agent window must not be respawned"
+        );
+    }
+
+    #[test]
+    fn respawned_window_restarts_a_command_that_already_exited() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        let counter = tmux.dir().join("starts");
+        let counter = counter.display();
+        tmux.sh(&format!(
+            "tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux set-option -wg remain-on-exit on && \
+             tmux new-window -d -t skulk-my-task -n server 'echo start >> {counter}'"
+        ));
+        tmux.sh_until(
+            "tmux display-message -p -t skulk-my-task:server '#{pane_dead}'",
+            "1",
+        );
+        let cfg = test_config();
+
+        tmux.sh(&respawn_window_command("my-task", "server", &cfg));
+
+        let starts = tmux.sh_until(&format!("cat {counter}"), "start\nstart");
+        assert_eq!(starts, "start\nstart\n");
     }
 
     // ── resolve_agent_window on a private tmux server ──────────────

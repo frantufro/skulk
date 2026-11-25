@@ -295,6 +295,38 @@ pub(crate) fn classify_logs_error(
     }
 }
 
+/// Restart one window of a running agent's session, e.g. the `server` window
+/// an init hook opened, without touching the harness or re-running init.
+///
+/// The window is respawned with the command it was created with (see
+/// [`remote::respawn_window`]). The harness window is refused: restarting it
+/// would kill the agent mid-task — `skulk restart` is the tool for that.
+pub(crate) fn cmd_restart_window(
+    ssh: &impl Ssh,
+    name: &str,
+    window: &str,
+    cfg: &Config,
+) -> Result<(), SkulkError> {
+    let agent = Agent::resolve(name, cfg)?;
+    validate_window_name(window)?;
+    if window == remote::AGENT_WINDOW {
+        return Err(SkulkError::Validation(format!(
+            "Window '{window}' runs the agent itself and can't be restarted this way. \
+             Use `skulk archive {name}` and `skulk restart {name}` instead."
+        )));
+    }
+    remote::respawn_window(ssh, name, window, cfg).map_err(|e| agent.classify_window(window, e))?;
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&serde_json::json!({
+            "agent": name,
+            "window": window,
+            "restarted": true,
+        })),
+        OutputFormat::Human => eprintln!("Restarted window '{window}' of agent '{name}'."),
+    }
+    Ok(())
+}
+
 /// Archive an agent: kill its tmux session but leave the worktree and branch.
 ///
 /// Non-destructive counterpart to `cmd_destroy`. Use this to stop an agent
@@ -797,6 +829,114 @@ mod tests {
 
         assert_err!(result, SkulkError::Validation(_) => {});
         assert_eq!(ssh.calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn cmd_restart_window_respawns_the_named_window() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![ssh_ok()]);
+
+        cmd_restart_window(&ssh, "test", "server", &cfg).expect("restart succeeds");
+
+        assert_eq!(
+            ssh.calls(),
+            vec!["tmux respawn-window -k -t 'skulk-test:=server'".to_string()]
+        );
+    }
+
+    #[test]
+    fn cmd_restart_window_returns_window_not_found_when_window_is_missing() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find window: server".into(),
+        ))]);
+
+        let result = cmd_restart_window(&ssh, "test", "server", &cfg);
+
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("Window 'server' not found"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn cmd_restart_window_returns_agent_not_found_when_session_is_missing() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find session: skulk-gone".into(),
+        ))]);
+
+        let result = cmd_restart_window(&ssh, "gone", "server", &cfg);
+
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("Agent 'gone' not found"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn cmd_restart_window_refuses_the_agent_window() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+
+        let result = cmd_restart_window(&ssh, "test", "agent", &cfg);
+
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("skulk restart"), "{msg}");
+        });
+        assert_eq!(ssh.calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn cmd_restart_window_rejects_invalid_window_name_without_ssh() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+
+        let result = cmd_restart_window(&ssh, "test", "$(id)", &cfg);
+
+        assert_err!(result, SkulkError::Validation(_) => {});
+        assert_eq!(ssh.calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn server_window_logs_and_restart_work_on_a_real_tmux() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        let counter = tmux.dir().join("boots");
+        let counter = counter.display();
+        tmux.sh(&format!(
+            "tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux set-option -wg remain-on-exit on && \
+             tmux new-window -d -t skulk-my-task -n server \
+               'echo boot >> {counter}; echo BOOT-$(wc -l < {counter}); exec cat'"
+        ));
+        let cfg = test_config();
+
+        let first = tmux.sh_until(
+            &logs_command("my-task", Some("server"), Some(50), &cfg),
+            "BOOT-1",
+        );
+        assert!(first.contains("BOOT-1"), "server log: {first}");
+        let agent = tmux.sh(&capture_pane_command("my-task", &cfg));
+        assert!(!agent.contains("BOOT-1"), "agent window: {agent}");
+
+        tmux.sh(&remote_respawn_for_test("my-task", "server", &cfg));
+
+        let second = tmux.sh_until(
+            &logs_command("my-task", Some("server"), None, &cfg),
+            "BOOT-2",
+        );
+        assert!(
+            second.contains("BOOT-2"),
+            "server log after restart: {second}"
+        );
+    }
+
+    /// The shell text `cmd_restart_window` sends, captured through `MockSsh`
+    /// so the real-tmux test runs exactly what production runs.
+    fn remote_respawn_for_test(name: &str, window: &str, cfg: &Config) -> String {
+        let ssh = MockSsh::new(vec![ssh_ok()]);
+        cmd_restart_window(&ssh, name, window, cfg).expect("restart succeeds");
+        ssh.calls().remove(0)
     }
 
     #[test]

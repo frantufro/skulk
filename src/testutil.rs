@@ -549,6 +549,11 @@ impl PrivateTmux {
         stdout
     }
 
+    /// The server's private directory; tests may keep scratch files here.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// `sh -c script` against this server, for tests that inspect a failure.
     pub(crate) fn command(&self, script: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new("sh");

@@ -214,6 +214,21 @@ pub(crate) enum Commands {
         window: Option<String>,
     },
 
+    /// Restart one window of a running agent's session
+    ///
+    /// Kills whatever runs in the window and starts the command the window
+    /// was created with again (`tmux respawn-window -k`), e.g. to restart the
+    /// dev server in the `server` window without re-running the init hook.
+    /// The window must have been opened with its command
+    /// (`tmux new-window -n server 'bin/dev'`), not as a shell that the
+    /// command was typed into. The agent's own window is never restarted.
+    RestartWindow {
+        /// Agent name
+        name: String,
+        /// Name of the tmux window to restart, e.g. `server`
+        window: String,
+    },
+
     /// Send a prompt to a running agent
     ///
     /// Delivers the prompt text to the agent's Claude Code instance
@@ -453,6 +468,7 @@ impl Commands {
             Commands::Diff { .. } => "diff",
             Commands::Disconnect { .. } => "disconnect",
             Commands::Logs { .. } => "logs",
+            Commands::RestartWindow { .. } => "restart-window",
             Commands::Send { .. } => "send",
             Commands::Push { .. } => "push",
             Commands::Archive { .. } => "archive",
@@ -537,6 +553,9 @@ pub(crate) fn run(
             lines,
             window,
         } => interact::cmd_logs(ssh, &name, follow, lines, window.as_deref(), cfg),
+        Commands::RestartWindow { name, window } => {
+            interact::cmd_restart_window(ssh, &name, &window, cfg)
+        }
         Commands::Send { name, prompt, from } => {
             interact::resolve_send_prompt(prompt, from.as_deref())
                 .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))
@@ -1004,6 +1023,21 @@ mod tests {
         let calls = ssh.calls();
         assert!(calls[0].contains("skulk-test:=server"), "got: {}", calls[0]);
         assert!(calls[0].contains("-S -20"), "got: {}", calls[0]);
+    }
+
+    #[test]
+    fn run_dispatches_restart_window() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![ssh_ok()]);
+        let cli =
+            Cli::try_parse_from(["skulk", "restart-window", "test", "server"]).expect("parses");
+
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+
+        assert_eq!(
+            ssh.calls(),
+            vec!["tmux respawn-window -k -t 'skulk-test:=server'".to_string()]
+        );
     }
 
     #[test]
