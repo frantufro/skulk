@@ -57,7 +57,7 @@ src/
     ├── new.rs         Agent creation with worktree isolation
     ├── destroy.rs     Agent teardown (single and bulk)
     ├── interact.rs    connect, logs, send, disconnect, diff, git-log,
-    │                  transcript, push, archive
+    │                  transcript, push, archive, restart-window
     ├── restart.rs     Restart a stopped agent in its existing worktree
     ├── ship.rs        Push + Claude-authored PR description + gh pr create
     ├── wait.rs        Block until an agent is idle

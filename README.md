@@ -139,6 +139,9 @@ skulk logs fix-bug --follow
 # View scrollback history
 skulk logs fix-bug --lines 500
 
+# Output of another tmux window, e.g. a dev server the init hook started
+skulk logs fix-bug --window server --follow
+
 # Review the work so far
 skulk diff fix-bug --stat      # summary of files changed
 skulk diff fix-bug             # full diff
@@ -207,12 +210,13 @@ skulk gc --dry-run
 | **Observe** | |
 | `skulk list` | List all agents with status, uptime, and worktree path |
 | `skulk status <name>` | Detailed single-agent view: status, commits ahead, files changed, uptime |
-| `skulk logs <name>` | View an agent's terminal output (`-f` to follow, `-l` for scrollback) |
+| `skulk logs <name>` | View an agent's terminal output (`-f` to follow, `-l` for scrollback, `-w <window>` for another window of its session) |
 | `skulk wait <name>` | Block until the agent is idle (`--all` for all agents, `--timeout <secs>` to cap the wait) |
 | **Interact** | |
 | `skulk connect <name>` | Attach to an agent's live tmux session |
 | `skulk disconnect <name>` | Detach all clients from an agent's session |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent (`--from` to read from a file) |
+| `skulk restart-window <name> <window>` | Restart one window of the agent's session (e.g. the dev server in `server`) with the command it was created with — see [Init Hook](#per-agent-setup-init-hook) |
 | **Review** | |
 | `skulk diff <name>` | Show git diff against the default branch (`--stat`, `--name-only`) |
 | `skulk git-log <name>` | Show commits on the agent's branch not in the default branch |
@@ -248,6 +252,16 @@ skulk gc --dry-run
 | `SKULK_WORKTREE` | absolute path to the worktree |
 
 **Failure handling — hard fail:** if `init.sh` exits non-zero, Claude does not start. The tmux session stays open with the error visible — run `skulk connect <name>` to investigate. For per-step opt-outs, use the usual shell idiom: `risky_command || true`.
+
+**Long-running services in their own window:** to keep a dev server running next to the agent, have `init.sh` open it in a separate tmux window *with the command*, so tmux remembers what to restart:
+
+```bash
+tmux new-window -d -t "$SKULK_SESSION" -n server "cd '$SKULK_WORKTREE' && bin/dev"
+# optional: keep the window and its last output when the server exits
+tmux set-option -w -t "$SKULK_SESSION:=server" remain-on-exit on
+```
+
+Then `skulk logs <name> --window server` shows its output (`--follow` and `--lines` work too), and `skulk restart-window <name> server` restarts it without re-running `init.sh`. `restart-window` runs `tmux respawn-window -k`, which re-runs the window's *original* command — a window opened as a plain shell with `bin/dev` typed into it via `send-keys` comes back as an empty shell. Don't name the window `agent`: that's the window Claude runs in.
 
 `skulk init` writes `.skulk/init.sh.example` — rename it to `.skulk/init.sh` and customize to enable.
 
@@ -403,6 +417,7 @@ skulk new -bad-name       # invalid (leading hyphen)
 | `--name-only` | `diff` | Paths of changed files only |
 | `--follow`, `-f` | `logs` | Stream output in real time |
 | `--lines`, `-l` | `logs` | Number of scrollback lines to show |
+| `--window <WINDOW>`, `-w` | `logs` | Read this tmux window of the agent's session (e.g. `server`) instead of the agent's own window |
 | `--output <FILE>`, `-o` | `transcript` | Write transcript to this file instead of stdout |
 | `--all` | `wait` | Wait for every running agent instead of one |
 | `--timeout <SECS>` | `wait` | Maximum seconds to wait before giving up (default: 1800; applies per agent with `--all`) |

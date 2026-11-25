@@ -80,6 +80,9 @@ skulk logs <name> --follow
 # View scrollback history
 skulk logs <name> --lines 500
 
+# Output of another window of the agent's session (e.g. a dev server)
+skulk logs <name> --window server --follow
+
 # Block until an agent finishes its current turn
 skulk wait <name>
 
@@ -284,6 +287,21 @@ sources it before running `init.sh`.
 
 If `init.sh` exits non-zero, Claude does not start. The session stays open
 for investigation via `skulk connect <name>`.
+
+`init.sh` can start a long-running service in its own tmux window. Open it
+with its command so it can be restarted:
+
+```bash
+tmux new-window -d -t "$SKULK_SESSION" -n server "cd '$SKULK_WORKTREE' && bin/dev"
+```
+
+- `skulk logs <name> --window server` — the service's output (`--follow`,
+  `--lines` work as usual)
+- `skulk restart-window <name> server` — restart the service
+  (`tmux respawn-window -k`) without re-running `init.sh` or touching
+  Claude. It re-runs the window's original command, so a window that was a
+  shell with the command typed in via `send-keys` comes back as an empty
+  shell. The `agent` window (Claude itself) can't be restarted this way.
 
 ## Common Workflows
 
