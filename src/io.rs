@@ -505,10 +505,7 @@ pub(crate) fn main() {
             if cli.json {
                 eprintln!(
                     "{}",
-                    crate::display::render_json(&crate::display::json_error(
-                        &format!("skulk: {e}"),
-                        "config"
-                    ))
+                    crate::display::json_error(&format!("skulk: {e}"), "config")
                 );
             } else {
                 eprintln!("skulk: {e}");
