@@ -408,6 +408,8 @@ skulk new -bad-name       # invalid (leading hyphen)
 | Flag | Scope | Description |
 |------|-------|-------------|
 | `--no-color` | Global | Disable colored output (also respects `NO_COLOR` env var) |
+| `--json` / `--human` | Global | Machine-readable JSON or human text output; overrides `output_format` in the config (see [JSON Output](#json-output)) |
+| `--config <PATH>` | Global | Use this config file, or the project directory holding `.skulk/config.toml`, instead of searching upward from the current directory |
 | `--from <FILE>` | `new`, `send` | Load the prompt from a local text file instead of the positional argument |
 | `--github <ISSUE_ID>` | `new` | Load the prompt from a GitHub issue (title, body, comments) via `gh` on the remote. Mutually exclusive with `--from`. |
 | `--remote-control` | `new` | Launch Claude with `--remote-control` so the agent is accessible from the Claude Code mobile/web app. Off by default because of an upstream idle-death bug ([anthropics/claude-code#32982](https://github.com/anthropics/claude-code/issues/32982)) that kills agents after ~20 min of inactivity — see Quick Start |
@@ -433,7 +435,7 @@ schema version, which changes only when a payload changes in a way that breaks
 consumers.
 
 ```bash
-skulk --json list
+skulk --json --config ~/code/my-project list
 # {"agents":[{"branch":"skulk-fix-bug","name":"fix-bug","status":"idle",...}],"v":1}
 ```
 
@@ -445,7 +447,8 @@ object on stderr:
 ```
 
 `code` is one of `validation`, `not_found`, `ssh_exec`, `ssh_failed`,
-`diagnostic`, or `update_failed`.
+`diagnostic`, `update_failed`, or `config` (the config file could not be found
+or loaded).
 
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
