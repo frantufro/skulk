@@ -50,6 +50,11 @@ pub(crate) fn resolve_send_prompt(
 }
 
 /// Build the SSH command to attach to an agent's live tmux session.
+///
+/// Attaches to the agent's window (see [`remote::resolve_agent_window`]), not
+/// the bare session, so the user always lands on the harness. Attaching to a
+/// window target also makes it the session's current window, so a `server`
+/// window someone left active is switched away from for every attached client.
 pub(crate) fn connect_command(name: &str, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
     let resolve = remote::resolve_agent_window(&agent.session_name());
