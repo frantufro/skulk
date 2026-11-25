@@ -264,6 +264,17 @@ fn list_emits_versioned_object_with_agents_array() {
 // ── push ────────────────────────────────────────────────────────────────
 
 #[test]
+fn list_reports_archived_agent_when_no_tmux_server_runs() {
+    let project = Project::with_base_clone();
+    project.stage_archived_agent("parked");
+
+    let value = json_success(&project.skulk(&["list"]));
+
+    assert_eq!(value["agents"][0]["name"], "parked", "{value}");
+    assert_eq!(value["agents"][0]["status"], "stopped", "{value}");
+}
+
+#[test]
 fn push_emits_one_json_result_on_success() {
     let project = Project::with_base_clone();
     let name = unique("push");
