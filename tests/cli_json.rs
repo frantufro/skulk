@@ -408,3 +408,54 @@ fn destroy_without_force_emits_json_error_instead_of_prompting() {
         "nothing may be destroyed without --force"
     );
 }
+
+// ── new / replay ────────────────────────────────────────────────────────
+
+#[test]
+fn new_emits_one_json_result_on_success() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let name = unique("new");
+    let prompt = project.root.join("prompt.txt");
+    std::fs::write(&prompt, "do the thing").expect("write prompt");
+
+    let value = json_success(&project.skulk(&["new", &name, "--from", path(&prompt)]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["prompt"], "delivered");
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert!(project.has_session(&format!("skulk-{name}")));
+}
+
+#[test]
+fn replay_emits_one_json_result_on_success() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let source = unique("source");
+    let replayed = unique("replayed");
+    let prompts = project.home().join(".skulk/prompts");
+    std::fs::create_dir_all(&prompts).expect("create prompt store");
+    std::fs::write(prompts.join(format!("skulk-{source}.txt")), "do it again")
+        .expect("write stored prompt");
+
+    let value = json_success(&project.skulk(&["replay", &source, "--as", &replayed]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], replayed.as_str());
+    assert_eq!(value["prompt"], "delivered");
+    assert!(project.has_session(&format!("skulk-{replayed}")));
+}
+
+#[test]
+fn new_emits_json_error_when_base_clone_is_missing() {
+    let project = Project::empty();
+
+    let err = json_failure(&project.skulk(&["new", &unique("new")]));
+
+    assert_eq!(err["code"], "validation");
+}

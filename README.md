@@ -453,6 +453,7 @@ or loaded).
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
 | `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch}` |
+| `new`, `replay` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control`, `prompt` (`delivered` / `failed` / `none`), `warnings` |
 | `restart` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control` |
 | `archive` | `ok`, `agent`, `branch`, `worktree`, `reason`, `warnings` |
 | `destroy` | `ok`, `agent`, `cleaned`: list of `session` / `worktree` / `branch` |
