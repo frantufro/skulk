@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
+use crate::commands::list::idle_since_json;
 use crate::config::{Config, OutputFormat};
 use crate::display::{emit_json, format_uptime, use_color};
 use crate::error::{SkulkError, is_tmux_no_server};
@@ -38,6 +39,8 @@ pub(crate) struct StatusView {
     /// First line of the worktree's `url_file`, `None` when the file is
     /// missing or empty.
     pub url: Option<String>,
+    /// Epoch mtime of the idle marker, set only while the state is `Idle`.
+    pub idle_since: Option<i64>,
 }
 
 /// Parse `__EPOCH__<n>__EPOCH__` and fall back to local clock on miss.
@@ -90,7 +93,7 @@ pub(crate) fn parse_diff_stat(line: &str) -> (u32, u32, u32) {
 
 /// Build the single SSH roundtrip that gathers everything `skulk status` needs:
 /// remote epoch, tmux sessions, worktree porcelain, branch existence, Stop-hook
-/// state mtime, commits ahead, `git diff --stat` summary, and the app URL
+/// marker contents and mtime, commits ahead, `git diff --stat` summary, and the app URL
 /// from the worktree's `url_file`.
 pub(crate) fn status_command(name: &str, cfg: &Config) -> String {
     let base = &cfg.base_path;
@@ -114,6 +117,10 @@ pub(crate) fn status_command(name: &str, cfg: &Config) -> String {
          {{ [ -f ~/.skulk/state/{session_name} ] && cat ~/.skulk/state/{session_name}; }} 2>/dev/null; \
          echo && \
          echo __STATE_END__ && \
+         echo __STATE_MTIME_START__; \
+         {{ stat -c %Y ~/.skulk/state/{session_name} 2>/dev/null || stat -f %m ~/.skulk/state/{session_name}; }} 2>/dev/null; \
+         echo; \
+         echo __STATE_MTIME_END__ && \
          echo __REVCOUNT_START__ && \
          cd {base} && git rev-list --count {default}..{branch} 2>/dev/null || true && \
          echo __REVCOUNT_END__ && \
@@ -168,6 +175,9 @@ pub(crate) fn parse_status_output(
 
     let state_raw = extract_section(raw, "__STATE_START__\n", "\n__STATE_END__");
     let marker = state_raw.lines().map(str::trim).find(|l| !l.is_empty());
+    let marker_mtime = extract_section(raw, "__STATE_MTIME_START__\n", "\n__STATE_MTIME_END__")
+        .lines()
+        .find_map(|l| l.trim().parse::<i64>().ok());
 
     let rc_raw = extract_section(raw, "__REVCOUNT_START__\n", "\n__REVCOUNT_END__");
     let commits_ahead = rc_raw
@@ -211,6 +221,7 @@ pub(crate) fn parse_status_output(
         deletions,
         worktree,
         url,
+        idle_since: marker_mtime.filter(|_| state == AgentState::Idle),
     })
 }
 
@@ -283,6 +294,8 @@ pub(crate) struct AgentStatusJson {
     pub(crate) queried_at: Option<i64>,
     /// App URL read from the worktree's `url_file`; `null` when missing.
     pub(crate) url: Option<String>,
+    /// When the agent went idle, as RFC 3339 UTC; `null` unless idle.
+    pub(crate) idle_since: Option<String>,
 }
 
 /// Build the JSON-serializable form of a [`StatusView`].
@@ -314,6 +327,7 @@ pub(crate) fn json_agent_status(view: &StatusView, remote_now: i64) -> AgentStat
         session_created_epoch,
         queried_at,
         url: view.url.clone(),
+        idle_since: idle_since_json(view.idle_since),
     }
 }
 
@@ -338,7 +352,9 @@ pub(crate) fn cmd_status(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_status_output, mock_url_section, test_config};
+    use crate::testutil::{
+        MockSsh, mock_state_mtime_section, mock_status_output, mock_url_section, test_config,
+    };
 
     // ── parse_diff_stat ─────────────────────────────────────────────────
 
@@ -545,6 +561,7 @@ mod tests {
             deletions: 34,
             worktree: Some("~/wt/skulk-my-task".into()),
             url: None,
+            idle_since: None,
         }
     }
 
@@ -637,6 +654,7 @@ mod tests {
             deletions: 0,
             worktree: Some("~/wt/skulk-my-task".into()),
             url: Some("http://localhost:3042".into()),
+            idle_since: None,
         };
         let remote_now: i64 = 1_700_000_200;
         let json = json_agent_status(&view, remote_now);
@@ -665,6 +683,7 @@ mod tests {
             deletions: 0,
             worktree: None,
             url: None,
+            idle_since: None,
         };
         let json = json_agent_status(&view, 1_700_000_000);
         assert_eq!(json.status, "stopped");
@@ -689,11 +708,91 @@ mod tests {
             deletions: 0,
             worktree: None,
             url: None,
+            idle_since: None,
         };
 
         let value = serde_json::to_value(json_agent_status(&view, 1_700_000_000)).unwrap();
 
         assert_eq!(value["url"], serde_json::Value::Null);
+    }
+
+    // ── idle_since ──────────────────────────────────────────────────────
+
+    fn idle_status_output(marker: Option<&str>, mtime: Option<i64>) -> String {
+        let mut raw = mock_status_output(
+            1_700_000_200,
+            "skulk-test\t1700000000\t0",
+            &[("skulk-test", "/wt/skulk-test")],
+            true,
+            marker,
+            Some(0),
+            "",
+        );
+        raw.push_str(&mock_state_mtime_section(mtime));
+        raw
+    }
+
+    #[test]
+    fn status_command_prints_the_marker_mtime() {
+        let cfg = test_config();
+
+        let cmd = status_command("test", &cfg);
+
+        assert!(cmd.contains(
+            "stat -c %Y ~/.skulk/state/skulk-test 2>/dev/null || stat -f %m ~/.skulk/state/skulk-test"
+        ));
+    }
+
+    #[test]
+    fn parse_status_output_reports_marker_mtime_for_idle_agent() {
+        let cfg = test_config();
+        let raw = idle_status_output(Some("idle"), Some(1_700_000_100));
+
+        let view = parse_status_output(&raw, "test", &cfg).expect("should succeed");
+
+        assert_eq!(view.idle_since, Some(1_700_000_100));
+    }
+
+    #[test]
+    fn parse_status_output_reports_no_idle_since_for_busy_agent() {
+        let cfg = test_config();
+        let raw = idle_status_output(Some("busy"), Some(1_700_000_100));
+
+        let view = parse_status_output(&raw, "test", &cfg).expect("should succeed");
+
+        assert_eq!(view.idle_since, None);
+    }
+
+    #[test]
+    fn parse_status_output_reports_no_idle_since_without_marker() {
+        let cfg = test_config();
+        let raw = idle_status_output(None, None);
+
+        let view = parse_status_output(&raw, "test", &cfg).expect("should succeed");
+
+        assert_eq!(view.idle_since, None);
+    }
+
+    #[test]
+    fn status_json_reports_idle_since_as_iso_8601() {
+        let cfg = test_config();
+        let raw = idle_status_output(Some("idle"), Some(1_795_516_262));
+        let view = parse_status_output(&raw, "test", &cfg).expect("should succeed");
+
+        let value = serde_json::to_value(json_agent_status(&view, 1_795_516_300)).unwrap();
+
+        assert_eq!(value["idle_since"], "2026-11-24T10:31:02Z");
+    }
+
+    #[test]
+    fn status_json_serializes_missing_idle_since_as_null() {
+        let cfg = test_config();
+        let raw = idle_status_output(Some("busy"), Some(1_795_516_262));
+        let view = parse_status_output(&raw, "test", &cfg).expect("should succeed");
+
+        let value = serde_json::to_value(json_agent_status(&view, 1_795_516_300)).unwrap();
+
+        assert_eq!(value["idle_since"], serde_json::Value::Null);
     }
 
     // ── url ─────────────────────────────────────────────────────────────

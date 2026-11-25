@@ -408,6 +408,14 @@ pub(crate) fn mock_url_section(contents: &str) -> String {
     format!("__URL_START__\n{contents}\n__URL_END__\n")
 }
 
+/// Helper: build the `__STATE_MTIME_START__` / `__STATE_MTIME_END__`
+/// section that `status_command` appends: the idle marker's epoch mtime, or
+/// nothing when the marker is missing.
+pub(crate) fn mock_state_mtime_section(mtime: Option<i64>) -> String {
+    let mtime = mtime.map_or(String::new(), |m| m.to_string());
+    format!("__STATE_MTIME_START__\n{mtime}\n__STATE_MTIME_END__\n")
+}
+
 /// Helper: build the `__URLS_START__` / `__URLS_END__` section that
 /// `list_command` appends: one `<worktree path>\t<first line of url_file>`
 /// line per worktree whose url file exists.

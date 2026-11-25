@@ -8,7 +8,7 @@ use crate::inventory::{
     AgentState, Session, parse_sessions, resolve_agent_state, worktree_map_from_output,
 };
 use crate::ssh::Ssh;
-use crate::util::{extract_section, shell_quote_path};
+use crate::util::{extract_section, rfc3339, shell_quote_path};
 
 const TMUX_FORMAT: &str = "#{session_name}\t#{session_created}\t#{session_attached}";
 
@@ -25,22 +25,32 @@ fn parse_remote_epoch(output: &str) -> i64 {
         })
 }
 
-/// Parse the state-file section into a map of session name -> marker contents.
+/// One agent's Stop/`UserPromptSubmit` hook marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Marker {
+    content: String,
+    /// Epoch mtime of the marker file, when the remote reported it.
+    mtime: Option<i64>,
+}
+
+/// Parse the state-file section into a map of session name -> marker.
 ///
-/// Each line is `<session_name> <busy|idle>`. Lines that fail to parse are
-/// silently ignored — state file infrastructure is delivered by the `wait`
-/// task, and an absent / empty section simply means no idle data is available.
+/// Each line is `<session_name> <busy|idle|pending> <mtime>`. Lines that fail
+/// to parse are silently ignored — an absent / empty section simply means no
+/// idle data is available.
 ///
-/// We read contents (not mtime) because `session_activity` does not tick
-/// during Claude's extended-thinking redraws, so an mtime comparison would
-/// misreport mid-thinking agents as idle.
-fn parse_state_map(raw: &str) -> HashMap<String, String> {
+/// The state comes from the contents, not the mtime, because
+/// `session_activity` does not tick during Claude's extended-thinking
+/// redraws, so an mtime comparison would misreport mid-thinking agents as
+/// idle. The mtime only says since when an idle agent has been idle.
+fn parse_state_map(raw: &str) -> HashMap<String, Marker> {
     raw.lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
             let name = parts.next()?.to_string();
             let content = parts.next()?.to_string();
-            Some((name, content))
+            let mtime = parts.next().and_then(|m| m.parse().ok());
+            Some((name, Marker { content, mtime }))
         })
         .collect()
 }
@@ -87,7 +97,7 @@ pub(crate) fn agent_state_probe(cfg: &Config) -> String {
          {{ cd {base_path} && git worktree list --porcelain 2>/dev/null; }} || echo {WORKTREES_FAILED}; \
          echo __WORKTREES_END__ && \
          echo __STATE_START__ && \
-         for f in ~/.skulk/state/*; do [ -f \"$f\" ] && printf '%s %s\\n' \"$(basename \"$f\")\" \"$(cat \"$f\")\"; done 2>/dev/null; \
+         for f in ~/.skulk/state/*; do [ -f \"$f\" ] && printf '%s %s %s\\n' \"$(basename \"$f\")\" \"$(cat \"$f\")\" \"$(stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\")\"; done 2>/dev/null; \
          echo __STATE_END__; \
          echo __URLS_START__; \
          cd {base_path} && git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | \
@@ -135,10 +145,11 @@ pub(crate) fn parse_agent_sessions(raw: &str, cfg: &Config) -> Vec<Session> {
             .as_ref()
             .and_then(|path| url_map.get(path))
             .cloned();
-        session.state = resolve_agent_state(
-            session.state,
-            state_map.get(&session.name).map(String::as_str),
-        );
+        let marker = state_map.get(&session.name);
+        session.state = resolve_agent_state(session.state, marker.map(|m| m.content.as_str()));
+        if session.state == AgentState::Idle {
+            session.idle_since = marker.and_then(|m| m.mtime);
+        }
     }
 
     // Orphaned worktrees (no matching tmux session) appear as stopped agents
@@ -150,6 +161,7 @@ pub(crate) fn parse_agent_sessions(raw: &str, cfg: &Config) -> Vec<Session> {
                 state: AgentState::Stopped,
                 worktree: Some(path.clone()),
                 url: url_map.get(path).cloned(),
+                idle_since: None,
             });
         }
     }
@@ -190,10 +202,19 @@ pub(crate) fn json_sessions(
                 "uptime_secs": uptime_secs,
                 "session_created_epoch": s.created,
                 "url": s.url,
+                "idle_since": idle_since_json(s.idle_since),
             })
         })
         .collect();
     serde_json::json!({ "agents": agents })
+}
+
+/// `idle_since` as the JSON outputs carry it: an RFC 3339 UTC timestamp, or
+/// `null` when the agent is not idle or its marker time is unknown.
+pub(crate) fn idle_since_json(epoch: Option<i64>) -> Option<String> {
+    epoch
+        .and_then(|secs| u64::try_from(secs).ok())
+        .map(|secs| rfc3339(secs.saturating_mul(1000)))
 }
 
 pub(crate) fn cmd_list(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError> {
@@ -271,8 +292,8 @@ mod tests {
         let raw = "skulk-a idle\nskulk-b busy\n";
         let map = parse_state_map(raw);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("skulk-a").map(String::as_str), Some("idle"));
-        assert_eq!(map.get("skulk-b").map(String::as_str), Some("busy"));
+        assert_eq!(map.get("skulk-a").map(|m| m.content.as_str()), Some("idle"));
+        assert_eq!(map.get("skulk-b").map(|m| m.content.as_str()), Some("busy"));
     }
 
     #[test]
@@ -280,8 +301,8 @@ mod tests {
         let raw = "skulk-a idle\nmalformed\nskulk-c busy\n";
         let map = parse_state_map(raw);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("skulk-a").map(String::as_str), Some("idle"));
-        assert_eq!(map.get("skulk-c").map(String::as_str), Some("busy"));
+        assert_eq!(map.get("skulk-a").map(|m| m.content.as_str()), Some("idle"));
+        assert_eq!(map.get("skulk-c").map(|m| m.content.as_str()), Some("busy"));
     }
 
     #[test]
@@ -304,6 +325,71 @@ mod tests {
         let (sessions, _) = parse_list_output(&raw, &cfg);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].state, AgentState::Idle);
+    }
+
+    #[test]
+    fn agent_state_probe_prints_each_marker_mtime() {
+        let cfg = test_config();
+
+        let cmd = agent_state_probe(&cfg);
+
+        assert!(cmd.contains(r#"stat -c %Y "$f" 2>/dev/null || stat -f %m "$f""#));
+    }
+
+    #[test]
+    fn parse_list_output_reports_marker_mtime_for_idle_agent() {
+        let cfg = test_config();
+        let raw = mock_list_output_with_state(
+            1_700_000_200,
+            "skulk-done\t1700000000\t0",
+            &[],
+            &[("skulk-done", "idle 1700000100")],
+        );
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert_eq!(sessions[0].idle_since, Some(1_700_000_100));
+    }
+
+    #[test]
+    fn parse_list_output_reports_no_idle_since_for_busy_agent() {
+        let cfg = test_config();
+        let raw = mock_list_output_with_state(
+            1_700_000_200,
+            "skulk-busy\t1700000000\t0",
+            &[],
+            &[("skulk-busy", "busy 1700000100")],
+        );
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert_eq!(sessions[0].idle_since, None);
+    }
+
+    #[test]
+    fn parse_list_output_reports_no_idle_since_without_marker() {
+        let cfg = test_config();
+        let raw = mock_list_output(1_700_000_000, "skulk-new\t1700000000\t0", &[]);
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert_eq!(sessions[0].idle_since, None);
+    }
+
+    #[test]
+    fn parse_list_output_reports_no_idle_since_for_empty_marker() {
+        let cfg = test_config();
+        let raw = mock_list_output_with_state(
+            1_700_000_200,
+            "skulk-new\t1700000000\t0",
+            &[],
+            &[("skulk-new", " 1700000100")],
+        );
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert_eq!(sessions[0].state, AgentState::Detached);
+        assert_eq!(sessions[0].idle_since, None);
     }
 
     #[test]
@@ -468,6 +554,7 @@ mod tests {
             state,
             worktree: worktree.map(ToString::to_string),
             url: None,
+            idle_since: None,
         }
     }
 
@@ -557,6 +644,19 @@ mod tests {
 
         assert_eq!(value["agents"][0]["url"], "http://localhost:3042");
         assert_eq!(value["agents"][1]["url"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn json_sessions_reports_idle_since_as_iso_8601_or_null() {
+        let cfg = test_config_json();
+        let mut idle = make_session("skulk-a", 1_700_000_000, AgentState::Idle, None);
+        idle.idle_since = Some(1_795_516_262);
+        let busy = make_session("skulk-b", 1_700_000_000, AgentState::Detached, None);
+
+        let value = json_sessions(&[idle, busy], 1_795_516_300, &cfg);
+
+        assert_eq!(value["agents"][0]["idle_since"], "2026-11-24T10:31:02Z");
+        assert_eq!(value["agents"][1]["idle_since"], serde_json::Value::Null);
     }
 
     #[test]
