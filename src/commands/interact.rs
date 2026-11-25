@@ -7,7 +7,7 @@ use crate::commands::prompt_source;
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
 use crate::error::SkulkError;
-use crate::remote::{self, mark_busy_command};
+use crate::remote::{self, mark_pending_command};
 use crate::ssh::Ssh;
 use crate::util::{shell_escape, shell_quote_path, validate_window_name};
 
@@ -210,8 +210,8 @@ pub(crate) fn archive_reason_command(session_name: &str, reason: &str) -> String
 /// Unlike `agent_send_prompt_command()` (in new.rs) which includes a startup delay,
 /// this targets an already-running agent -- no delay needed.
 ///
-/// The chain starts by writing `busy` to the idle marker (see
-/// [`mark_busy_command`]) so a subsequent `skulk wait` can't race past a
+/// The chain starts by writing `pending` to the idle marker (see
+/// [`mark_pending_command`]) so a subsequent `skulk wait` can't race past a
 /// stale `idle` marker while the agent's own `UserPromptSubmit` hook is
 /// still propagating. Then splits the actual send into two `tmux send-keys`
 /// calls with a short sleep in between: the first types the prompt text,
@@ -221,10 +221,10 @@ pub(crate) fn archive_reason_command(session_name: &str, reason: &str) -> String
 pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_name = AgentRef::new(name, cfg).session_name();
-    let mark_busy = mark_busy_command(&session_name);
+    let mark_pending = mark_pending_command(&session_name);
     let resolve = remote::resolve_agent_window(&session_name);
     format!(
-        "{mark_busy} && {resolve} && \
+        "{mark_pending} && {resolve} && \
          tmux send-keys -t \"$skulk_win\" '{escaped}' && \
          sleep 0.1 && \
          tmux send-keys -t \"$skulk_win\" Enter"
@@ -915,7 +915,7 @@ mod tests {
         let cmd = send_command("my-task", "fix the bug", &cfg);
         assert_eq!(
             cmd,
-            "mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/skulk-my-task && \
+            "mkdir -p ~/.skulk/state && printf pending > ~/.skulk/state/skulk-my-task && \
              skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && \
              tmux send-keys -t \"$skulk_win\" 'fix the bug' && \
              sleep 0.1 && \
@@ -1133,16 +1133,18 @@ mod tests {
     }
 
     #[test]
-    fn send_command_marks_busy_before_typing() {
+    fn send_command_marks_pending_before_typing() {
         let cfg = test_config();
         let cmd = send_command("my-task", "fix the bug", &cfg);
-        let busy_idx = cmd.find("printf busy").expect("busy marker write missing");
+        let busy_idx = cmd
+            .find("printf pending")
+            .expect("pending marker write missing");
         let type_idx = cmd
             .find("'fix the bug'")
             .expect("prompt typing step missing");
         assert!(
             busy_idx < type_idx,
-            "busy marker must be written before send-keys: {cmd}"
+            "pending marker must be written before send-keys: {cmd}"
         );
     }
 

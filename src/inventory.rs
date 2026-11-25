@@ -139,7 +139,8 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
 ///
 /// The hooks installed at agent creation write `idle` (Stop hook, when Claude
 /// finishes a turn) or `busy` (`UserPromptSubmit` hook, when a turn begins)
-/// to `~/.skulk/state/<session>`. Callers supply the literal marker contents.
+/// to `~/.skulk/state/<session>`; skulk writes `pending` just before it
+/// delivers a prompt, which reads as busy. Callers supply the literal marker contents.
 /// Missing or unrecognized contents preserve the tmux state — agents that
 /// have never received a prompt have no marker yet and should remain
 /// Attached/Detached, not be upgraded to Idle.
@@ -434,6 +435,18 @@ mod tests {
         );
         assert_eq!(
             resolve_agent_state(AgentState::Attached, Some("busy")),
+            AgentState::Attached
+        );
+    }
+
+    #[test]
+    fn resolve_agent_state_treats_pending_marker_as_busy() {
+        assert_eq!(
+            resolve_agent_state(AgentState::Detached, Some("pending")),
+            AgentState::Detached
+        );
+        assert_eq!(
+            resolve_agent_state(AgentState::Attached, Some("pending")),
             AgentState::Attached
         );
     }

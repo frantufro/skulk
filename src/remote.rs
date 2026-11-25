@@ -124,7 +124,14 @@ fn has_session_command(name: &str, cfg: &Config) -> String {
     format!("tmux has-session -t {}", agent.session_name())
 }
 
-/// Build a shell snippet that atomically writes `busy` to the idle marker.
+/// Idle-marker value skulk writes just before it delivers a prompt.
+///
+/// Readers treat it like `busy`. It differs from `busy` so that the agent's
+/// own `UserPromptSubmit` hook flipping it to `busy` proves the prompt was
+/// actually submitted, not just pasted into the input box.
+pub(crate) const PENDING_MARKER: &str = "pending";
+
+/// Build a shell snippet that atomically writes `pending` to the idle marker.
 ///
 /// Prepended to `tmux send-keys` chains in `cmd_send` and the initial-prompt
 /// delivery so the marker is set before the prompt is delivered. This closes
@@ -133,8 +140,8 @@ fn has_session_command(name: &str, cfg: &Config) -> String {
 /// agent's own `UserPromptSubmit` hook fires asynchronously after Claude Code
 /// reads the terminal input, which can be milliseconds to seconds after
 /// send-keys.
-pub(crate) fn mark_busy_command(session_name: &str) -> String {
-    format!("mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/{session_name}")
+pub(crate) fn mark_pending_command(session_name: &str) -> String {
+    format!("mkdir -p ~/.skulk/state && printf {PENDING_MARKER} > ~/.skulk/state/{session_name}")
 }
 
 /// Harness launch flags that vary per `new` / `restart` / `upload` call.
@@ -389,8 +396,8 @@ fn hooks_settings_json(session_name: &str) -> String {
 ///
 /// Known limitation: `OpenCode` has no clean equivalent of Claude Code's
 /// `UserPromptSubmit` event (upstream issue #573), so this plugin does not
-/// write the `busy` marker. `Skulk` itself writes `busy` from the send path
-/// (see [`crate::commands::wait::mark_busy_command`]), but a `skulk wait`
+/// write the `busy` marker. `Skulk` itself writes `pending` from the send path
+/// (see [`mark_pending_command`]), but a `skulk wait`
 /// invoked before any prompt has been sent will see the marker as missing
 /// and return immediately as idle.
 ///
@@ -648,19 +655,19 @@ fn clear_prompt_command(session_name: &str) -> String {
 /// `paste-buffer` and the buffer leaks, the next attempt for the same agent
 /// overwrites it via `set-buffer`.
 ///
-/// After the has-session check, writes `busy` to the idle marker (see
-/// [`mark_busy_command`]) so a `skulk wait` invoked right after this command
-/// returns sees `busy` instead of a stale `missing`/`idle` marker — the
+/// After the has-session check, writes `pending` to the idle marker (see
+/// [`mark_pending_command`]) so a `skulk wait` invoked right after this command
+/// returns sees a busy agent instead of a stale `missing`/`idle` marker — the
 /// agent's own `UserPromptSubmit` hook fires asynchronously and can lag
 /// behind the paste.
 fn send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_name = AgentRef::new(name, cfg).session_name();
     let buffer = format!("skulk-prompt-{session_name}");
-    let mark_busy = mark_busy_command(&session_name);
+    let mark_pending = mark_pending_command(&session_name);
     format!(
         "sleep {STARTUP_DELAY} && tmux has-session -t {session_name} && \
-         {mark_busy} && \
+         {mark_pending} && \
          tmux set-buffer -b {buffer} -- '{escaped}' && \
          tmux paste-buffer -p -d -t {session_name}:{AGENT_WINDOW} -b {buffer} && \
          sleep 0.1 && \
@@ -1453,16 +1460,18 @@ mod tests {
     }
 
     #[test]
-    fn send_prompt_command_marks_busy_before_paste() {
+    fn send_prompt_command_marks_pending_before_paste() {
         let cfg = test_config();
         let cmd = send_prompt_command("my-task", "fix the bug", &cfg);
-        let busy_idx = cmd.find("printf busy").expect("busy marker write missing");
+        let busy_idx = cmd
+            .find("printf pending")
+            .expect("pending marker write missing");
         let paste_idx = cmd
             .find("tmux paste-buffer")
             .expect("paste-buffer step missing");
         assert!(
             busy_idx < paste_idx,
-            "busy marker must be written before paste: {cmd}"
+            "pending marker must be written before paste: {cmd}"
         );
     }
 
@@ -1845,10 +1854,10 @@ mod tests {
     }
 
     #[test]
-    fn mark_busy_command_writes_busy_to_session_marker() {
+    fn mark_pending_command_writes_pending_to_session_marker() {
         assert_eq!(
-            mark_busy_command("skulk-my-task"),
-            "mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/skulk-my-task"
+            mark_pending_command("skulk-my-task"),
+            "mkdir -p ~/.skulk/state && printf pending > ~/.skulk/state/skulk-my-task"
         );
     }
 
