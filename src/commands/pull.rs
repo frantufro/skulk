@@ -1,4 +1,5 @@
-use crate::config::Config;
+use crate::config::{Config, OutputFormat};
+use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
 use crate::util::check_base_clone;
@@ -14,19 +15,18 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
         )
     })?;
 
-    if force {
-        eprintln!("Warning: This will discard any local changes on {host}.");
-        let output = ssh.run(&format!(
+    let output = if force {
+        if cfg.output_format == OutputFormat::Human {
+            eprintln!("Warning: This will discard any local changes on {host}.");
+        }
+        ssh.run(&format!(
             "cd {base_path} && git fetch origin && git reset --hard origin/{default_branch}"
-        ))?;
-        println!("{output}");
+        ))?
     } else {
         match ssh.run(&format!(
             "cd {base_path} && git pull --ff-only origin {default_branch}"
         )) {
-            Ok(output) => {
-                println!("{output}");
-            }
+            Ok(output) => output,
             Err(SkulkError::SshFailed(ref stderr)) => {
                 let lower = stderr.to_lowercase();
                 if lower.contains("not possible to fast-forward")
@@ -53,21 +53,67 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
             }
             Err(e) => return Err(e),
         }
-    }
+    };
 
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&json_pull_result(cfg, force, &output)),
+        OutputFormat::Human => println!("{output}"),
+    }
     Ok(())
+}
+
+/// Build the JSON result for a successful `pull`.
+pub(crate) fn json_pull_result(cfg: &Config, force: bool, output: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "base_path": cfg.base_path,
+        "branch": cfg.default_branch,
+        "force": force,
+        "output": output.trim(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, assert_err, test_config};
+    use crate::testutil::{MockSsh, assert_err, test_config, test_config_json};
 
     #[test]
     fn cmd_pull_normal_succeeds() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("exists".into()), Ok("Already up to date.".into())]);
         assert!(cmd_pull(&ssh, false, &cfg).is_ok());
+    }
+
+    #[test]
+    fn json_pull_result_reports_branch_mode_and_output() {
+        let cfg = test_config_json();
+
+        let value = json_pull_result(&cfg, true, "HEAD is now at abc1234\n");
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["base_path"], "~/test-project");
+        assert_eq!(value["branch"], "main");
+        assert_eq!(value["force"], true);
+        assert_eq!(value["output"], "HEAD is now at abc1234");
+    }
+
+    #[test]
+    fn cmd_pull_in_json_mode_succeeds() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Ok("exists".into()), Ok("Already up to date.".into())]);
+
+        assert!(cmd_pull(&ssh, false, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_pull_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed("test failed".into()))]);
+
+        let result = cmd_pull(&ssh, false, &cfg);
+
+        assert_err!(result, SkulkError::Validation(_) => {});
     }
 
     #[test]

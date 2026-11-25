@@ -454,6 +454,7 @@ or loaded).
 |---------|-------------------------------|
 | `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch}` |
 | `push` | `ok`, `agent`, `branch`, `remote`, `output` |
+| `pull` | `ok`, `base_path`, `branch`, `force`, `output` |
 | `ship` | `ok`, `agent`, `pr_url` |
 | `wait` | `ok`, `agent`, `status`, or `reason` on timeout |
 | `status`, `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
