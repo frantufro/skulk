@@ -46,6 +46,11 @@ pub(crate) struct Config {
     /// prompts for tool approval. Defaults to `false`.
     #[serde(default)]
     pub auto_approve_permissions: bool,
+    /// Path (relative to the worktree) of the file holding the agent's app URL,
+    /// typically written by the init script. Defaults to `tmp/dev-server-url`.
+    /// Reported as `url` in `status --json` and `list --json`.
+    #[serde(default)]
+    pub url_file: Option<String>,
     /// Output format for commands that produce structured data (e.g. `skulk list`).
     /// Defaults to `human`. Can be overridden by `--json` / `--human` CLI flags.
     #[serde(default)]
@@ -72,6 +77,17 @@ fn default_harness() -> String {
 /// Default path (relative to the worktree) for the init hook script when the
 /// user hasn't overridden `init_script` in the config.
 pub(crate) const DEFAULT_INIT_SCRIPT: &str = ".skulk/init.sh";
+
+/// Default path (relative to the worktree) of the file holding the agent's app
+/// URL when the user hasn't overridden `url_file` in the config.
+pub(crate) const DEFAULT_URL_FILE: &str = "tmp/dev-server-url";
+
+impl Config {
+    /// The configured `url_file`, falling back to [`DEFAULT_URL_FILE`].
+    pub(crate) fn url_file(&self) -> &str {
+        self.url_file.as_deref().unwrap_or(DEFAULT_URL_FILE)
+    }
+}
 
 /// Validate that a config value contains only shell-safe characters.
 ///
@@ -166,6 +182,9 @@ fn load_config_file(path: &Path) -> Result<Config, String> {
     validate_shell_safe(&cfg.harness, "harness")?;
     if let Some(ref script) = cfg.init_script {
         validate_shell_safe(script, "init_script")?;
+    }
+    if let Some(ref url_file) = cfg.url_file {
+        validate_shell_safe(url_file, "url_file")?;
     }
     // root_dir is the project directory: the parent of `.skulk/` for the usual
     // `project/.skulk/config.toml`, or the file's own directory for a config
@@ -279,6 +298,55 @@ mod tests {
 
         let cfg = load_config(&dir).unwrap();
         assert_eq!(cfg.root_dir.as_deref(), Some(dir.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn url_file_defaults_to_dev_server_url_when_absent() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.url_file(), "tmp/dev-server-url");
+    }
+
+    #[test]
+    fn url_file_uses_configured_path_when_set() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            url_file = "log/app-url"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.url_file(), "log/app-url");
+    }
+
+    #[test]
+    fn config_load_rejects_unsafe_url_file() {
+        let dir = std::env::temp_dir().join("skulk_url_file_unsafe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(
+            config_path_in(&dir),
+            r#"
+                host = "x"
+                session_prefix = "a-"
+                base_path = "~/p"
+                worktree_base = "~/w"
+                url_file = "$(evil)"
+            "#,
+        )
+        .unwrap();
+
+        let result = load_config(&dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("url_file"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

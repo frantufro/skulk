@@ -75,6 +75,7 @@ pub(crate) fn test_config_with_format(output_format: OutputFormat) -> Config {
         harness: "claude".to_string(),
         init_script: None,
         auto_approve_permissions: false,
+        url_file: None,
         output_format,
         root_dir: None,
     }
@@ -322,6 +323,13 @@ pub(crate) fn mock_status_output(
     }
     out.push_str("__DIFFSTAT_END__\n");
     out
+}
+
+/// Helper: build the `__URL_START__` / `__URL_END__` section that
+/// `status_command` appends, holding the url file's contents verbatim (empty
+/// when the file is missing).
+pub(crate) fn mock_url_section(contents: &str) -> String {
+    format!("__URL_START__\n{contents}\n__URL_END__\n")
 }
 
 /// Helper: like [`mock_list_output`] but also injects Stop/`UserPromptSubmit`
