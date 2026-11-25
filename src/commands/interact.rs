@@ -1022,7 +1022,7 @@ mod tests {
             "tmux new-session -d -s skulk-my-task -n agent cat && \
              tmux set-option -wg remain-on-exit on && \
              tmux new-window -d -t skulk-my-task -n server \
-               'echo boot >> {counter}; echo BOOT-$(wc -l < {counter}); exec cat'"
+               'echo boot >> {counter}; echo BOOT-$(grep -c boot {counter}); exec cat'"
         ));
         let cfg = test_config();
 
