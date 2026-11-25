@@ -325,6 +325,7 @@ mod tests {
             state,
             url: None,
             worktree: worktree.map(ToString::to_string),
+            idle_since: None,
         }
     }
 

@@ -467,8 +467,8 @@ result could not be encoded; it never reaches stdout).
 
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
-| `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch, url}` |
-| `status` | `name`, `status`, `branch`, `uptime_secs`, `session_created_epoch`, `queried_at`, `url` |
+| `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch, url, idle_since}` |
+| `status` | `name`, `status`, `branch`, `uptime_secs`, `session_created_epoch`, `queried_at`, `url`, `idle_since` |
 | `new`, `replay` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control`, `prompt` (`delivered` / `not_submitted` / `failed` / `none`), `warnings` |
 | `send` | `ok`, `agent`, `prompt` (`delivered` / `not_submitted`) |
 | `restart` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control` |
@@ -482,6 +482,10 @@ result could not be encoded; it never reaches stdout).
 | `get` | `agent`, `files` (array of `path` relative to the worktree and `bytes`), `dest` (absolute local path, `null` with `--list`) |
 | `wait` | `ok`, `agent`, `status`, or `reason` on timeout |
 | `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
+
+`idle_since` in `list` and `status` is when an idle agent went idle, as a UTC
+timestamp such as `2026-11-24T10:31:02Z`, and `null` for an agent that is not
+idle.
 
 `destroy` and `destroy-all` need `--force` with `--json`, since nobody is there
 to answer the confirmation prompt. If they leave anything behind, they fail

@@ -102,6 +102,8 @@ pub(crate) struct Session {
     pub worktree: Option<String>,
     /// App URL read from the worktree's `url_file`, when present.
     pub url: Option<String>,
+    /// Epoch mtime of the idle marker, set only while the state is `Idle`.
+    pub idle_since: Option<i64>,
 }
 
 /// Parse a raw tmux `list-sessions` output into `Session`s with an initial
@@ -129,6 +131,7 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
                 state,
                 worktree: None,
                 url: None,
+                idle_since: None,
             })
         })
         .collect()
