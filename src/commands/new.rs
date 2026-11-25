@@ -17,6 +17,11 @@ enum PromptStatus {
     NotSent,
 }
 
+/// Report a non-fatal problem to the user.
+fn warn(msg: &str) {
+    eprintln!("Warning: {msg}");
+}
+
 /// Resolve the local `.skulk/.env` path for the current project, if it exists.
 ///
 /// Uses `cfg.root_dir` (the project directory containing `.skulk/`) to locate
@@ -151,10 +156,10 @@ pub(crate) fn create_agent_with_prompt(
     if let Some(env_file) = local_env_file {
         let remote_env = format!("{worktree}/.env");
         if let Err(e) = ssh.upload_file(env_file, &remote_env) {
-            eprintln!(
-                "Warning: failed to copy {} to agent worktree: {e}",
+            warn(&format!(
+                "failed to copy {} to agent worktree: {e}",
                 env_file.display()
-            );
+            ));
         }
     }
 
@@ -188,7 +193,9 @@ pub(crate) fn create_agent_with_prompt(
         None => remote::clear_prompt(ssh, &session_name),
     };
     if let Err(e) = stored {
-        eprintln!("Warning: failed to update stored prompt for agent '{name}': {e}");
+        warn(&format!(
+            "failed to update stored prompt for agent '{name}': {e}"
+        ));
     }
 
     // Step 6: Send prompt if provided
@@ -196,9 +203,9 @@ pub(crate) fn create_agent_with_prompt(
         if remote::send_initial_prompt(ssh, name, prompt_text, cfg).is_ok() {
             PromptStatus::Delivered
         } else {
-            eprintln!(
-                "Warning: Agent '{name}' created but prompt delivery failed. Send manually:\n  skulk send {name} \"...\""
-            );
+            warn(&format!(
+                "Agent '{name}' created but prompt delivery failed. Send manually:\n  skulk send {name} \"...\""
+            ));
             PromptStatus::Failed
         }
     } else {
