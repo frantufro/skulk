@@ -138,6 +138,9 @@ struct PaneView<'a> {
     /// The input box's text, its side edges and prompt character removed;
     /// `None` when no input box was found.
     input: Option<Vec<&'a str>>,
+    /// Everything above the input box, side edges removed: the
+    /// conversation so far.
+    transcript: Vec<&'a str>,
 }
 
 impl<'a> PaneView<'a> {
@@ -168,7 +171,22 @@ impl<'a> PaneView<'a> {
             .take(STATUS_LINES)
             .copied()
             .collect();
-        Self { status, input }
+        let transcript = above.iter().map(|l| strip_box(l)).collect();
+        Self {
+            status,
+            input,
+            transcript,
+        }
+    }
+
+    /// Whether the input box is empty and the prompt's start shows in the
+    /// conversation above it: the harness took the prompt in.
+    fn shows_prompt_taken_in(&self, prompt_head: &str) -> bool {
+        let input_empty = self
+            .input
+            .as_ref()
+            .is_some_and(|lines| lines.iter().all(|l| l.trim().is_empty()));
+        input_empty && !prompt_head.is_empty() && self.transcript.concat().contains(prompt_head)
     }
 
     /// Whether the prompt skulk sent is still waiting to be submitted: the
@@ -227,14 +245,24 @@ fn find_input_box(lines: &[&str]) -> Option<(usize, usize, usize)> {
 ///
 /// For Claude Code, the `UserPromptSubmit` hook replacing skulk's `pending`
 /// marker (with `busy`, or already `idle` after a short turn) proves it.
-/// `OpenCode` has no such hook, so only the pane counts there. The working
-/// indicator counts only on the status lines: the prompt itself, still
-/// stuck in the input box, may well contain the same words.
-fn probe_shows_submission(raw: &str, cfg: &Config) -> bool {
+/// The working indicator counts only on the status lines: the prompt
+/// itself, still stuck in the input box, may well contain the same words.
+///
+/// `OpenCode` has no such hook, so only the pane counts there, and a fast
+/// turn can start and end between two probes without the working indicator
+/// ever showing. For it, an empty input box with the prompt's start in the
+/// conversation above also proves submission.
+fn probe_shows_submission(raw: &str, prompt_head: &str, cfg: &Config) -> bool {
     let (marker, pane) = raw.split_once(PANE_DELIMITER).unwrap_or((raw, ""));
-    let marker = marker.trim();
-    let hook_fired = matches!(marker, "busy" | "idle");
-    PaneView::parse(pane).shows_working() || (cfg.harness == DEFAULT_HARNESS && hook_fired)
+    let view = PaneView::parse(pane);
+    if view.shows_working() {
+        return true;
+    }
+    if cfg.harness == DEFAULT_HARNESS {
+        matches!(marker.trim(), "busy" | "idle")
+    } else {
+        view.shows_prompt_taken_in(prompt_head)
+    }
 }
 
 /// Watch for proof that `prompt`, just sent with Enter, was submitted,
@@ -265,7 +293,7 @@ pub(crate) fn confirm_submission(
                 unsent = false;
                 continue;
             };
-            if probe_shows_submission(&raw, cfg) {
+            if probe_shows_submission(&raw, &head, cfg) {
                 return Submission::Submitted;
             }
             let pane = raw.split_once(PANE_DELIMITER).map_or("", |(_, p)| p);
@@ -297,6 +325,7 @@ mod tests {
     }
 
     const PROMPT: &str = "never press esc to interrupt the migration";
+    const OPENCODE_PROMPT: &str = "rename the config loader";
 
     /// Claude Code with a large paste still sitting in its input box.
     const STUCK_PANE: &str = "⏺ Ready when you are.\n\n\
@@ -594,6 +623,72 @@ mod tests {
         let ssh = MockSsh::new(vec![probe_frame("idle", STUCK_PANE)]);
 
         let result = confirm_submission(&ssh, "skulk-t", PROMPT, &opencode_config(), &pacing);
+
+        assert_eq!(result, Submission::NotSubmitted);
+    }
+
+    #[test]
+    fn opencode_submitted_after_a_fast_turn_that_showed_no_indicator() {
+        // The turn began and ended between probes: no `esc interrupt` ever
+        // showed, but the input box is empty and the prompt is in the chat.
+        let pane = "┃ rename the config loader\n\
+            Done, nothing to change.\n\
+            ┌──────────────────────────────┐\n\
+            │ >                            │\n\
+            └──────────────────────────────┘\n\
+            \x20 enter send\n";
+        let ssh = MockSsh::new(vec![probe_frame("idle", pane)]);
+
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            OPENCODE_PROMPT,
+            &opencode_config(),
+            &SubmitPacing::zero(),
+        );
+
+        assert_eq!(result, Submission::Submitted);
+    }
+
+    #[test]
+    fn opencode_empty_input_box_alone_is_not_proof() {
+        let pane = "Welcome.\n┌────────┐\n│ >      │\n└────────┘\n";
+        let pacing = SubmitPacing {
+            max_enters: 1,
+            ..SubmitPacing::zero()
+        };
+        let ssh = MockSsh::new(vec![probe_frame("idle", pane)]);
+
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            OPENCODE_PROMPT,
+            &opencode_config(),
+            &pacing,
+        );
+
+        assert_eq!(result, Submission::NotSubmitted);
+    }
+
+    #[test]
+    fn opencode_prompt_still_in_input_box_is_not_proof() {
+        let pane = "┃ rename the config loader\n\
+            ┌──────────────┐\n\
+            │ > rename the config loader │\n\
+            └──────────────┘\n";
+        let pacing = SubmitPacing {
+            max_enters: 1,
+            ..SubmitPacing::zero()
+        };
+        let ssh = MockSsh::new(vec![probe_frame("idle", pane)]);
+
+        let result = confirm_submission(
+            &ssh,
+            "skulk-t",
+            OPENCODE_PROMPT,
+            &opencode_config(),
+            &pacing,
+        );
 
         assert_eq!(result, Submission::NotSubmitted);
     }
