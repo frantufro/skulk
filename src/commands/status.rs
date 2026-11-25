@@ -35,6 +35,9 @@ pub(crate) struct StatusView {
     pub insertions: u32,
     pub deletions: u32,
     pub worktree: Option<String>,
+    /// First line of the worktree's `url_file`, `None` when the file is
+    /// missing or empty.
+    pub url: Option<String>,
 }
 
 /// Parse `__EPOCH__<n>__EPOCH__` and fall back to local clock on miss.
@@ -87,13 +90,15 @@ pub(crate) fn parse_diff_stat(line: &str) -> (u32, u32, u32) {
 
 /// Build the single SSH roundtrip that gathers everything `skulk status` needs:
 /// remote epoch, tmux sessions, worktree porcelain, branch existence, Stop-hook
-/// state mtime, commits ahead, and `git diff --stat` summary.
+/// state mtime, commits ahead, `git diff --stat` summary, and the app URL
+/// from the worktree's `url_file`.
 pub(crate) fn status_command(name: &str, cfg: &Config) -> String {
     let base = &cfg.base_path;
     let default = &cfg.default_branch;
     let agent = AgentRef::new(name, cfg);
     let session_name = agent.session_name();
     let branch = agent.branch_name();
+    let url_path = format!("{}/{}", agent.worktree_path(cfg), cfg.url_file());
     format!(
         "echo __EPOCH__$(date +%s)__EPOCH__ && \
          echo __TMUX_START__ && \
@@ -114,7 +119,11 @@ pub(crate) fn status_command(name: &str, cfg: &Config) -> String {
          echo __REVCOUNT_END__ && \
          echo __DIFFSTAT_START__ && \
          cd {base} && (git diff --stat {default}...{branch} 2>/dev/null | tail -1) || true && \
-         echo __DIFFSTAT_END__"
+         echo __DIFFSTAT_END__; \
+         echo __URL_START__; \
+         head -n 1 {url_path} 2>/dev/null; \
+         echo; \
+         echo __URL_END__"
     )
 }
 
@@ -171,6 +180,12 @@ pub(crate) fn parse_status_output(
     let diffstat_line = ds_raw.lines().last().unwrap_or("").trim();
     let (files_changed, insertions, deletions) = parse_diff_stat(diffstat_line);
 
+    let url = extract_section(raw, "__URL_START__\n", "\n__URL_END__")
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(ToString::to_string);
+
     let (state, uptime, created_epoch) = match &our_session {
         Some(s) => {
             let state = resolve_agent_state(s.state, marker);
@@ -195,6 +210,7 @@ pub(crate) fn parse_status_output(
         insertions,
         deletions,
         worktree,
+        url,
     })
 }
 
@@ -265,6 +281,8 @@ pub(crate) struct AgentStatusJson {
     /// Server clock captured at query time. Always present for running agents;
     /// `None` when stopped.
     pub(crate) queried_at: Option<i64>,
+    /// App URL read from the worktree's `url_file`; `null` when missing.
+    pub(crate) url: Option<String>,
 }
 
 /// Build the JSON-serializable form of a [`StatusView`].
@@ -295,6 +313,7 @@ pub(crate) fn json_agent_status(view: &StatusView, remote_now: i64) -> AgentStat
         uptime_secs,
         session_created_epoch,
         queried_at,
+        url: view.url.clone(),
     }
 }
 
@@ -319,7 +338,7 @@ pub(crate) fn cmd_status(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, mock_status_output, test_config};
+    use crate::testutil::{MockSsh, mock_status_output, mock_url_section, test_config};
 
     // ── parse_diff_stat ─────────────────────────────────────────────────
 
@@ -525,6 +544,7 @@ mod tests {
             insertions: 120,
             deletions: 34,
             worktree: Some("~/wt/skulk-my-task".into()),
+            url: None,
         }
     }
 
@@ -616,6 +636,7 @@ mod tests {
             insertions: 5,
             deletions: 0,
             worktree: Some("~/wt/skulk-my-task".into()),
+            url: Some("http://localhost:3042".into()),
         };
         let remote_now: i64 = 1_700_000_200;
         let json = json_agent_status(&view, remote_now);
@@ -626,6 +647,7 @@ mod tests {
         assert_eq!(json.uptime_secs, Some(200));
         assert_eq!(json.session_created_epoch, Some(1_700_000_000));
         assert_eq!(json.queried_at, Some(1_700_000_200));
+        assert_eq!(json.url.as_deref(), Some("http://localhost:3042"));
     }
 
     #[test]
@@ -642,12 +664,109 @@ mod tests {
             insertions: 0,
             deletions: 0,
             worktree: None,
+            url: None,
         };
         let json = json_agent_status(&view, 1_700_000_000);
         assert_eq!(json.status, "stopped");
         assert!(json.uptime_secs.is_none());
         assert!(json.session_created_epoch.is_none());
         assert!(json.queried_at.is_none());
+        assert!(json.url.is_none());
+    }
+
+    #[test]
+    fn status_json_serializes_missing_url_as_null() {
+        let view = StatusView {
+            display_name: "done".into(),
+            state: AgentState::Stopped,
+            uptime: None,
+            created_epoch: None,
+            branch: "skulk-done".into(),
+            default_branch: "main".into(),
+            commits_ahead: 0,
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+            worktree: None,
+            url: None,
+        };
+
+        let value = serde_json::to_value(json_agent_status(&view, 1_700_000_000)).unwrap();
+
+        assert_eq!(value["url"], serde_json::Value::Null);
+    }
+
+    // ── url ─────────────────────────────────────────────────────────────
+
+    fn running_status_output() -> String {
+        mock_status_output(
+            1_700_000_200,
+            "skulk-test\t1700000000\t0",
+            &[("skulk-test", "/wt/skulk-test")],
+            true,
+            None,
+            Some(0),
+            "",
+        )
+    }
+
+    #[test]
+    fn status_command_reads_default_url_file_in_worktree() {
+        let cfg = test_config();
+
+        let cmd = status_command("test", &cfg);
+
+        assert!(cmd.contains("~/test-project-worktrees/skulk-test/tmp/dev-server-url"));
+    }
+
+    #[test]
+    fn status_command_reads_configured_url_file() {
+        let mut cfg = test_config();
+        cfg.url_file = Some("log/app-url".into());
+
+        let cmd = status_command("test", &cfg);
+
+        assert!(cmd.contains("~/test-project-worktrees/skulk-test/log/app-url"));
+    }
+
+    #[test]
+    fn parse_status_output_reads_url_written_by_init_script() {
+        let cfg = test_config();
+        let raw = running_status_output() + &mock_url_section("http://localhost:3042\n");
+
+        let view = parse_status_output(&raw, "test", &cfg).unwrap();
+
+        assert_eq!(view.url.as_deref(), Some("http://localhost:3042"));
+    }
+
+    #[test]
+    fn parse_status_output_url_is_none_when_file_missing() {
+        let cfg = test_config();
+        let raw = running_status_output() + &mock_url_section("");
+
+        let view = parse_status_output(&raw, "test", &cfg).unwrap();
+
+        assert!(view.url.is_none());
+    }
+
+    #[test]
+    fn parse_status_output_url_is_none_when_section_absent() {
+        let cfg = test_config();
+
+        let view = parse_status_output(&running_status_output(), "test", &cfg).unwrap();
+
+        assert!(view.url.is_none());
+    }
+
+    #[test]
+    fn status_json_includes_url_from_url_file() {
+        let cfg = test_config();
+        let raw = running_status_output() + &mock_url_section("  http://localhost:3042  \n");
+
+        let view = parse_status_output(&raw, "test", &cfg).unwrap();
+        let value = serde_json::to_value(json_agent_status(&view, 1_700_000_200)).unwrap();
+
+        assert_eq!(value["url"], "http://localhost:3042");
     }
 
     #[test]
