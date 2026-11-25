@@ -55,10 +55,15 @@ pub(crate) fn resolve_send_prompt(
 /// the bare session, so the user always lands on the harness. Attaching to a
 /// window target also makes it the session's current window, so a `server`
 /// window someone left active is switched away from for every attached client.
+///
+/// It first hides the status line, so sessions created before skulk did that
+/// at creation lose it too. That step is `;`-chained: a cosmetic option must
+/// never stop the attach.
 pub(crate) fn connect_command(name: &str, cfg: &Config) -> String {
-    let agent = AgentRef::new(name, cfg);
-    let resolve = remote::resolve_agent_window(&agent.session_name());
-    format!("{resolve} && tmux attach-session -t \"$skulk_win\"")
+    let session = AgentRef::new(name, cfg).session_name();
+    let hide_status = remote::hide_status_line_command(&session);
+    let resolve = remote::resolve_agent_window(&session);
+    format!("{hide_status}; {resolve} && tmux attach-session -t \"$skulk_win\"")
 }
 
 /// Build the SSH command to detach all clients from an agent's tmux session.
@@ -580,7 +585,8 @@ mod tests {
         let cmd = connect_command("my-task", &cfg);
         assert_eq!(
             cmd,
-            "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && tmux attach-session -t \"$skulk_win\""
+            "tmux set-option -t skulk-my-task status off; \
+             skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && tmux attach-session -t \"$skulk_win\""
         );
     }
 
