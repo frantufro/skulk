@@ -227,11 +227,10 @@ pub(crate) fn create_agent_with_prompt(
     };
 
     let harness_line = format!("\n  Harness: {}", cfg.harness);
-    let model_line = model.map(|m| format!("\n  Model: {m}")).unwrap_or_default();
+    let model_line = model.map_or_else(String::new, |m| format!("\n  Model: {m}"));
     let extra_args_line = claude_args
         .filter(|s| !s.is_empty())
-        .map(|a| format!("\n  Extra Claude args: {a}"))
-        .unwrap_or_default();
+        .map_or_else(String::new, |a| format!("\n  Extra Claude args: {a}"));
 
     println!(
         "Agent '{name}' created.\n\
