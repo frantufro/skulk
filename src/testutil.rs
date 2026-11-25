@@ -577,6 +577,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn private_tmux_never_talks_to_the_callers_tmux_server() {
+        // `cargo test` usually runs inside an agent's tmux session, where
+        // `$TMUX` names the shared server every agent runs in; tmux prefers
+        // that socket over `TMUX_TMPDIR`, so `command` must drop it.
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        let socket = tmux.sh("tmux display-message -p -t keeper '#{socket_path}'");
+        assert!(
+            Path::new(socket.trim()).starts_with(tmux.dir()),
+            "private tmux used socket {socket} outside {}",
+            tmux.dir().display()
+        );
+        let env = tmux.command("env").output().expect("run env");
+        let env = String::from_utf8_lossy(&env.stdout);
+        assert!(
+            !env.lines().any(|l| l.starts_with("TMUX=")),
+            "TMUX leaked into the private tmux environment"
+        );
+    }
+
+    #[test]
     fn mock_download_file_records_call() {
         let ssh = MockSsh::new(vec![]);
         ssh.download_file("~/.claude/projects/x/a.jsonl", Path::new("/local/a.jsonl"))
