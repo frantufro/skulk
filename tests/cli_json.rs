@@ -322,6 +322,31 @@ fn pull_emits_json_error_when_base_clone_is_missing() {
     assert_eq!(err["code"], "validation");
 }
 
+// ── doctor ──────────────────────────────────────────────────────────────
+
+#[test]
+fn doctor_prints_one_object_and_exits_nonzero_when_a_check_fails() {
+    // The base clone does not exist, so that check fails.
+    let project = Project::empty();
+    // The probe runs `harness --version`, so the stub must return, not sleep.
+    std::fs::write(project.root.join("bin/harness"), "#!/bin/sh\necho 1.0.0\n")
+        .expect("rewrite stub harness");
+
+    let out = project.skulk(&["doctor"]);
+
+    assert!(!out.status.success(), "a failed check must exit non-zero");
+    let report = single_json_object(&out.stdout);
+    assert_eq!(report["ok"], false, "{report}");
+    let base_clone = report["checks"]
+        .as_array()
+        .and_then(|c| c.iter().find(|c| c["id"] == "base_clone"))
+        .expect("base_clone check");
+    assert_eq!(base_clone["status"], "fail", "{report}");
+    // The error goes to stderr only.
+    let err = single_json_object(&out.stderr);
+    assert_eq!(err["code"], "validation", "{err}");
+}
+
 // ── archive ─────────────────────────────────────────────────────────────
 
 #[test]

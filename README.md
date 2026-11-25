@@ -487,6 +487,21 @@ with a `diagnostic` error naming what is left. A `wait` that times out is
 the one failure reported on stdout: `{"ok": false, "reason": "timeout", ...}`
 with exit code 1.
 
+### Health checks (`skulk doctor`)
+
+`skulk --json doctor` prints one object with the checklist:
+
+```json
+{"v":1,"ok":false,"checks":[{"id":"config","label":"Config","value":"/p/.skulk/config.toml","status":"ok","note":null},{"id":"tmux","label":"tmux","value":"missing","status":"fail","note":"tmux is not installed on host.\n..."}]}
+```
+
+- `id` is stable: `config`, `skulk`, `ssh`, `tmux`, `harness`, `gh`, `base_clone`, `worktree_dir`. `label` is for display (the harness check is labelled with the configured binary name).
+- `status` is `ok`, `warn`, `fail` or `skip`.
+- `skip` appears only when the `ssh` check fails: the remote checks (`tmux`, `harness`, `gh`, `base_clone`, `worktree_dir`) did not run. A skipped check has `value: null` and `note: "skipped: SSH check failed"`, and the object always has `ok: false`.
+- `ok` is `false` when any check has status `fail`; warnings alone leave it `true`.
+- `note` is `null` when there is nothing to add.
+- **Exception to the failure rule above:** when any check fails, `doctor` exits non-zero but still prints this same object on stdout (with `ok: false`), so consumers can show which checks failed. The error object goes to stderr only.
+
 ### Streaming events (`skulk events`)
 
 `skulk --json events` runs until the connection drops and prints one JSON
