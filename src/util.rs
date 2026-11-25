@@ -142,6 +142,18 @@ pub(crate) fn shell_escape(input: &str) -> String {
     input.replace('\'', "'\\''")
 }
 
+/// Quote a configured path as one shell word, keeping a leading `~`
+/// expanding to the remote home: `~/proj` becomes `"$HOME"/'proj'`.
+pub(crate) fn shell_quote_path(path: &str) -> String {
+    if path == "~" {
+        return "\"$HOME\"".to_string();
+    }
+    match path.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/'{}'", shell_escape(rest)),
+        None => format!("'{}'", shell_escape(path)),
+    }
+}
+
 /// Extract a delimited section from raw SSH output.
 ///
 /// Returns the content between `start_marker` and `end_marker`, or an empty
@@ -324,6 +336,24 @@ mod tests {
     #[test]
     fn shell_escape_dollar_unchanged() {
         assert_eq!(shell_escape("$HOME/path"), "$HOME/path");
+    }
+
+    // ── shell_quote_path tests ──────────────────────────────────────────
+
+    #[test]
+    fn shell_quote_path_quotes_absolute_paths() {
+        assert_eq!(shell_quote_path("/srv/my repo"), "'/srv/my repo'");
+    }
+
+    #[test]
+    fn shell_quote_path_keeps_home_relative_paths_expanding() {
+        assert_eq!(shell_quote_path("~/proj"), "\"$HOME\"/'proj'");
+        assert_eq!(shell_quote_path("~"), "\"$HOME\"");
+    }
+
+    #[test]
+    fn shell_quote_path_escapes_single_quotes_and_metacharacters() {
+        assert_eq!(shell_quote_path("~/a'b;$(x)"), "\"$HOME\"/'a'\\''b;$(x)'");
     }
 
     // ── validate_window_name tests ──────────────────────────────────────

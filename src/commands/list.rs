@@ -8,7 +8,7 @@ use crate::inventory::{
     AgentState, Session, parse_sessions, resolve_agent_state, worktree_map_from_output,
 };
 use crate::ssh::Ssh;
-use crate::util::extract_section;
+use crate::util::{extract_section, shell_quote_path};
 
 const TMUX_FORMAT: &str = "#{session_name}\t#{session_created}\t#{session_attached}";
 
@@ -72,7 +72,7 @@ pub(crate) fn list_command(cfg: &Config) -> String {
 /// hook marker contents, and each worktree's app URL (first line of
 /// `url_file`) as delimited sections. Parse it with [`parse_agent_sessions`].
 pub(crate) fn agent_state_probe(cfg: &Config) -> String {
-    let base_path = &cfg.base_path;
+    let base_path = shell_quote_path(&cfg.base_path);
     let url_file = cfg.url_file();
     format!(
         "echo __TMUX_START__ && \
@@ -223,6 +223,19 @@ mod tests {
         assert!(cmd.contains("__STATE_START__"));
         assert!(cmd.contains("__STATE_END__"));
         assert!(cmd.contains("~/.skulk/state/"));
+    }
+
+    #[test]
+    fn agent_state_probe_quotes_base_path() {
+        let cfg = Config {
+            base_path: "~/my proj".to_string(),
+            ..test_config()
+        };
+
+        let probe = agent_state_probe(&cfg);
+
+        assert!(probe.contains("cd \"$HOME\"/'my proj' && git worktree list"));
+        assert!(!probe.contains("cd ~/my proj"));
     }
 
     #[test]
