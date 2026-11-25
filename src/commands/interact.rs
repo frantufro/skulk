@@ -196,11 +196,27 @@ pub(crate) fn cmd_push(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     let output = ssh
         .run(&push_command(name, cfg))
         .map_err(|e| agent.classify(e))?;
-    if !output.is_empty() {
-        print!("{output}");
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&json_push_result(name, cfg, &output)),
+        OutputFormat::Human => {
+            if !output.is_empty() {
+                print!("{output}");
+            }
+            eprintln!("Pushed {} to origin.", agent.branch_name());
+        }
     }
-    eprintln!("Pushed {} to origin.", agent.branch_name());
     Ok(())
+}
+
+/// Build the JSON result for a successful `push`.
+pub(crate) fn json_push_result(name: &str, cfg: &Config, output: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "agent": name,
+        "branch": AgentRef::new(name, cfg).branch_name(),
+        "remote": "origin",
+        "output": output.trim(),
+    })
 }
 
 /// Show `git log` of commits on an agent's branch not in the default branch.
@@ -442,7 +458,7 @@ pub(crate) fn cmd_send(
 mod tests {
     use super::*;
     use crate::testutil::PrivateTmux;
-    use crate::testutil::{MockSsh, assert_err, ssh_err, ssh_ok, test_config};
+    use crate::testutil::{MockSsh, assert_err, ssh_err, ssh_ok, test_config, test_config_json};
 
     #[test]
     fn connect_command_generates_tmux_attach() {
@@ -601,6 +617,37 @@ mod tests {
             "branch skulk-test set up to track origin/skulk-test".into(),
         )]);
         assert!(cmd_push(&ssh, "test", &cfg).is_ok());
+    }
+
+    #[test]
+    fn json_push_result_reports_agent_branch_and_remote() {
+        let cfg = test_config_json();
+
+        let value = json_push_result("my-task", &cfg, "Everything up-to-date\n");
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agent"], "my-task");
+        assert_eq!(value["branch"], "skulk-my-task");
+        assert_eq!(value["remote"], "origin");
+        assert_eq!(value["output"], "Everything up-to-date");
+    }
+
+    #[test]
+    fn cmd_push_in_json_mode_succeeds() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Ok(String::new())]);
+
+        assert!(cmd_push(&ssh, "my-task", &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_push_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "error: src refspec skulk-my-task does not match any".into(),
+        ))]);
+
+        assert!(cmd_push(&ssh, "my-task", &cfg).is_err());
     }
 
     #[test]
