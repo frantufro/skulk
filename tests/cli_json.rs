@@ -574,6 +574,12 @@ fn new_reports_not_submitted_when_the_prompt_stays_in_the_input_box() {
         "{warnings:?}"
     );
     assert!(project.has_session(&format!("skulk-{name}")));
+    let marker = project.home().join(format!(".skulk/state/skulk-{name}"));
+    assert_eq!(
+        std::fs::read_to_string(marker).expect("read idle marker"),
+        "idle",
+        "a prompt left unsent must not leave the agent looking busy"
+    );
 }
 
 #[test]

@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use crate::config::{Config, DEFAULT_HARNESS};
-use crate::remote::resolve_agent_window;
+use crate::remote::{PENDING_MARKER, resolve_agent_window};
 use crate::ssh::Ssh;
 
 /// Separates the marker from the pane capture in the probe output.
@@ -98,6 +98,17 @@ fn probe_command(session_name: &str) -> String {
     format!(
         "{resolve} && {{ cat ~/.skulk/state/{session_name} 2>/dev/null || echo missing; }} && \
          echo {PANE_DELIMITER} && tmux capture-pane -p -t \"$skulk_win\""
+    )
+}
+
+/// Build the SSH command that puts the idle marker back to `idle` after a
+/// prompt was not submitted, so `skulk wait` and `list` see the agent as
+/// idle (it is: the prompt sits unsent in its input box). Only a marker
+/// still at `pending` is touched; a late hook's `busy` must stand.
+fn reset_pending_command(session_name: &str) -> String {
+    let marker = format!("~/.skulk/state/{session_name}");
+    format!(
+        "[ \"$(cat {marker} 2>/dev/null)\" = {PENDING_MARKER} ] && printf idle > {marker}; true"
     )
 }
 
@@ -272,7 +283,8 @@ fn probe_shows_submission(raw: &str, prompt_head: &str, cfg: &Config) -> bool {
 /// waiting in the input box, so it can never confirm a dialog or a menu.
 /// A failed probe or resend counts as no proof yet rather than as an error:
 /// the prompt is already in the harness's input box, and the caller reports
-/// what happened instead of failing.
+/// what happened instead of failing. On giving up, the `pending` marker is
+/// put back to `idle` (best effort).
 pub(crate) fn confirm_submission(
     ssh: &impl Ssh,
     session_name: &str,
@@ -300,6 +312,7 @@ pub(crate) fn confirm_submission(
             unsent = PaneView::parse(pane).shows_prompt_unsent(&head);
         }
     }
+    let _ = ssh.run(&reset_pending_command(session_name));
     Submission::NotSubmitted
 }
 
@@ -426,7 +439,7 @@ mod tests {
             max_enters: 1,
             ..SubmitPacing::zero()
         };
-        let ssh = MockSsh::new(vec![probe_frame("pending", pane)]);
+        let ssh = MockSsh::new(vec![probe_frame("pending", pane), ssh_ok()]);
 
         let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
 
@@ -480,6 +493,7 @@ mod tests {
             probe_frame("pending", STUCK_PANE),
             ssh_ok(),
             probe_frame("pending", STUCK_PANE),
+            ssh_ok(), // marker back to idle
         ]);
 
         let result = confirm_submission(
@@ -493,6 +507,40 @@ mod tests {
         assert_eq!(result, Submission::NotSubmitted);
         let enters = ssh.calls().iter().filter(|c| c.ends_with("Enter")).count();
         assert_eq!(enters, 2, "two resends on top of the first Enter");
+    }
+
+    #[test]
+    fn not_submitted_puts_a_still_pending_marker_back_to_idle() {
+        let pacing = SubmitPacing {
+            max_enters: 1,
+            ..SubmitPacing::zero()
+        };
+        let ssh = MockSsh::new(vec![probe_frame("pending", STUCK_PANE), ssh_ok()]);
+
+        confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
+
+        assert_eq!(
+            ssh.calls().last().map(String::as_str),
+            Some(
+                "[ \"$(cat ~/.skulk/state/skulk-t 2>/dev/null)\" = pending ] && \
+                 printf idle > ~/.skulk/state/skulk-t; true"
+            )
+        );
+    }
+
+    #[test]
+    fn submitted_leaves_the_marker_alone() {
+        let ssh = MockSsh::new(vec![probe_frame("busy", "")]);
+
+        confirm_submission(
+            &ssh,
+            "skulk-t",
+            PROMPT,
+            &test_config(),
+            &SubmitPacing::zero(),
+        );
+
+        assert!(ssh.calls().iter().all(|c| !c.contains("printf idle")));
     }
 
     #[test]
@@ -519,7 +567,7 @@ mod tests {
             max_enters: 1,
             ..SubmitPacing::zero()
         };
-        let ssh = MockSsh::new(vec![ssh_err("connection lost")]);
+        let ssh = MockSsh::new(vec![ssh_err("connection lost"), ssh_ok()]);
 
         let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
 
@@ -537,6 +585,7 @@ mod tests {
             probe_frame("pending", dialog),
             probe_frame("pending", dialog),
             probe_frame("pending", dialog),
+            ssh_ok(), // marker back to idle
         ]);
 
         let result = confirm_submission(
@@ -567,12 +616,17 @@ mod tests {
         let ssh = MockSsh::new(vec![
             probe_frame("pending", hint),
             probe_frame("pending", hint),
+            ssh_ok(), // marker back to idle
         ]);
 
         let result = confirm_submission(&ssh, "skulk-t", PROMPT, &test_config(), &pacing);
 
         assert_eq!(result, Submission::NotSubmitted);
-        assert_eq!(ssh.calls().len(), 2, "two probes, no Enter");
+        assert_eq!(
+            ssh.calls().len(),
+            3,
+            "two probes and the marker reset, no Enter"
+        );
     }
 
     #[test]
@@ -620,7 +674,7 @@ mod tests {
             max_enters: 1,
             ..SubmitPacing::zero()
         };
-        let ssh = MockSsh::new(vec![probe_frame("idle", STUCK_PANE)]);
+        let ssh = MockSsh::new(vec![probe_frame("idle", STUCK_PANE), ssh_ok()]);
 
         let result = confirm_submission(&ssh, "skulk-t", PROMPT, &opencode_config(), &pacing);
 
@@ -657,7 +711,7 @@ mod tests {
             max_enters: 1,
             ..SubmitPacing::zero()
         };
-        let ssh = MockSsh::new(vec![probe_frame("idle", pane)]);
+        let ssh = MockSsh::new(vec![probe_frame("idle", pane), ssh_ok()]);
 
         let result = confirm_submission(
             &ssh,
@@ -680,7 +734,7 @@ mod tests {
             max_enters: 1,
             ..SubmitPacing::zero()
         };
-        let ssh = MockSsh::new(vec![probe_frame("idle", pane)]);
+        let ssh = MockSsh::new(vec![probe_frame("idle", pane), ssh_ok()]);
 
         let result = confirm_submission(
             &ssh,

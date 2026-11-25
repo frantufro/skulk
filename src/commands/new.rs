@@ -238,8 +238,8 @@ pub(crate) fn create_agent_with_prompt(
                     cfg,
                     &mut warnings,
                     format!(
-                        "Agent '{name}' created but its prompt is still in the input box, not submitted. \
-                         Inspect with `skulk connect {name}` and press Enter."
+                        "Agent '{name}' created but its prompt was not submitted; it is still in the input box. \
+                         Attach with `skulk connect {name}` and press Enter (don't re-send it: `send` would append)."
                     ),
                 );
                 PromptStatus::NotSubmitted

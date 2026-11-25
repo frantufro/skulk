@@ -489,6 +489,20 @@ with a `diagnostic` error naming what is left. A `wait` that times out is
 the one failure reported on stdout: `{"ok": false, "reason": "timeout", ...}`
 with exit code 1.
 
+`prompt: "not_submitted"` (from `new`, `replay` and `send`) means the prompt
+reached the agent's input box but the harness never took the Enter, even after
+skulk pressed it again. `ok` stays true and the exit code is 0. The agent is
+idle: skulk puts its marker back to `idle`, so `skulk wait` returns at once,
+and the prompt text is still in its input box. To recover:
+
+- Check with `skulk logs <name>`, then attach with `skulk connect <name>` and
+  press Enter.
+- Do not just repeat `skulk send` with the same prompt. It types into the same
+  input box, after the text already there, so the agent would get it twice.
+  Clear the box first (attach and press Ctrl+C in Claude Code).
+- For a new agent, you can also start over: `skulk destroy <name>`, then
+  `skulk new` again or `skulk replay <name>` (stored prompts outlive `destroy`).
+
 ### Health checks (`skulk doctor`)
 
 `skulk --json doctor` prints one object with the checklist:
