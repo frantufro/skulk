@@ -4,7 +4,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::agent::Agent;
-use crate::commands::interact::logs_snapshot_deep_command;
+use crate::commands::interact::{classify_logs_error, logs_command};
 use crate::config::Config;
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
@@ -40,14 +40,17 @@ fn find_new_content_start(old_lines: &[String], new_lines: &[String]) -> usize {
 }
 
 /// Follow agent output in real-time via poll loop. Runs until interrupted.
+/// Follows the harness window, or the window named `window` when given.
 pub(crate) fn cmd_logs_follow(
     ssh: &impl Ssh,
     agent: &Agent,
+    window: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
     follow_logs(
         ssh,
         agent,
+        window,
         cfg,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
@@ -64,14 +67,17 @@ pub(crate) fn cmd_logs_follow(
 fn follow_logs(
     ssh: &impl Ssh,
     agent: &Agent,
+    window: Option<&str>,
     cfg: &Config,
     out: &mut dyn Write,
     err: &mut dyn Write,
     wait: &mut dyn FnMut() -> bool,
 ) -> Result<(), SkulkError> {
     let name = agent.name();
-    let cmd = logs_snapshot_deep_command(name, 200, cfg);
-    let initial = ssh.run(&cmd).map_err(|e| agent.classify(e))?;
+    let cmd = logs_command(name, window, Some(200), cfg);
+    let initial = ssh
+        .run(&cmd)
+        .map_err(|e| classify_logs_error(agent, window, e))?;
     let mut last_lines: Vec<String> = initial.lines().map(ToString::to_string).collect();
     let _ = writeln!(err, "Following {name} (Ctrl+C to stop)...");
     for line in &last_lines {
@@ -114,7 +120,7 @@ mod tests {
         let mut remaining = polls;
         let cfg = test_config();
         let agent = Agent::resolve("alpha", &cfg).unwrap();
-        let result = follow_logs(&ssh, &agent, &cfg, &mut out, &mut err, &mut || {
+        let result = follow_logs(&ssh, &agent, None, &cfg, &mut out, &mut err, &mut || {
             let go = remaining > 0;
             remaining = remaining.saturating_sub(1);
             go
@@ -168,6 +174,67 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(out, "");
+    }
+
+    fn run_follow_window(
+        responses: Vec<Result<String, SkulkError>>,
+        polls: usize,
+    ) -> (Result<(), SkulkError>, Vec<String>, String) {
+        let ssh = MockSsh::new(responses);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut remaining = polls;
+        let cfg = test_config();
+        let agent = Agent::resolve("alpha", &cfg).unwrap();
+        let result = follow_logs(
+            &ssh,
+            &agent,
+            Some("server"),
+            &cfg,
+            &mut out,
+            &mut err,
+            &mut || {
+                let go = remaining > 0;
+                remaining = remaining.saturating_sub(1);
+                go
+            },
+        );
+        (
+            result,
+            ssh.calls(),
+            String::from_utf8_lossy(&out).into_owned(),
+        )
+    }
+
+    #[test]
+    fn follow_with_window_polls_that_window_every_time() {
+        let (result, calls, out) =
+            run_follow_window(vec![Ok("boot\n".into()), Ok("boot\nGET /\n".into())], 1);
+
+        assert!(result.is_ok());
+        assert_eq!(out, "boot\nGET /\n");
+        assert_eq!(calls.len(), 2);
+        for call in &calls {
+            assert!(
+                call.contains("skulk_win='skulk-alpha:=server'"),
+                "poll must target the server window: {call}"
+            );
+        }
+    }
+
+    #[test]
+    fn follow_with_missing_window_reports_the_window() {
+        let (result, _, _) = run_follow_window(
+            vec![Err(SkulkError::SshFailed(
+                "can't find window: server".into(),
+            ))],
+            0,
+        );
+
+        assert!(
+            matches!(&result, Err(SkulkError::NotFound(m)) if m.contains("Window 'server'")),
+            "got: {result:?}"
+        );
     }
 
     #[test]

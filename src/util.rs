@@ -86,6 +86,38 @@ pub(crate) fn validate_name(name: &str) -> Result<(), SkulkError> {
     Ok(())
 }
 
+/// Validate a tmux window name given on the command line (`logs --window`,
+/// `restart-window`).
+///
+/// Only letters, digits, hyphens and underscores: `.` and `:` are tmux
+/// target separators, and the name is spliced into a remote shell command.
+pub(crate) fn validate_window_name(window: &str) -> Result<(), SkulkError> {
+    if window.is_empty() {
+        return Err(SkulkError::Validation(
+            "Window name cannot be empty.".into(),
+        ));
+    }
+    if window.len() > 100 {
+        return Err(SkulkError::Validation(
+            "Window name must be 100 characters or fewer.".into(),
+        ));
+    }
+    if window.starts_with('-') {
+        return Err(SkulkError::Validation(
+            "Window name cannot start with a hyphen.".into(),
+        ));
+    }
+    if let Some(c) = window
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        return Err(SkulkError::Validation(format!(
+            "Invalid character '{c}' in window name. Only letters, digits, hyphens, and underscores allowed."
+        )));
+    }
+    Ok(())
+}
+
 /// Derive a valid agent name from a git branch name.
 ///
 /// Branch namespacing uses `/` (e.g. `feat/add-upload`), which `validate_name`
@@ -292,6 +324,62 @@ mod tests {
     #[test]
     fn shell_escape_dollar_unchanged() {
         assert_eq!(shell_escape("$HOME/path"), "$HOME/path");
+    }
+
+    // ── validate_window_name tests ──────────────────────────────────────
+
+    #[test]
+    fn validate_window_name_accepts_server() {
+        assert!(validate_window_name("server").is_ok());
+    }
+
+    #[test]
+    fn validate_window_name_accepts_hyphens_underscores_and_digits() {
+        assert!(validate_window_name("web_2-worker").is_ok());
+    }
+
+    #[test]
+    fn validate_window_name_rejects_empty() {
+        assert!(matches!(
+            validate_window_name(""),
+            Err(SkulkError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_window_name_rejects_leading_hyphen() {
+        assert!(matches!(
+            validate_window_name("-k"),
+            Err(SkulkError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_window_name_rejects_too_long() {
+        assert!(matches!(
+            validate_window_name(&"w".repeat(101)),
+            Err(SkulkError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_window_name_rejects_tmux_target_separators() {
+        for bad in ["server.1", "other:server"] {
+            assert!(
+                matches!(validate_window_name(bad), Err(SkulkError::Validation(_))),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_window_name_rejects_shell_metacharacters() {
+        for bad in ["a'b", "a b", "$(id)", "a;b"] {
+            assert!(
+                matches!(validate_window_name(bad), Err(SkulkError::Validation(_))),
+                "{bad} should be rejected"
+            );
+        }
     }
 
     // ── validate_model tests ────────────────────────────────────────────

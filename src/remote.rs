@@ -35,6 +35,23 @@ pub(crate) fn resolve_agent_window(session: &str) -> String {
     )
 }
 
+/// tmux target for the window named exactly `window` in `session`. The `=`
+/// stops tmux from falling back to a prefix or pattern match. `window` must
+/// have passed [`crate::util::validate_window_name`].
+fn named_window_target(session: &str, window: &str) -> String {
+    format!("'{session}:={}'", shell_escape(window))
+}
+
+/// Shell assignment that stores the target to read in `$skulk_win`: the
+/// window named `window` when given, otherwise the harness window (see
+/// [`resolve_agent_window`]).
+pub(crate) fn resolve_window(session: &str, window: Option<&str>) -> String {
+    match window {
+        Some(w) => format!("skulk_win={}", named_window_target(session, w)),
+        None => resolve_agent_window(session),
+    }
+}
+
 /// Build the SSH command to kill a tmux session for an agent.
 fn kill_session_command(name: &str, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
@@ -1037,6 +1054,62 @@ mod tests {
             "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null \
              | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^')"
         );
+    }
+
+    #[test]
+    fn resolve_window_targets_the_named_window_exactly() {
+        assert_eq!(
+            resolve_window("skulk-my-task", Some("server")),
+            "skulk_win='skulk-my-task:=server'"
+        );
+    }
+
+    #[test]
+    fn resolve_window_without_a_name_resolves_the_agent_window() {
+        assert_eq!(
+            resolve_window("skulk-my-task", None),
+            resolve_agent_window("skulk-my-task")
+        );
+    }
+
+    // ── named windows on a private tmux server ─────────────────────
+
+    #[test]
+    fn resolved_named_window_reads_that_window_not_the_agent_one() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux new-window -d -t skulk-my-task -n server 'echo SERVER-LOG; exec cat'");
+        let resolve = resolve_window("skulk-my-task", Some("server"));
+
+        let log = tmux.sh_until(
+            &format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\""),
+            "SERVER-LOG",
+        );
+
+        assert!(log.contains("SERVER-LOG"), "server window: {log}");
+    }
+
+    #[test]
+    fn resolved_named_window_does_not_prefix_match() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux new-window -d -t skulk-my-task -n server cat");
+        let resolve = resolve_window("skulk-my-task", Some("serv"));
+
+        let output = tmux
+            .command(&format!(
+                "{resolve} && tmux capture-pane -p -t \"$skulk_win\""
+            ))
+            .output()
+            .expect("run sh");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("can't find window"), "stderr: {stderr}");
     }
 
     // ── resolve_agent_window on a private tmux server ──────────────

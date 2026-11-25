@@ -63,6 +63,23 @@ impl Agent {
     pub fn classify(&self, err: SkulkError) -> SkulkError {
         classify_agent_error(self.name(), err, &self.host)
     }
+
+    /// Like [`Agent::classify`], but a missing `window` in this agent's
+    /// session is reported as that window not being found, not the agent.
+    pub fn classify_window(&self, window: &str, err: SkulkError) -> SkulkError {
+        if let SkulkError::SshFailed(stderr) = &err
+            && stderr.to_lowercase().contains("can't find window")
+        {
+            return SkulkError::NotFound(format!(
+                "Window '{window}' not found in agent '{}'. List its windows with \
+                 `tmux list-windows -t {}` on {}.",
+                self.name(),
+                self.session_name(),
+                self.host
+            ));
+        }
+        self.classify(err)
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +119,31 @@ mod tests {
         let err = agent.classify(SkulkError::SshFailed(
             "can't find session: skulk-foo".into(),
         ));
+        assert!(matches!(err, SkulkError::NotFound(m) if m.contains("Agent 'foo' not found")));
+    }
+
+    #[test]
+    fn classify_window_reports_missing_window_as_window_not_found() {
+        let cfg = test_config();
+        let agent = Agent::resolve("foo", &cfg).expect("valid name");
+        let err = agent.classify_window(
+            "server",
+            SkulkError::SshFailed("can't find window: server".into()),
+        );
+        assert!(
+            matches!(&err, SkulkError::NotFound(m) if m.contains("Window 'server' not found in agent 'foo'")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_window_still_reports_missing_session_as_agent_not_found() {
+        let cfg = test_config();
+        let agent = Agent::resolve("foo", &cfg).expect("valid name");
+        let err = agent.classify_window(
+            "server",
+            SkulkError::SshFailed("can't find session: skulk-foo".into()),
+        );
         assert!(matches!(err, SkulkError::NotFound(m) if m.contains("Agent 'foo' not found")));
     }
 

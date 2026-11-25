@@ -9,7 +9,7 @@ use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::remote::{self, mark_busy_command};
 use crate::ssh::Ssh;
-use crate::util::shell_escape;
+use crate::util::{shell_escape, validate_window_name};
 
 /// Output format for `skulk diff`, mapped from the mutually-exclusive CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,19 +108,25 @@ pub(crate) fn git_log_command(name: &str, cfg: &Config) -> String {
 ///
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
 pub(crate) fn capture_pane_command(name: &str, cfg: &Config) -> String {
-    logs_command(name, None, cfg)
+    logs_command(name, None, None, cfg)
 }
 
 /// Build the SSH command to capture N lines of scrollback from an agent's tmux session.
 pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -> String {
-    logs_command(name, Some(lines), cfg)
+    logs_command(name, None, Some(lines), cfg)
 }
 
 /// Build the SSH command behind `skulk logs`: capture the agent's harness
-/// window with `lines` of scrollback (visible pane only when `None`).
-fn logs_command(name: &str, lines: Option<u32>, cfg: &Config) -> String {
+/// window, or the window named `window`, with `lines` of scrollback (visible
+/// pane only when `None`). `window` must have passed `validate_window_name`.
+pub(crate) fn logs_command(
+    name: &str,
+    window: Option<&str>,
+    lines: Option<u32>,
+    cfg: &Config,
+) -> String {
     let session = AgentRef::new(name, cfg).session_name();
-    let resolve = remote::resolve_agent_window(&session);
+    let resolve = remote::resolve_window(&session, window);
     let scrollback = lines.map_or_else(String::new, |n| format!(" -S -{n}"));
     format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\"{scrollback}")
 }
@@ -239,30 +245,54 @@ pub(crate) fn cmd_connect(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<()
 }
 
 /// View agent output: snapshot, deep snapshot (--lines), or follow mode (--follow).
+///
+/// Reads the agent's harness window, or the window named `window` (e.g. the
+/// `server` window an init hook opens) when given.
 pub(crate) fn cmd_logs(
     ssh: &impl Ssh,
     name: &str,
     follow: bool,
     lines: Option<u32>,
+    window: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
     let agent = Agent::resolve(name, cfg)?;
-    if follow {
-        return crate::commands::follow::cmd_logs_follow(ssh, &agent, cfg);
+    if let Some(w) = window {
+        validate_window_name(w)?;
     }
-    let cmd = match lines {
-        Some(n) => logs_snapshot_deep_command(name, n, cfg),
-        None => capture_pane_command(name, cfg),
-    };
-    let output = ssh.run(&cmd).map_err(|e| agent.classify(e))?;
+    if follow {
+        return crate::commands::follow::cmd_logs_follow(ssh, &agent, window, cfg);
+    }
+    let output = ssh
+        .run(&logs_command(name, window, lines, cfg))
+        .map_err(|e| classify_logs_error(&agent, window, e))?;
     match cfg.output_format {
-        OutputFormat::Json => emit_json(&serde_json::json!({
-            "agent": name,
-            "lines": output.lines().collect::<Vec<_>>(),
-        })),
+        OutputFormat::Json => {
+            let mut doc = serde_json::json!({
+                "agent": name,
+                "lines": output.lines().collect::<Vec<_>>(),
+            });
+            if let Some(w) = window {
+                doc["window"] = w.into();
+            }
+            emit_json(&doc);
+        }
         OutputFormat::Human => print!("{output}"),
     }
     Ok(())
+}
+
+/// Map a failed capture for `skulk logs` to the user-facing error, naming the
+/// window when a specific one was asked for.
+pub(crate) fn classify_logs_error(
+    agent: &Agent,
+    window: Option<&str>,
+    err: SkulkError,
+) -> SkulkError {
+    match window {
+        Some(w) => agent.classify_window(w, err),
+        None => agent.classify(err),
+    }
 }
 
 /// Archive an agent: kill its tmux session but leave the worktree and branch.
@@ -708,6 +738,67 @@ mod tests {
         assert!(!server.contains("MARK-SEND"), "server window: {server}");
     }
 
+    // ── logs --window / restart-window ─────────────────────────────
+
+    #[test]
+    fn logs_command_with_window_captures_that_window() {
+        let cfg = test_config();
+        assert_eq!(
+            logs_command("my-task", Some("server"), None, &cfg),
+            "skulk_win='skulk-my-task:=server' && tmux capture-pane -p -t \"$skulk_win\""
+        );
+    }
+
+    #[test]
+    fn logs_command_with_window_and_lines_captures_scrollback() {
+        let cfg = test_config();
+        assert_eq!(
+            logs_command("my-task", Some("server"), Some(300), &cfg),
+            "skulk_win='skulk-my-task:=server' && tmux capture-pane -p -t \"$skulk_win\" -S -300"
+        );
+    }
+
+    #[test]
+    fn cmd_logs_with_window_captures_the_named_window() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("Listening on 3000".into())]);
+
+        cmd_logs(&ssh, "test", false, Some(100), Some("server"), &cfg).expect("logs succeed");
+
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].contains("skulk_win='skulk-test:=server'") && calls[0].contains("-S -100"),
+            "got: {}",
+            calls[0]
+        );
+    }
+
+    #[test]
+    fn cmd_logs_returns_window_not_found_when_window_is_missing() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find window: server".into(),
+        ))]);
+
+        let result = cmd_logs(&ssh, "test", false, None, Some("server"), &cfg);
+
+        assert_err!(result, SkulkError::NotFound(msg) => {
+            assert!(msg.contains("Window 'server' not found in agent 'test'"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn cmd_logs_rejects_invalid_window_name_without_ssh() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]);
+
+        let result = cmd_logs(&ssh, "test", false, None, Some("a;b"), &cfg);
+
+        assert_err!(result, SkulkError::Validation(_) => {});
+        assert_eq!(ssh.calls(), Vec::<String>::new());
+    }
+
     #[test]
     fn send_command_marks_busy_before_typing() {
         let cfg = test_config();
@@ -765,14 +856,14 @@ mod tests {
     fn cmd_logs_snapshot_succeeds() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("line 1\nline 2\nline 3".into())]);
-        assert!(cmd_logs(&ssh, "test", false, None, &cfg).is_ok());
+        assert!(cmd_logs(&ssh, "test", false, None, None, &cfg).is_ok());
     }
 
     #[test]
     fn cmd_logs_deep_snapshot_succeeds() {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![Ok("scrollback line 1\nscrollback line 2".into())]);
-        assert!(cmd_logs(&ssh, "test", false, Some(500), &cfg).is_ok());
+        assert!(cmd_logs(&ssh, "test", false, Some(500), None, &cfg).is_ok());
     }
 
     #[test]
@@ -781,7 +872,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find session: skulk-nope".into(),
         ))]);
-        let result = cmd_logs(&ssh, "nope", false, None, &cfg);
+        let result = cmd_logs(&ssh, "nope", false, None, None, &cfg);
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("nope"));
         });
@@ -793,7 +884,7 @@ mod tests {
         let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
             "can't find pane: skulk-missing".into(),
         ))]);
-        let result = cmd_logs(&ssh, "missing", false, None, &cfg);
+        let result = cmd_logs(&ssh, "missing", false, None, None, &cfg);
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("missing"));
         });
@@ -1113,7 +1204,7 @@ mod tests {
         let mut cfg = test_config();
         cfg.output_format = OutputFormat::Human;
         let ssh = MockSsh::new(vec![Ok("line 1\nline 2\nline 3".into())]);
-        assert!(cmd_logs(&ssh, "test", false, None, &cfg).is_ok());
+        assert!(cmd_logs(&ssh, "test", false, None, None, &cfg).is_ok());
     }
 
     // ── diff JSON mode ──────────────────────────────────────────────────────

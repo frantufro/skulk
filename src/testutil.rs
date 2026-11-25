@@ -549,7 +549,8 @@ impl PrivateTmux {
         stdout
     }
 
-    fn command(&self, script: &str) -> std::process::Command {
+    /// `sh -c script` against this server, for tests that inspect a failure.
+    pub(crate) fn command(&self, script: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", script])
             .env("TMUX_TMPDIR", &self.dir)
