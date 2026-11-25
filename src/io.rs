@@ -21,7 +21,7 @@ use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::config::{self, OutputFormat, load_config, load_explicit_config};
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_ssh_error};
-use crate::ssh::Ssh;
+use crate::ssh::{LineStream, Ssh, StreamRecv};
 use crate::util::{confirm_from_reader, shell_escape};
 use crate::{Cli, Commands, run};
 
@@ -125,6 +125,83 @@ impl Ssh for RealSsh {
                 SkulkError::SshExec(e.to_string())
             }
         })
+    }
+
+    /// Spawn `cmd` with stdout piped and hand back its lines as they arrive.
+    ///
+    /// Remote hosts get SSH keepalives, so a dead link closes the stream
+    /// instead of hanging; `skulk events` also times out on missing frames.
+    fn stream(&self, cmd: &str) -> Result<Box<dyn LineStream>, SkulkError> {
+        let local = is_localhost(&self.host);
+        let mut command = if local {
+            let mut c = ProcessCommand::new("sh");
+            c.args(["-c", cmd]);
+            c
+        } else {
+            let mut c = ProcessCommand::new("ssh");
+            c.args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=3",
+                &self.host,
+                cmd,
+            ]);
+            c
+        };
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if !local && e.kind() == std::io::ErrorKind::NotFound {
+                    SkulkError::Diagnostic {
+                        message: "ssh command not found.".into(),
+                        suggestion: "Install OpenSSH.".into(),
+                    }
+                } else {
+                    SkulkError::SshExec(e.to_string())
+                }
+            })?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| SkulkError::SshExec("stream stdout was not captured".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SkulkError::SshExec("stream stderr was not captured".into()))?;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        });
+
+        Ok(Box::new(ChildStream {
+            child,
+            lines: rx,
+            stderr: Some(stderr_reader),
+            host: self.host.clone(),
+            local,
+        }))
     }
 
     fn upload_file(&self, local_path: &Path, remote_path: &str) -> Result<(), SkulkError> {
@@ -447,6 +524,62 @@ fn run_init() -> Result<InitOutcome, SkulkError> {
     eprintln!("{}", init::success_message(color));
 
     Ok(InitOutcome::Done)
+}
+
+/// Stdout of a child process started by [`RealSsh::stream`].
+struct ChildStream {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    stderr: Option<std::thread::JoinHandle<String>>,
+    host: String,
+    local: bool,
+}
+
+impl ChildStream {
+    /// Reap the child and turn its exit status and stderr into an error.
+    fn close_reason(&mut self) -> SkulkError {
+        let status = self
+            .child
+            .wait()
+            .map_or_else(|e| format!("wait failed: {e}"), |s| s.to_string());
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            let what = if self.local {
+                "Remote watcher".to_string()
+            } else {
+                format!("Connection to {}", self.host)
+            };
+            SkulkError::SshFailed(format!("{what} closed ({status})"))
+        } else if self.local {
+            SkulkError::SshFailed(stderr.to_string())
+        } else {
+            classify_ssh_error(stderr, &self.host)
+        }
+    }
+}
+
+impl LineStream for ChildStream {
+    fn recv(&mut self, timeout: std::time::Duration) -> StreamRecv {
+        match self.lines.recv_timeout(timeout) {
+            Ok(line) => StreamRecv::Line(line),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StreamRecv::Timeout,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                StreamRecv::Closed(self.close_reason())
+            }
+        }
+    }
+}
+
+impl Drop for ChildStream {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────

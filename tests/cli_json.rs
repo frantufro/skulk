@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -642,4 +643,133 @@ fn put_refuses_default_destination_when_tmp_is_symlinked_outside() {
         0,
         "nothing written outside the worktree"
     );
+}
+
+// ── events ──────────────────────────────────────────────────────────────
+
+/// A running `skulk --json events` whose stdout lines arrive on a channel.
+/// Dropping it ends the watcher and then skulk.
+struct EventStream {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl EventStream {
+    fn start(project: &Project) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_skulk"))
+            .args(["--json", "--config", path(&project.root), "events"])
+            .current_dir(std::env::temp_dir())
+            .env("SKULK_NO_UPDATE_CHECK", "1")
+            .env("HOME", project.home())
+            .env("SHELL", "/bin/sh")
+            .env("TMUX_TMPDIR", project.root.join("tmux"))
+            .env_remove("TMUX")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn skulk events");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { child, lines }
+    }
+
+    /// The next line whose `type` is `kind`, waiting at most `within`.
+    fn next_of_type(&self, kind: &str, within: Duration) -> serde_json::Value {
+        let deadline = Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = self
+                .lines
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no {kind} line within {within:?}"));
+            let value: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+            assert_eq!(value["v"], 1, "missing schema version: {value}");
+            if value["type"] == kind {
+                return value;
+            }
+        }
+    }
+
+    /// Kill the processes skulk started: its connection to the "remote".
+    fn drop_connection(&self) {
+        let out = Command::new("pkill")
+            .args(["-P", &self.child.id().to_string()])
+            .output()
+            .expect("run pkill");
+        assert!(out.status.success(), "no watcher process to kill");
+    }
+
+    /// Wait up to `within` for skulk to exit.
+    fn wait_exit(&mut self, within: Duration) -> std::process::ExitStatus {
+        let deadline = Instant::now() + within;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("poll skulk") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "skulk did not exit within {within:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for EventStream {
+    fn drop(&mut self) {
+        let _ = Command::new("pkill")
+            .args(["-P", &self.child.id().to_string()])
+            .output();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn write_marker(project: &Project, session: &str, contents: &str) {
+    let dir = project.home().join(".skulk/state");
+    std::fs::create_dir_all(&dir).expect("create state dir");
+    std::fs::write(dir.join(session), contents).expect("write marker");
+}
+
+#[test]
+fn events_reports_an_idle_state_change_within_two_seconds() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    project.stage_running_agent("busy-one");
+    write_marker(&project, "skulk-busy-one", "busy");
+    let events = EventStream::start(&project);
+    let snapshot = events.next_of_type("snapshot", Duration::from_secs(10));
+    assert_eq!(snapshot["agents"][0]["state"], "working", "{snapshot}");
+
+    write_marker(&project, "skulk-busy-one", "idle");
+    let change = events.next_of_type("idle_state", Duration::from_secs(2));
+
+    assert_eq!(change["agent"], "busy-one", "{change}");
+    assert_eq!(change["from"], "working", "{change}");
+    assert_eq!(change["to"], "idle", "{change}");
+}
+
+#[test]
+fn events_exits_non_zero_when_the_connection_drops() {
+    let project = Project::with_base_clone();
+    let mut events = EventStream::start(&project);
+    events.next_of_type("snapshot", Duration::from_secs(10));
+
+    events.drop_connection();
+    let status = events.wait_exit(Duration::from_secs(5));
+
+    assert!(!status.success(), "expected a non-zero exit, got {status}");
 }

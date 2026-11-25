@@ -212,6 +212,7 @@ skulk gc --dry-run
 | `skulk status <name>` | Detailed single-agent view: status, commits ahead, files changed, uptime |
 | `skulk logs <name>` | View an agent's terminal output (`-f` to follow, `-l` for scrollback, `-w <window>` for another window of its session) |
 | `skulk wait <name>` | Block until the agent is idle (`--all` for all agents, `--timeout <secs>` to cap the wait) |
+| `skulk events` | Stream fleet changes over one SSH session until the connection drops (see [`skulk events`](#streaming-events-skulk-events)) |
 | **Interact** | |
 | `skulk connect <name>` | Attach to an agent's live tmux session |
 | `skulk disconnect <name>` | Detach all clients from an agent's session |
@@ -455,9 +456,9 @@ object on stderr:
 ```
 
 `code` is one of `validation`, `not_found`, `ssh_exec`, `ssh_failed`,
-`diagnostic`, `update_failed`, `config` (the config file could not be found
-or loaded), or `json_serialization` (a result could not be encoded; it never
-reaches stdout).
+`diagnostic`, `update_failed`, `output` (writing to stdout failed), `config`
+(the config file could not be found or loaded), or `json_serialization` (a
+result could not be encoded; it never reaches stdout).
 
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
@@ -480,6 +481,35 @@ to answer the confirmation prompt. If they leave anything behind, they fail
 with a `diagnostic` error naming what is left. A `wait` that times out is
 the one failure reported on stdout: `{"ok": false, "reason": "timeout", ...}`
 with exit code 1.
+
+### Streaming events (`skulk events`)
+
+`skulk --json events` runs until the connection drops and prints one JSON
+object per line. It holds a single SSH session, in which a remote loop checks
+tmux, the worktrees and the Stop/`UserPromptSubmit` marker files every second
+(or as soon as a marker changes, when `inotifywait` is installed).
+
+```json
+{"v":1,"ts":"2026-11-24T10:31:02Z","type":"snapshot","agents":[{"name":"fix-bug","state":"working","url":null}]}
+{"v":1,"ts":"2026-11-24T10:33:40Z","type":"idle_state","agent":"fix-bug","from":"working","to":"idle","url":null}
+{"v":1,"ts":"2026-11-24T10:35:12Z","type":"agent.created","agent":"auth-refactor","state":"working","url":null}
+{"v":1,"ts":"2026-11-24T10:50:00Z","type":"agent.gone","agent":"explore","reason":"archived"}
+{"v":1,"ts":"2026-11-24T10:50:30Z","type":"heartbeat"}
+```
+
+- `snapshot` comes first and lists every agent, archived ones as `stopped`.
+- `state` is `working`, `idle` or `stopped`. `url` is the app URL from
+  `url_file`, or `null`.
+- `agent.gone` has `reason` `archived` (by `skulk archive`), `crashed` (the
+  session ended without an archive; reported after a 3s grace), or
+  `destroyed` (the worktree is gone). Restarting an archived or crashed
+  agent shows up as `idle_state` from `stopped`.
+- `heartbeat` arrives every 30s.
+
+When the connection closes, or nothing arrives from the remote for 20s, skulk
+prints an error object on stderr and exits non-zero, so a supervisor can
+restart it. Without `--json`, it prints the same changes as plain text and
+skips heartbeats.
 
 > **Breaking change in the `v: 1` contract:** `list` used to print a bare JSON
 > array. It now prints `{"v": 1, "agents": [...]}`. Read `.agents` instead of

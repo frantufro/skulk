@@ -30,3 +30,20 @@ impl Timings {
         }
     }
 }
+
+/// Wall-clock source, injectable so stream timing is testable.
+pub(crate) trait Clock {
+    /// Milliseconds since the Unix epoch.
+    fn now_ms(&self) -> u64;
+}
+
+/// The system clock.
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+}
