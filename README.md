@@ -455,14 +455,19 @@ or loaded).
 | `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch}` |
 | `restart` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control` |
 | `archive` | `ok`, `agent`, `branch`, `worktree`, `reason`, `warnings` |
+| `destroy` | `ok`, `agent`, `cleaned`: list of `session` / `worktree` / `branch` |
+| `destroy-all` | `ok`, `agents`: names of the destroyed agents |
 | `push` | `ok`, `agent`, `branch`, `remote`, `output` |
 | `pull` | `ok`, `base_path`, `branch`, `force`, `output` |
 | `ship` | `ok`, `agent`, `pr_url` |
 | `wait` | `ok`, `agent`, `status`, or `reason` on timeout |
 | `status`, `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
 
-A `wait` that times out is the one failure reported on stdout:
-`{"ok": false, "reason": "timeout", ...}` with exit code 1.
+`destroy` and `destroy-all` need `--force` with `--json`, since nobody is there
+to answer the confirmation prompt. If they leave anything behind, they fail
+with a `diagnostic` error naming what is left. A `wait` that times out is
+the one failure reported on stdout: `{"ok": false, "reason": "timeout", ...}`
+with exit code 1.
 
 > **Breaking change in the `v: 1` contract:** `list` used to print a bare JSON
 > array. It now prints `{"v": 1, "agents": [...]}`. Read `.agents` instead of
