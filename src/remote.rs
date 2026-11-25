@@ -18,6 +18,23 @@ use crate::util::shell_escape;
 /// harness time to start.
 pub(crate) const STARTUP_DELAY: u32 = 5;
 
+/// Name of the tmux window the harness runs in. Other windows in the session
+/// (e.g. the `server` window an init hook opens) can become the active one, so
+/// everything that types into or reads the harness targets this window rather
+/// than the bare session.
+const AGENT_WINDOW: &str = "agent";
+
+/// Shell assignment that stores the harness window of a running session in
+/// `$skulk_win`: `<session>:agent` when that window exists, otherwise
+/// `<session>:^`, the lowest-numbered window, for sessions created before the
+/// window was named (this works with any `base-index`). `^` needs tmux 3.x.
+pub(crate) fn resolve_agent_window(session: &str) -> String {
+    format!(
+        "skulk_win=$(tmux list-windows -t {session} -F '#{{window_name}}' 2>/dev/null \
+         | grep -qx {AGENT_WINDOW} && echo {session}:{AGENT_WINDOW} || echo '{session}:^')"
+    )
+}
+
 /// Build the SSH command to kill a tmux session for an agent.
 fn kill_session_command(name: &str, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
@@ -500,8 +517,8 @@ fn create_tmux_command(
     let sequence = build_launch_sequence(name, cfg, remote_control, model, claude_args);
     let escaped = shell_escape(&sequence);
     format!(
-        "tmux new-session -d -s {session} -c {worktree} && \
-         tmux send-keys -t {session} '{escaped}' C-m"
+        "tmux new-session -d -s {session} -n {AGENT_WINDOW} -c {worktree} && \
+         tmux send-keys -t {session}:{AGENT_WINDOW} '{escaped}' C-m"
     )
 }
 
@@ -572,9 +589,9 @@ fn send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
         "sleep {STARTUP_DELAY} && tmux has-session -t {session_name} && \
          {mark_busy} && \
          tmux set-buffer -b {buffer} -- '{escaped}' && \
-         tmux paste-buffer -p -d -t {session_name} -b {buffer} && \
+         tmux paste-buffer -p -d -t {session_name}:{AGENT_WINDOW} -b {buffer} && \
          sleep 0.1 && \
-         tmux send-keys -t {session_name} Enter"
+         tmux send-keys -t {session_name}:{AGENT_WINDOW} Enter"
     )
 }
 
@@ -980,6 +997,46 @@ mod tests {
         assert!(cmd.contains("--remote-control skulk-my-task"));
         assert!(cmd.contains("--model sonnet"));
         assert!(cmd.contains("--verbose"));
+    }
+
+    // ── agent window targeting ─────────────────────────────────────
+
+    #[test]
+    fn create_tmux_command_names_the_agent_window() {
+        let cfg = test_config();
+        let cmd = create_tmux_command("my-task", &cfg, false, None, None);
+        assert!(
+            cmd.contains("tmux new-session -d -s skulk-my-task -n agent "),
+            "new-session must name the harness window, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn create_tmux_command_launches_in_the_agent_window() {
+        let cfg = test_config();
+        let cmd = create_tmux_command("my-task", &cfg, false, None, None);
+        assert!(
+            cmd.contains("tmux send-keys -t skulk-my-task:agent '"),
+            "launch must target the agent window, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn send_prompt_command_pastes_and_submits_to_the_agent_window() {
+        let cfg = test_config();
+        let cmd = send_prompt_command("my-task", "fix the bug", &cfg);
+        assert!(cmd.contains("tmux paste-buffer -p -d -t skulk-my-task:agent "));
+        assert!(cmd.contains("tmux send-keys -t skulk-my-task:agent Enter"));
+    }
+
+    #[test]
+    fn resolve_agent_window_prefers_the_named_window() {
+        let snippet = resolve_agent_window("skulk-my-task");
+        assert_eq!(
+            snippet,
+            "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null \
+             | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^')"
+        );
     }
 
     #[test]

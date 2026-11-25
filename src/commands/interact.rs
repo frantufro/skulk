@@ -52,7 +52,8 @@ pub(crate) fn resolve_send_prompt(
 /// Build the SSH command to attach to an agent's live tmux session.
 pub(crate) fn connect_command(name: &str, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
-    format!("tmux attach-session -t {}", agent.session_name())
+    let resolve = remote::resolve_agent_window(&agent.session_name());
+    format!("{resolve} && tmux attach-session -t \"$skulk_win\"")
 }
 
 /// Build the SSH command to detach all clients from an agent's tmux session.
@@ -103,16 +104,15 @@ pub(crate) fn git_log_command(name: &str, cfg: &Config) -> String {
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
 pub(crate) fn capture_pane_command(name: &str, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
-    format!("tmux capture-pane -p -t {}", agent.session_name())
+    let resolve = remote::resolve_agent_window(&agent.session_name());
+    format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\"")
 }
 
 /// Build the SSH command to capture N lines of scrollback from an agent's tmux session.
 pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
-    format!(
-        "tmux capture-pane -p -t {} -S -{lines}",
-        agent.session_name()
-    )
+    let resolve = remote::resolve_agent_window(&agent.session_name());
+    format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\" -S -{lines}")
 }
 
 /// Build the SSH command to write an archive reason sidecar file.
@@ -144,11 +144,12 @@ pub(crate) fn send_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let escaped = shell_escape(prompt);
     let session_name = AgentRef::new(name, cfg).session_name();
     let mark_busy = mark_busy_command(&session_name);
+    let resolve = remote::resolve_agent_window(&session_name);
     format!(
-        "{mark_busy} && \
-         tmux send-keys -t {session_name} '{escaped}' && \
+        "{mark_busy} && {resolve} && \
+         tmux send-keys -t \"$skulk_win\" '{escaped}' && \
          sleep 0.1 && \
-         tmux send-keys -t {session_name} Enter"
+         tmux send-keys -t \"$skulk_win\" Enter"
     )
 }
 
@@ -359,13 +360,20 @@ pub(crate) fn cmd_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::resolve_agent_window;
     use crate::testutil::{MockSsh, assert_err, ssh_err, ssh_ok, test_config};
 
     #[test]
     fn connect_command_generates_tmux_attach() {
         let cfg = test_config();
         let cmd = connect_command("my-task", &cfg);
-        assert_eq!(cmd, "tmux attach-session -t skulk-my-task");
+        assert_eq!(
+            cmd,
+            format!(
+                "{} && tmux attach-session -t \"$skulk_win\"",
+                resolve_agent_window("skulk-my-task")
+            )
+        );
     }
 
     #[test]
@@ -619,7 +627,13 @@ mod tests {
     fn capture_pane_command_generates_capture() {
         let cfg = test_config();
         let cmd = capture_pane_command("my-task", &cfg);
-        assert_eq!(cmd, "tmux capture-pane -p -t skulk-my-task");
+        assert_eq!(
+            cmd,
+            format!(
+                "{} && tmux capture-pane -p -t \"$skulk_win\"",
+                resolve_agent_window("skulk-my-task")
+            )
+        );
     }
 
     #[test]
@@ -633,7 +647,13 @@ mod tests {
     fn logs_snapshot_deep_command_generates_capture_with_scrollback() {
         let cfg = test_config();
         let cmd = logs_snapshot_deep_command("my-task", 500, &cfg);
-        assert_eq!(cmd, "tmux capture-pane -p -t skulk-my-task -S -500");
+        assert_eq!(
+            cmd,
+            format!(
+                "{} && tmux capture-pane -p -t \"$skulk_win\" -S -500",
+                resolve_agent_window("skulk-my-task")
+            )
+        );
     }
 
     #[test]
@@ -654,8 +674,9 @@ mod tests {
     fn send_command_types_prompt_then_submits() {
         let cfg = test_config();
         let cmd = send_command("my-task", "fix the bug", &cfg);
-        assert!(cmd.contains("tmux send-keys -t skulk-my-task 'fix the bug'"));
-        assert!(cmd.contains("tmux send-keys -t skulk-my-task Enter"));
+        assert!(cmd.contains(&resolve_agent_window("skulk-my-task")));
+        assert!(cmd.contains("tmux send-keys -t \"$skulk_win\" 'fix the bug'"));
+        assert!(cmd.contains("tmux send-keys -t \"$skulk_win\" Enter"));
     }
 
     #[test]
