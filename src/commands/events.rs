@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::commands::list::{WORKTREES_FAILED, agent_state_probe, parse_agent_sessions};
+use crate::commands::list::{
+    WORKTREES_FAILED, agent_state_probe, idle_since_json, parse_agent_sessions,
+};
 use crate::config::{Config, OutputFormat};
 use crate::display::render_json;
 use crate::error::SkulkError;
@@ -110,6 +112,8 @@ pub(crate) struct AgentView {
     pub url: Option<String>,
     /// tmux `session_created` epoch; 0 when there is no session.
     pub created: i64,
+    /// Epoch mtime of the idle marker, set only while the state is `Idle`.
+    pub idle_since: Option<i64>,
 }
 
 /// The fleet as one remote frame describes it, keyed by agent name.
@@ -142,6 +146,7 @@ pub(crate) fn parse_frame(raw: &str, cfg: &Config) -> Option<Frame> {
                 state: IdleState::from_agent_state(s.state),
                 url: s.url,
                 created: s.created,
+                idle_since: s.idle_since,
             };
             (short(&s.name), view)
         })
@@ -192,6 +197,7 @@ pub(crate) enum Event {
         from: IdleState,
         to: IdleState,
         url: Option<String>,
+        idle_since: Option<i64>,
     },
     Created {
         agent: String,
@@ -362,6 +368,7 @@ fn transition(
                 from,
                 to,
                 url: next.url.clone(),
+                idle_since: next.idle_since,
             })
         }
     }
@@ -374,7 +381,12 @@ pub(crate) fn event_json(event: &Event, ts: &str) -> Value {
             let agents: Vec<Value> = agents
                 .iter()
                 .map(|(name, view)| {
-                    json!({ "name": name, "state": view.state.as_str(), "url": view.url })
+                    json!({
+                        "name": name,
+                        "state": view.state.as_str(),
+                        "url": view.url,
+                        "idle_since": idle_since_json(view.idle_since),
+                    })
                 })
                 .collect();
             json!({ "ts": ts, "type": "snapshot", "agents": agents })
@@ -384,6 +396,7 @@ pub(crate) fn event_json(event: &Event, ts: &str) -> Value {
             from,
             to,
             url,
+            idle_since,
         } => json!({
             "ts": ts,
             "type": "idle_state",
@@ -391,6 +404,7 @@ pub(crate) fn event_json(event: &Event, ts: &str) -> Value {
             "from": from.as_str(),
             "to": to.as_str(),
             "url": url,
+            "idle_since": idle_since_json(*idle_since),
         }),
         Event::Created { agent, state, url } => json!({
             "ts": ts,
@@ -430,6 +444,7 @@ pub(crate) fn event_human(event: &Event, ts: &str) -> Option<String> {
             from,
             to,
             url,
+            ..
         } => format!(
             "{ts} {agent}: {} -> {}{}",
             from.as_str(),
@@ -895,6 +910,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_frame_reads_idle_since_only_for_idle_agents() {
+        let f = frame(
+            &[
+                A {
+                    marker: Some("idle 1500"),
+                    ..working("a")
+                },
+                A {
+                    marker: Some("busy 1500"),
+                    ..working("b")
+                },
+                A {
+                    marker: None,
+                    ..working("c")
+                },
+            ],
+            &[],
+        );
+
+        assert_eq!(f.agents["a"].idle_since, Some(1_500));
+        assert_eq!(f.agents["b"].idle_since, None);
+        assert_eq!(f.agents["c"].idle_since, None);
+    }
+
+    #[test]
     fn parse_frame_rejects_a_frame_whose_worktree_listing_failed() {
         assert!(parse_frame(&failed_frame_text(), &test_config()).is_none());
     }
@@ -944,6 +984,32 @@ mod tests {
                 from: IdleState::Working,
                 to: IdleState::Idle,
                 url: Some("http://x".into()),
+                idle_since: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_reports_idle_since_with_an_idle_state_change() {
+        let (mut fleet, _) = Fleet::start(&frame(&[working("a")], &[]));
+        let next = frame(
+            &[A {
+                marker: Some("idle 1500"),
+                ..working("a")
+            }],
+            &[],
+        );
+
+        let events = fleet.apply(&next, 0);
+
+        assert_eq!(
+            events,
+            vec![Event::IdleState {
+                agent: "a".into(),
+                from: IdleState::Working,
+                to: IdleState::Idle,
+                url: None,
+                idle_since: Some(1_500),
             }]
         );
     }
@@ -1166,6 +1232,7 @@ mod tests {
                 from: IdleState::Stopped,
                 to: IdleState::Working,
                 url: None,
+                idle_since: None,
             }]
         );
     }
@@ -1177,19 +1244,32 @@ mod tests {
         let ts = "2026-11-24T10:33:40Z";
         let line = |e: &Event| parse(&render_json(&event_json(e, ts)).unwrap());
 
-        let snapshot = line(&Event::Snapshot(vec![(
-            "fix-bug".into(),
-            AgentView {
-                state: IdleState::Working,
-                url: Some("http://h:1".into()),
-                created: 1,
-            },
-        )]));
+        let snapshot = line(&Event::Snapshot(vec![
+            (
+                "fix-bug".into(),
+                AgentView {
+                    state: IdleState::Working,
+                    url: Some("http://h:1".into()),
+                    created: 1,
+                    idle_since: None,
+                },
+            ),
+            (
+                "auth".into(),
+                AgentView {
+                    state: IdleState::Idle,
+                    url: None,
+                    created: 1,
+                    idle_since: Some(1_795_516_262),
+                },
+            ),
+        ]));
         let change = line(&Event::IdleState {
             agent: "fix-bug".into(),
             from: IdleState::Working,
             to: IdleState::Idle,
             url: None,
+            idle_since: Some(1_795_516_262),
         });
         let created = line(&Event::Created {
             agent: "auth".into(),
@@ -1204,11 +1284,11 @@ mod tests {
 
         assert_eq!(
             snapshot,
-            json!({"v":1,"ts":ts,"type":"snapshot","agents":[{"name":"fix-bug","state":"working","url":"http://h:1"}]})
+            json!({"v":1,"ts":ts,"type":"snapshot","agents":[{"name":"fix-bug","state":"working","url":"http://h:1","idle_since":null},{"name":"auth","state":"idle","url":null,"idle_since":"2026-11-24T10:31:02Z"}]})
         );
         assert_eq!(
             change,
-            json!({"v":1,"ts":ts,"type":"idle_state","agent":"fix-bug","from":"working","to":"idle","url":null})
+            json!({"v":1,"ts":ts,"type":"idle_state","agent":"fix-bug","from":"working","to":"idle","url":null,"idle_since":"2026-11-24T10:31:02Z"})
         );
         assert_eq!(
             created,
@@ -1229,6 +1309,7 @@ mod tests {
             from: IdleState::Working,
             to: IdleState::Idle,
             url: Some("http://x".into()),
+            idle_since: None,
         };
         let gone = Event::Gone {
             agent: "a".into(),
