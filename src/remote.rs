@@ -59,13 +59,31 @@ pub(crate) fn resolve_window(session: &str, window: Option<&str>) -> String {
 /// command the window was created with again, so the window must have been
 /// opened with its command (`tmux new-window -n server 'bin/dev'`), not as a
 /// shell that was then typed into.
+///
+/// The respawn is refused on the remote, with [`AGENT_WINDOW_REFUSAL`] on
+/// stderr, when the target is the window the harness runs in as
+/// [`resolve_agent_window`] picks it. In a session created before the
+/// harness window was named, that is the first window, whatever its name.
+/// `list-panes` is used for the lookup because, unlike `display-message`, it
+/// fails on a missing window instead of falling back to the current one; it
+/// prints the window id once per pane, so equal output means the same window.
 fn respawn_window_command(name: &str, window: &str, cfg: &Config) -> String {
     let session = AgentRef::new(name, cfg).session_name();
+    let resolve = resolve_agent_window(&session);
+    let target = named_window_target(&session, window);
     format!(
-        "tmux respawn-window -k -t {}",
-        named_window_target(&session, window)
+        "{resolve} && \
+         skulk_agent_id=$(tmux list-panes -t \"$skulk_win\" -F '#{{window_id}}') && \
+         skulk_target_id=$(tmux list-panes -t {target} -F '#{{window_id}}') && \
+         if [ \"$skulk_agent_id\" = \"$skulk_target_id\" ]; then \
+         echo '{AGENT_WINDOW_REFUSAL}' >&2; exit 1; fi && \
+         tmux respawn-window -k -t {target}"
     )
 }
+
+/// What the remote prints when `restart-window` targets the harness window.
+pub(crate) const AGENT_WINDOW_REFUSAL: &str =
+    "skulk: refusing to restart the window the agent runs in";
 
 /// Build the SSH command to kill a tmux session for an agent.
 fn kill_session_command(name: &str, cfg: &Config) -> String {
@@ -1100,11 +1118,20 @@ mod tests {
     }
 
     #[test]
-    fn respawn_window_command_kills_and_respawns_the_named_window() {
+    fn respawn_window_command_checks_the_agent_window_before_respawning() {
         let cfg = test_config();
-        assert_eq!(
-            respawn_window_command("my-task", "server", &cfg),
-            "tmux respawn-window -k -t skulk-my-task:=server"
+        let cmd = respawn_window_command("my-task", "server", &cfg);
+        let resolve = resolve_agent_window("skulk-my-task");
+        assert!(cmd.starts_with(&resolve), "got: {cmd}");
+        let check = cmd
+            .find(AGENT_WINDOW_REFUSAL)
+            .expect("refusal check missing");
+        let respawn = cmd
+            .find("tmux respawn-window -k -t skulk-my-task:=server")
+            .expect("respawn missing");
+        assert!(
+            check < respawn,
+            "the check must run before the respawn: {cmd}"
         );
     }
 
@@ -1115,8 +1142,64 @@ mod tests {
         respawn_window(&ssh, "my-task", "server", &cfg).expect("respawn succeeds");
         assert_eq!(
             ssh.calls(),
-            vec!["tmux respawn-window -k -t skulk-my-task:=server".to_string()]
+            vec![respawn_window_command("my-task", "server", &cfg)]
         );
+    }
+
+    #[test]
+    fn respawn_window_refuses_the_first_window_of_a_session_without_an_agent_window() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n claude cat && \
+             tmux new-window -d -t skulk-my-task -n server cat");
+        let pid = tmux.sh("tmux display-message -p -t skulk-my-task:=claude '#{pane_pid}'");
+        let cfg = test_config();
+
+        let output = tmux
+            .command(&respawn_window_command("my-task", "claude", &cfg))
+            .output()
+            .expect("run sh");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(AGENT_WINDOW_REFUSAL), "stderr: {stderr}");
+        let pid_after = tmux.sh("tmux display-message -p -t skulk-my-task:=claude '#{pane_pid}'");
+        assert_eq!(pid, pid_after, "the harness window must not be respawned");
+    }
+
+    #[test]
+    fn respawn_window_still_restarts_other_windows_of_a_session_without_an_agent_window() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n claude cat && \
+             tmux new-window -d -t skulk-my-task -n server cat");
+        let pid = tmux.sh("tmux display-message -p -t skulk-my-task:=server '#{pane_pid}'");
+        let cfg = test_config();
+
+        tmux.sh(&respawn_window_command("my-task", "server", &cfg));
+
+        let pid_after = tmux.sh("tmux display-message -p -t skulk-my-task:=server '#{pane_pid}'");
+        assert_ne!(pid, pid_after, "the server window must be respawned");
+    }
+
+    #[test]
+    fn respawn_window_reports_a_missing_window() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat");
+        let cfg = test_config();
+
+        let output = tmux
+            .command(&respawn_window_command("my-task", "server", &cfg))
+            .output()
+            .expect("run sh");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("can't find window"), "stderr: {stderr}");
     }
 
     // ── named windows on a private tmux server ─────────────────────

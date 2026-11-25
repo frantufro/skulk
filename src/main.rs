@@ -1034,9 +1034,12 @@ mod tests {
 
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
 
-        assert_eq!(
-            ssh.calls(),
-            vec!["tmux respawn-window -k -t skulk-test:=server".to_string()]
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].ends_with("tmux respawn-window -k -t skulk-test:=server"),
+            "got: {}",
+            calls[0]
         );
     }
 
