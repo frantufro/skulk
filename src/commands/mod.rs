@@ -3,6 +3,7 @@ pub(crate) mod destroy;
 pub(crate) mod doctor;
 pub(crate) mod download;
 pub(crate) mod events;
+pub(crate) mod exec;
 pub(crate) mod follow;
 pub(crate) mod gc;
 pub(crate) mod get;

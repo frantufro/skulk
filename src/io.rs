@@ -686,6 +686,9 @@ pub(crate) fn main() {
         &local,
         &crate::timings::Timings::production(),
     ) {
+        if let SkulkError::CommandExit(code) = e {
+            std::process::exit(code);
+        }
         if cfg.output_format == OutputFormat::Json {
             crate::display::emit_json_error(&format!("skulk {cmd}: {e}"), &e);
         } else {
