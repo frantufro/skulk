@@ -37,9 +37,10 @@ pub(crate) fn resolve_agent_window(session: &str) -> String {
 
 /// tmux target for the window named exactly `window` in `session`. The `=`
 /// stops tmux from falling back to a prefix or pattern match. `window` must
-/// have passed [`crate::util::validate_window_name`].
+/// have passed [`crate::util::validate_window_name`], which leaves nothing
+/// the shell would interpret, so it is interpolated as is.
 fn named_window_target(session: &str, window: &str) -> String {
-    format!("'{session}:={}'", shell_escape(window))
+    format!("{session}:={window}")
 }
 
 /// Shell assignment that stores the target to read in `$skulk_win`: the
@@ -1086,7 +1087,7 @@ mod tests {
     fn resolve_window_targets_the_named_window_exactly() {
         assert_eq!(
             resolve_window("skulk-my-task", Some("server")),
-            "skulk_win='skulk-my-task:=server'"
+            "skulk_win=skulk-my-task:=server"
         );
     }
 
@@ -1103,7 +1104,7 @@ mod tests {
         let cfg = test_config();
         assert_eq!(
             respawn_window_command("my-task", "server", &cfg),
-            "tmux respawn-window -k -t 'skulk-my-task:=server'"
+            "tmux respawn-window -k -t skulk-my-task:=server"
         );
     }
 
@@ -1114,7 +1115,7 @@ mod tests {
         respawn_window(&ssh, "my-task", "server", &cfg).expect("respawn succeeds");
         assert_eq!(
             ssh.calls(),
-            vec!["tmux respawn-window -k -t 'skulk-my-task:=server'".to_string()]
+            vec!["tmux respawn-window -k -t skulk-my-task:=server".to_string()]
         );
     }
 

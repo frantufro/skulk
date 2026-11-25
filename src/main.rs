@@ -1036,7 +1036,7 @@ mod tests {
 
         assert_eq!(
             ssh.calls(),
-            vec!["tmux respawn-window -k -t 'skulk-test:=server'".to_string()]
+            vec!["tmux respawn-window -k -t skulk-test:=server".to_string()]
         );
     }
 
