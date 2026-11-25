@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
-use crate::config::Config;
+use crate::config::{Config, OutputFormat};
+use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::remote;
@@ -21,6 +22,15 @@ impl Resource {
     fn label(self) -> &'static str {
         match self {
             Resource::Session => "tmux session",
+            Resource::Worktree => "worktree",
+            Resource::Branch => "branch",
+        }
+    }
+
+    /// Stable identifier used in JSON output.
+    fn key(self) -> &'static str {
+        match self {
+            Resource::Session => "session",
             Resource::Worktree => "worktree",
             Resource::Branch => "branch",
         }
@@ -76,6 +86,17 @@ pub(crate) fn partial_destroy_all_error(clean_count: usize, failed: &[&str]) -> 
     }
 }
 
+/// JSON mode has no one to answer the `[y/N]` prompt, so it must be skipped
+/// explicitly with `--force`.
+fn require_force_for_json(force: bool, cfg: &Config) -> Result<(), SkulkError> {
+    if cfg.output_format == OutputFormat::Json && !force {
+        return Err(SkulkError::Validation(
+            "--json requires --force: there is no confirmation prompt in JSON mode.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Destroy a specific agent (kills session, removes worktree, deletes branch).
 ///
 /// Uses shared inventory to probe what exists.
@@ -90,6 +111,7 @@ pub(crate) fn cmd_destroy(
     confirm: &dyn Fn(&str) -> bool,
 ) -> Result<(), SkulkError> {
     let agent = Agent::resolve(name, cfg)?;
+    require_force_for_json(force, cfg)?;
 
     // Fetch inventory via shared probe
     let inv = fetch_inventory(ssh, cfg)?;
@@ -134,7 +156,7 @@ pub(crate) fn cmd_destroy(
     let _ = remote::remove_state_file(ssh, name, cfg);
 
     let labels = |rs: &[Resource]| rs.iter().map(|r| r.label()).collect::<Vec<_>>();
-    if !outcome.cleaned.is_empty() {
+    if cfg.output_format == OutputFormat::Human && !outcome.cleaned.is_empty() {
         println!(
             "Destroyed agent '{name}' ({}).",
             labels(&outcome.cleaned).join(", ")
@@ -143,7 +165,20 @@ pub(crate) fn cmd_destroy(
     if !outcome.failed.is_empty() {
         return Err(partial_destroy_error(name, &labels(&outcome.failed)));
     }
+    if cfg.output_format == OutputFormat::Json {
+        emit_json(&json_destroy_result(name, &outcome));
+    }
     Ok(())
+}
+
+/// Build the JSON result for a `destroy` that removed everything it found.
+pub(crate) fn json_destroy_result(name: &str, outcome: &DestroyOutcome) -> serde_json::Value {
+    let cleaned: Vec<&str> = outcome.cleaned.iter().map(|r| r.key()).collect();
+    serde_json::json!({
+        "ok": true,
+        "agent": name,
+        "cleaned": cleaned,
+    })
 }
 
 /// Destroy all agents (sessions, worktrees, branches).
@@ -156,6 +191,7 @@ pub(crate) fn cmd_destroy_all(
     cfg: &Config,
     confirm: &dyn Fn(&str) -> bool,
 ) -> Result<(), SkulkError> {
+    require_force_for_json(force, cfg)?;
     let inv = fetch_inventory(ssh, cfg)?;
 
     // Build comprehensive agent name set. Inventory entries are prefix-filtered
@@ -173,8 +209,13 @@ pub(crate) fn cmd_destroy_all(
     let mut agent_names: Vec<String> = name_set.into_iter().collect();
     agent_names.sort();
 
+    let json = cfg.output_format == OutputFormat::Json;
     if agent_names.is_empty() {
-        println!("No agents to destroy.");
+        if json {
+            emit_json(&json_destroy_all_result(&[]));
+        } else {
+            println!("No agents to destroy.");
+        }
         return Ok(());
     }
 
@@ -187,8 +228,10 @@ pub(crate) fn cmd_destroy_all(
     for name in &agent_names {
         let agent = AgentRef::new(name, cfg);
         let session_name = agent.session_name();
-        print!("Destroying {session_name}... ");
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        if !json {
+            print!("Destroying {session_name}... ");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
 
         let mut step_failed = false;
         if inv.sessions.contains(&session_name) && remote::kill_session(ssh, name, cfg).is_err() {
@@ -208,14 +251,16 @@ pub(crate) fn cmd_destroy_all(
         // plumbing, not something worth surfacing in the summary.
         let _ = remote::remove_state_file(ssh, name, cfg);
 
-        println!(
-            "{}",
-            if step_failed {
-                "done (with warnings)"
-            } else {
-                "done"
-            }
-        );
+        if !json {
+            println!(
+                "{}",
+                if step_failed {
+                    "done (with warnings)"
+                } else {
+                    "done"
+                }
+            );
+        }
         if step_failed {
             failed.push(name);
         }
@@ -227,8 +272,20 @@ pub(crate) fn cmd_destroy_all(
             &failed,
         ));
     }
-    println!("Destroyed {} agent(s).", agent_names.len());
+    if json {
+        emit_json(&json_destroy_all_result(&agent_names));
+    } else {
+        println!("Destroyed {} agent(s).", agent_names.len());
+    }
     Ok(())
+}
+
+/// Build the JSON result for a `destroy-all` that removed every agent.
+pub(crate) fn json_destroy_all_result(agents: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "agents": agents,
+    })
 }
 
 #[cfg(test)]
@@ -236,7 +293,7 @@ mod tests {
     use super::*;
     use crate::testutil::{
         MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
-        ssh_err, ssh_ok, test_config,
+        ssh_err, ssh_ok, test_config, test_config_json,
     };
 
     // ── partial-failure messaging ──────────────────────────────────────
@@ -305,6 +362,78 @@ mod tests {
             "rm -f ~/.skulk/state/skulk-target",
             "last call should be the state-file rm, got: {calls:?}"
         );
+    }
+
+    #[test]
+    fn json_destroy_result_reports_cleaned_resources_by_key() {
+        let outcome = DestroyOutcome {
+            cleaned: vec![Resource::Session, Resource::Worktree, Resource::Branch],
+            failed: vec![],
+        };
+
+        let value = json_destroy_result("target", &outcome);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agent"], "target");
+        assert_eq!(
+            value["cleaned"],
+            serde_json::json!(["session", "worktree", "branch"])
+        );
+    }
+
+    #[test]
+    fn cmd_destroy_in_json_mode_requires_force_before_any_ssh() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![]);
+
+        let result = cmd_destroy(&ssh, "target", false, &cfg, &confirm_yes);
+
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("--force"), "{msg}");
+        });
+        assert_eq!(ssh.calls().len(), 0);
+    }
+
+    #[test]
+    fn cmd_destroy_in_json_mode_returns_error_when_a_step_fails() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_err("worktree failed"),
+            ssh_err("branch failed"),
+            ssh_ok(),
+        ]);
+
+        let result = cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes);
+
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert!(message.contains("worktree, branch"), "{message}");
+        });
+    }
+
+    #[test]
+    fn cmd_destroy_in_json_mode_succeeds() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+        ]);
+
+        assert!(cmd_destroy(&ssh, "target", true, &cfg, &confirm_yes).is_ok());
+    }
+
+    #[test]
+    fn cmd_destroy_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
+
+        let result = cmd_destroy(&ssh, "ghost", true, &cfg, &confirm_yes);
+
+        assert_err!(result, SkulkError::NotFound(_) => {});
     }
 
     #[test]
@@ -458,6 +587,55 @@ mod tests {
             "expected rm of state file, got calls: {:?}",
             ssh.calls()
         );
+    }
+
+    #[test]
+    fn json_destroy_all_result_lists_each_agent() {
+        let value = json_destroy_all_result(&["a".to_string(), "b".to_string()]);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agents"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn json_destroy_all_result_with_nothing_to_destroy_is_ok() {
+        let value = json_destroy_all_result(&[]);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agents"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn cmd_destroy_all_in_json_mode_requires_force_before_any_ssh() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![]);
+
+        let result = cmd_destroy_all(&ssh, false, &cfg, &confirm_yes);
+
+        assert!(matches!(result, Err(SkulkError::Validation(_))));
+        assert_eq!(ssh.calls().len(), 0);
+    }
+
+    #[test]
+    fn cmd_destroy_all_in_json_mode_succeeds() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory_single_agent("skulk-target")),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+            ssh_ok(),
+        ]);
+
+        assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_ok());
+    }
+
+    #[test]
+    fn cmd_destroy_all_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![ssh_err("ssh: connect to host testhost: refused")]);
+
+        assert!(cmd_destroy_all(&ssh, true, &cfg, &confirm_yes).is_err());
     }
 
     #[test]

@@ -359,3 +359,52 @@ fn restart_emits_json_error_when_agent_has_no_worktree() {
 
     assert_eq!(err["code"], "not_found");
 }
+
+// ── destroy ─────────────────────────────────────────────────────────────
+
+#[test]
+fn destroy_emits_one_json_result_on_success() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let name = unique("destroy");
+    project.stage_running_agent(&name);
+
+    let value = json_success(&project.skulk(&["destroy", &name, "--force"]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(
+        value["cleaned"],
+        serde_json::json!(["session", "worktree", "branch"])
+    );
+}
+
+#[test]
+fn destroy_emits_json_error_when_agent_is_missing() {
+    let project = Project::with_base_clone();
+
+    let err = json_failure(&project.skulk(&["destroy", &unique("ghost"), "--force"]));
+
+    assert_eq!(err["code"], "not_found");
+}
+
+#[test]
+fn destroy_without_force_emits_json_error_instead_of_prompting() {
+    let project = Project::with_base_clone();
+    let name = unique("noforce");
+    project.stage_archived_agent(&name);
+
+    let err = json_failure(&project.skulk(&["destroy", &name]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(
+        project
+            .root
+            .join("worktrees")
+            .join(format!("skulk-{name}"))
+            .is_dir(),
+        "nothing may be destroyed without --force"
+    );
+}
