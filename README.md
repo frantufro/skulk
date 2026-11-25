@@ -530,8 +530,8 @@ tmux, the worktrees and the Stop/`UserPromptSubmit` marker files every second
 (or as soon as a marker changes, when `inotifywait` is installed).
 
 ```json
-{"v":1,"ts":"2026-11-24T10:31:02Z","type":"snapshot","agents":[{"name":"fix-bug","state":"working","url":null}]}
-{"v":1,"ts":"2026-11-24T10:33:40Z","type":"idle_state","agent":"fix-bug","from":"working","to":"idle","url":null}
+{"v":1,"ts":"2026-11-24T10:31:02Z","type":"snapshot","agents":[{"name":"fix-bug","state":"working","url":null,"idle_since":null}]}
+{"v":1,"ts":"2026-11-24T10:33:40Z","type":"idle_state","agent":"fix-bug","from":"working","to":"idle","url":null,"idle_since":"2026-11-24T10:33:39Z"}
 {"v":1,"ts":"2026-11-24T10:35:12Z","type":"agent.created","agent":"auth-refactor","state":"working","url":null}
 {"v":1,"ts":"2026-11-24T10:50:00Z","type":"agent.gone","agent":"explore","reason":"archived"}
 {"v":1,"ts":"2026-11-24T10:50:30Z","type":"heartbeat"}
@@ -540,6 +540,9 @@ tmux, the worktrees and the Stop/`UserPromptSubmit` marker files every second
 - `snapshot` comes first and lists every agent, archived ones as `stopped`.
 - `state` is `working`, `idle` or `stopped`. `url` is the app URL from
   `url_file`, or `null`.
+- `idle_since` (in `snapshot` and `idle_state`) is when the agent went idle,
+  in UTC: the time its idle marker was last written. It is `null` unless the
+  state is `idle`.
 - `agent.created` waits until the new agent's session is up, so it doesn't
   flash as `stopped`. A worktree that has no session after 5s is announced
   as `stopped`.
