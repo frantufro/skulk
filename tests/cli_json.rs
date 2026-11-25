@@ -98,6 +98,7 @@ impl Project {
     fn set_harness_ignoring_enters(&self, ignored: u32) {
         let script = format!(
             "#!/bin/sh\n\
+             echo harness-ready\n\
              n=0\n\
              while IFS= read -r _; do\n\
              \x20 n=$((n + 1))\n\
@@ -145,6 +146,26 @@ impl Project {
             .env("SHELL", "/bin/sh")
             .env_remove("TMUX");
         cmd
+    }
+
+    /// Wait up to ten seconds for `needle` to show in the session's pane.
+    fn wait_for_pane(&self, session: &str, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let out = self
+                .private_tmux()
+                .args(["capture-pane", "-p", "-t", session])
+                .output()
+                .expect("run tmux");
+            if String::from_utf8_lossy(&out.stdout).contains(needle) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{needle} never showed in {session}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn has_session(&self, session: &str) -> bool {
@@ -553,6 +574,26 @@ fn new_reports_not_submitted_when_the_prompt_stays_in_the_input_box() {
         "{warnings:?}"
     );
     assert!(project.has_session(&format!("skulk-{name}")));
+}
+
+#[test]
+fn send_submits_a_long_prompt_when_the_first_enter_is_swallowed() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    project.set_harness_ignoring_enters(1);
+    let name = unique("send");
+    json_success(&project.skulk(&["new", &name]));
+    project.wait_for_pane(&format!("skulk-{name}"), "harness-ready");
+    let prompt = project.root.join("follow-up.txt");
+    std::fs::write(&prompt, "y".repeat(10 * 1024)).expect("write prompt");
+
+    let value = json_success(&project.skulk(&["send", &name, "--from", path(&prompt)]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["prompt"], "delivered");
 }
 
 #[test]

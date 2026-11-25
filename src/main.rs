@@ -259,8 +259,9 @@ pub(crate) enum Commands {
 
     /// Send a prompt to a running agent
     ///
-    /// Delivers the prompt text to the agent's Claude Code instance
-    /// and verifies delivery via pane content comparison. Pass the prompt
+    /// Delivers the prompt text to the agent's Claude Code instance and
+    /// confirms it was submitted, pressing Enter again if it sits in the
+    /// input box. Pass the prompt
     /// positionally, or use `--from <file>` to load contents from a local
     /// text file (useful for multi-line follow-ups or code snippets).
     Send {
@@ -664,7 +665,7 @@ pub(crate) fn run(
         ),
         Commands::Send { name, prompt, from } => {
             interact::resolve_send_prompt(prompt, from.as_deref())
-                .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))
+                .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, &timings.submit))
         }
         Commands::Push { name } => interact::cmd_push(ssh, &name, cfg),
         Commands::Archive { name, reason } => {
@@ -1240,7 +1241,7 @@ mod tests {
     #[test]
     fn run_dispatches_send() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![Ok("old pane".into()), ssh_ok(), Ok("new pane".into())]);
+        let ssh = MockSsh::new(vec![ssh_ok(), crate::submit::probe_frame("busy", "")]);
         let cli = Cli {
             no_color: true,
             json: false,
@@ -1297,7 +1298,7 @@ mod tests {
         let mut f = std::fs::File::create(&tmp).unwrap();
         writeln!(f, "Take another look at PR #42.").unwrap();
 
-        let ssh = MockSsh::new(vec![Ok("old pane".into()), ssh_ok(), Ok("new pane".into())]);
+        let ssh = MockSsh::new(vec![ssh_ok(), crate::submit::probe_frame("busy", "")]);
         let cli = Cli {
             no_color: true,
             json: false,

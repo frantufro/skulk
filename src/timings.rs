@@ -12,7 +12,6 @@ use crate::submit::SubmitPacing;
 ///
 /// Kept as a struct so adding a new timing doesn't touch every call site.
 pub(crate) struct Timings {
-    pub send_verify_delay: Duration,
     pub wait_poll_interval: Duration,
     pub submit: SubmitPacing,
 }
@@ -20,7 +19,6 @@ pub(crate) struct Timings {
 impl Timings {
     pub fn production() -> Self {
         Self {
-            send_verify_delay: Duration::from_millis(500),
             wait_poll_interval: Duration::from_millis(500),
             submit: SubmitPacing::production(),
         }
@@ -29,7 +27,6 @@ impl Timings {
     #[cfg(test)]
     pub fn zero() -> Self {
         Self {
-            send_verify_delay: Duration::ZERO,
             wait_poll_interval: Duration::ZERO,
             submit: SubmitPacing::zero(),
         }
