@@ -482,19 +482,27 @@ pub(crate) fn cmd_events(
 
 /// The event loop behind [`cmd_events`]. Returns only with an error: the
 /// stream closed, went silent for [`FRAME_TIMEOUT_MS`], or `out` failed.
+///
+/// Deadlines, heartbeats and grace periods run on the monotonic clock, as
+/// milliseconds since the loop started; the wall clock only stamps `ts`.
 fn run_events(
     stream: &mut dyn LineStream,
     cfg: &Config,
     clock: &dyn Clock,
     out: &mut dyn Write,
 ) -> Result<(), SkulkError> {
+    let started = clock.monotonic();
+    let elapsed_ms = || {
+        let d = clock.monotonic().saturating_duration_since(started);
+        u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+    };
     let mut reader = FrameReader::default();
     let mut latest: Option<Frame> = None;
     let mut fleet: Option<Fleet> = None;
-    let mut last_line_ms = clock.now_ms();
+    let mut last_line_ms = 0;
     let mut next_heartbeat_ms: Option<u64> = None;
     loop {
-        let now = clock.now_ms();
+        let now = elapsed_ms();
         let frame_deadline = last_line_ms + FRAME_TIMEOUT_MS;
         if now >= frame_deadline {
             return Err(SkulkError::SshFailed(format!(
@@ -506,7 +514,7 @@ fn run_events(
         if let Some(due) = next_heartbeat_ms
             && now >= due
         {
-            emit(&Event::Heartbeat, now, cfg.output_format, out)?;
+            emit(&Event::Heartbeat, clock.wall_ms(), cfg.output_format, out)?;
             next_heartbeat_ms = Some(now + HEARTBEAT_MS);
         }
         let wake = next_heartbeat_ms.map_or(frame_deadline, |hb| hb.min(frame_deadline));
@@ -515,7 +523,7 @@ fn run_events(
             StreamRecv::Timeout => continue,
             StreamRecv::Closed(e) => return Err(e),
         };
-        let now = clock.now_ms();
+        let now = elapsed_ms();
         last_line_ms = now;
         match reader.push(&line) {
             Some(Tick::Frame(raw)) => latest = Some(parse_frame(&raw, cfg)),
@@ -531,8 +539,9 @@ fn run_events(
             next_heartbeat_ms = Some(now + HEARTBEAT_MS);
             vec![snapshot]
         };
+        let wall = clock.wall_ms();
         for event in &events {
-            emit(event, now, cfg.output_format, out)?;
+            emit(event, wall, cfg.output_format, out)?;
         }
     }
 }
@@ -638,11 +647,36 @@ mod tests {
         lines
     }
 
-    struct FakeClock(Rc<Cell<u64>>);
+    /// Monotonic time is the shared counter in ms. The wall clock matches it,
+    /// except that it jumps forward by `wall_jump.1` ms from monotonic
+    /// `wall_jump.0` on.
+    struct FakeClock {
+        mono: Rc<Cell<u64>>,
+        base: std::time::Instant,
+        wall_jump: Option<(u64, u64)>,
+    }
+
+    impl FakeClock {
+        fn new(mono: Rc<Cell<u64>>) -> Self {
+            Self {
+                mono,
+                base: std::time::Instant::now(),
+                wall_jump: None,
+            }
+        }
+    }
 
     impl Clock for FakeClock {
-        fn now_ms(&self) -> u64 {
-            self.0.get()
+        fn monotonic(&self) -> std::time::Instant {
+            self.base + Duration::from_millis(self.mono.get())
+        }
+
+        fn wall_ms(&self) -> u64 {
+            let mono = self.mono.get();
+            match self.wall_jump {
+                Some((at, by)) if mono >= at => mono + by,
+                _ => mono,
+            }
         }
     }
 
@@ -692,7 +726,7 @@ mod tests {
             closes_at,
         };
         let mut out = Vec::new();
-        let err = run_events(&mut stream, cfg, &FakeClock(clock), &mut out).unwrap_err();
+        let err = run_events(&mut stream, cfg, &FakeClock::new(clock), &mut out).unwrap_err();
         let text = String::from_utf8(out).unwrap();
         (err, text.lines().map(String::from).collect())
     }
@@ -1063,7 +1097,7 @@ mod tests {
         };
         let mut out = Vec::new();
 
-        run_events(&mut stream, &cfg, &FakeClock(clock), &mut out).unwrap_err();
+        run_events(&mut stream, &cfg, &FakeClock::new(clock), &mut out).unwrap_err();
 
         let printed: Vec<Value> = String::from_utf8(out).unwrap().lines().map(parse).collect();
         assert_eq!(printed.len(), 2);
@@ -1104,6 +1138,34 @@ mod tests {
         assert_eq!(types, vec!["snapshot", "heartbeat", "heartbeat"]);
         assert_eq!(parse(&printed[1])["ts"], rfc3339(30_000));
         assert_eq!(parse(&printed[2])["ts"], rfc3339(60_000));
+    }
+
+    #[test]
+    fn run_events_times_heartbeats_and_silence_on_the_monotonic_clock() {
+        let cfg = test_config_json();
+        let mut lines = at(0, frame_lines(&[], &[]));
+        lines.extend((1..=35).map(|s| (s * 1_000, SAME.to_string())));
+        let mono = Rc::new(Cell::new(0));
+        let mut stream = TestStream {
+            clock: Rc::clone(&mono),
+            lines: lines.into(),
+            closes_at: Some(35_500),
+        };
+        let clock = FakeClock {
+            wall_jump: Some((5_000, 3_600_000)),
+            ..FakeClock::new(mono)
+        };
+        let mut out = Vec::new();
+
+        let err = run_events(&mut stream, &cfg, &clock, &mut out).unwrap_err();
+
+        assert_err!(Err::<(), _>(err), SkulkError::SshFailed(msg) => {
+            assert_eq!(msg, "connection closed");
+        });
+        let printed: Vec<Value> = String::from_utf8(out).unwrap().lines().map(parse).collect();
+        assert_eq!(printed.len(), 2, "{printed:?}");
+        assert_eq!(printed[1]["type"], "heartbeat");
+        assert_eq!(printed[1]["ts"], rfc3339(30_000 + 3_600_000));
     }
 
     #[test]
@@ -1160,7 +1222,7 @@ mod tests {
         let cfg = test_config_json();
         let ssh = MockSsh::new(vec![]).with_stream_responses(vec![Ok(vec![])]);
 
-        let result = cmd_events(&ssh, &cfg, &FakeClock(Rc::new(Cell::new(0))));
+        let result = cmd_events(&ssh, &cfg, &FakeClock::new(Rc::new(Cell::new(0))));
 
         assert!(result.is_err());
         assert_eq!(ssh.calls(), vec![events_command(&cfg)]);
@@ -1172,7 +1234,7 @@ mod tests {
         let ssh = MockSsh::new(vec![])
             .with_stream_responses(vec![Err(SkulkError::SshExec("no ssh".into()))]);
 
-        let result = cmd_events(&ssh, &cfg, &FakeClock(Rc::new(Cell::new(0))));
+        let result = cmd_events(&ssh, &cfg, &FakeClock::new(Rc::new(Cell::new(0))));
 
         assert_err!(result, SkulkError::SshExec(_) => {});
     }
