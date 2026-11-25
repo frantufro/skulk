@@ -198,6 +198,8 @@ pub(crate) enum Commands {
     ///
     /// Shows a snapshot of the agent's current terminal by default.
     /// Use --follow for real-time updates or --lines for scrollback history.
+    /// Use --window to read another window of the agent's session instead,
+    /// e.g. the `server` window an init hook opened.
     Logs {
         /// Agent name
         name: String,
@@ -207,6 +209,9 @@ pub(crate) enum Commands {
         /// Number of scrollback lines to show (default: visible pane only)
         #[arg(short, long)]
         lines: Option<u32>,
+        /// Read this tmux window of the agent's session (default: the agent's own window)
+        #[arg(short, long, value_name = "WINDOW")]
+        window: Option<String>,
     },
 
     /// Send a prompt to a running agent
@@ -530,7 +535,8 @@ pub(crate) fn run(
             name,
             follow,
             lines,
-        } => interact::cmd_logs(ssh, &name, follow, lines, cfg),
+            window,
+        } => interact::cmd_logs(ssh, &name, follow, lines, window.as_deref(), cfg),
         Commands::Send { name, prompt, from } => {
             interact::resolve_send_prompt(prompt, from.as_deref())
                 .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))
@@ -980,9 +986,24 @@ mod tests {
                 name: "test".into(),
                 follow: false,
                 lines: None,
+                window: None,
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_logs_for_a_named_window() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok("Listening on 3000".into())]);
+        let cli = Cli::try_parse_from(["skulk", "logs", "test", "--window", "server", "-l", "20"])
+            .expect("parses");
+
+        assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+
+        let calls = ssh.calls();
+        assert!(calls[0].contains("skulk-test:=server"), "got: {}", calls[0]);
+        assert!(calls[0].contains("-S -20"), "got: {}", calls[0]);
     }
 
     #[test]
