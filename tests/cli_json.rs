@@ -1237,6 +1237,7 @@ fn exec_returns_stdout_stderr_and_zero_exit() {
     let result =
         json_success(&project.skulk(&["exec", &name, "--", "sh", "-c", "echo out; echo err >&2"]));
 
+    assert_eq!(result["v"], 1);
     assert_eq!(result["agent"], name.as_str());
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["timed_out"], false);
@@ -1520,4 +1521,43 @@ fn exec_timeout_kills_a_child_that_traps_term_after_the_grace_period() {
         .status
         .success();
     assert!(!alive, "child {} survived KILL", child.trim());
+}
+
+#[test]
+fn exec_human_mode_exits_255_when_the_command_does() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let out = project.skulk_human(&["exec", &name, "--", "sh", "-c", "exit 255"]);
+
+    assert_eq!(out.status.code(), Some(255));
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn exec_reports_a_setup_failure_apart_from_the_command_exit_code() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_skulk"))
+        .args(["--config", path(&project.root)])
+        .args(["exec", &name, "--", "true"])
+        .env("SKULK_NO_UPDATE_CHECK", "1")
+        .env("HOME", project.home())
+        .env("TMPDIR", project.root.join("no-such-dir"))
+        .output()
+        .expect("run skulk");
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Could not start the command") && stderr.contains("temp directory"),
+        "stderr: {stderr}"
+    );
 }

@@ -4,7 +4,7 @@ use std::io::Write as _;
 use crate::agent::Agent;
 use crate::config::{Config, OutputFormat};
 use crate::display::emit_json;
-use crate::error::SkulkError;
+use crate::error::{SkulkError, classify_ssh_error};
 use crate::ssh::{Ssh, StdoutMode};
 use crate::util::{shell_escape, shell_quote_path};
 
@@ -32,6 +32,18 @@ const RESULT: &str = "skulk-exec-result";
 /// Separates the stdout and stderr hex dumps of the capture script.
 const STDERR_MARK: &str = "skulk-exec-stderr";
 
+/// Starts each progress marker the script writes on its own stderr.
+const MARK: u8 = 0x1e;
+
+/// Progress marker written right before the command starts.
+const STARTED: &str = "skulk-exec-started";
+
+/// Progress marker written after the command ended: `<exit> <timed_out>`.
+const EXITED: &str = "skulk-exec-exit";
+
+/// Most characters of remote output quoted in an error message.
+const QUOTE_CHARS: usize = 200;
+
 /// What `skulk exec` runs and how.
 pub(crate) struct ExecRequest<'a> {
     pub name: &'a str,
@@ -39,11 +51,9 @@ pub(crate) struct ExecRequest<'a> {
     pub timeout_secs: Option<u64>,
 }
 
-/// The outcome of a captured run, decoded from the capture script's output.
+/// The command's streams, decoded from the capture script's stdout.
 #[derive(Debug, PartialEq, Eq)]
 struct Captured {
-    exit_code: i32,
-    timed_out: bool,
     stdout: Vec<u8>,
     stdout_total: u64,
     stderr: Vec<u8>,
@@ -87,33 +97,125 @@ pub(crate) fn cmd_exec(ssh: &impl Ssh, req: &ExecRequest, cfg: &Config) -> Resul
 
     let json = cfg.output_format == OutputFormat::Json;
     let script = exec_script(&agent, &worktree, req, json);
+    let mut progress = Progress::default();
     if json {
-        let (_, out) = ssh.run_with_input(&script, &input, StdoutMode::Capture, &mut |_| {})?;
+        let (code, out) =
+            ssh.run_with_input(&script, &input, StdoutMode::Capture, &mut |line| {
+                progress.feed(line);
+            })?;
+        let exit = progress.finish(code, req.name, &cfg.host)?;
         let captured = parse_captured(&String::from_utf8_lossy(&out))?;
-        emit_json(&json_exec_result(req.name, &captured));
+        emit_json(&json_exec_result(req.name, exit, &captured));
         return Ok(());
     }
 
     let mut stderr = std::io::stderr();
     let (code, _) = ssh.run_with_input(&script, &input, StdoutMode::Inherit, &mut |line| {
-        let _ = stderr.write_all(line);
+        let _ = stderr.write_all(progress.feed(line));
     })?;
-    match code {
-        Some(0) => Ok(()),
-        Some(code) => Err(SkulkError::CommandExit(code)),
-        None => Err(SkulkError::SshFailed(format!(
-            "Command in agent '{}' ended without an exit code.",
-            req.name
-        ))),
+    let (exit_code, timed_out) = progress.finish(code, req.name, &cfg.host)?;
+    if timed_out {
+        eprintln!(
+            "skulk exec: timed out after {}s; command killed",
+            req.timeout_secs.unwrap_or(0)
+        );
+    }
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(SkulkError::CommandExit(exit_code))
+    }
+}
+
+/// What the script reported through the markers on its stderr.
+#[derive(Debug, Default)]
+struct Progress {
+    started: bool,
+    exit: Option<(i32, bool)>,
+    /// Stderr written before the command started: the script's own errors.
+    setup: Vec<u8>,
+}
+
+impl Progress {
+    /// Record one stderr line and return the part of it that the command
+    /// wrote. A marker can follow command output that lacked a final newline.
+    fn feed<'a>(&mut self, line: &'a [u8]) -> &'a [u8] {
+        let (output, marker) = match line.iter().position(|&b| b == MARK) {
+            Some(pos) => (&line[..pos], Some(&line[pos + 1..])),
+            None => (line, None),
+        };
+        let output = if self.started {
+            output
+        } else {
+            self.setup.extend_from_slice(output);
+            &[]
+        };
+        if let Some(marker) = marker {
+            let marker = String::from_utf8_lossy(marker);
+            let marker = marker.trim();
+            if marker == STARTED {
+                self.started = true;
+            } else if let Some(fields) = marker.strip_prefix(EXITED) {
+                let mut fields = fields.split_whitespace();
+                if let (Some(Ok(code)), Some(timed_out)) =
+                    (fields.next().map(str::parse), fields.next())
+                {
+                    self.exit = Some((code, timed_out == "1"));
+                }
+            }
+        }
+        output
+    }
+
+    /// The command's exit code and whether it timed out, or why the run
+    /// produced none: the script never started the command (an SSH failure
+    /// when the transport exited 255, a setup failure otherwise), or the
+    /// connection was lost while it ran.
+    fn finish(self, code: Option<i32>, name: &str, host: &str) -> Result<(i32, bool), SkulkError> {
+        if let Some(exit) = self.exit {
+            return Ok(exit);
+        }
+        let status = code.map_or_else(|| "a signal".to_string(), |c| format!("status {c}"));
+        if self.started {
+            return Err(SkulkError::SshFailed(format!(
+                "Lost the connection to {host} while the command ran in agent '{name}' \
+                 (ended by {status}); it was sent TERM."
+            )));
+        }
+        let detail = quote(&String::from_utf8_lossy(&self.setup));
+        if code == Some(255) {
+            return Err(classify_ssh_error(&detail, host));
+        }
+        Err(SkulkError::Diagnostic {
+            message: format!(
+                "Could not start the command in agent '{name}' (ended by {status}): {detail}"
+            ),
+            suggestion: format!(
+                "Check that bash is installed on {host} and that the worktree and $TMPDIR are writable."
+            ),
+        })
+    }
+}
+
+/// At most [`QUOTE_CHARS`] characters of `text`, trimmed.
+fn quote(text: &str) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(QUOTE_CHARS) {
+        Some((i, _)) => format!("{}…", &text[..i]),
+        None => text.to_string(),
     }
 }
 
 /// The `--json` payload.
-fn json_exec_result(name: &str, c: &Captured) -> serde_json::Value {
+fn json_exec_result(
+    name: &str,
+    (exit_code, timed_out): (i32, bool),
+    c: &Captured,
+) -> serde_json::Value {
     serde_json::json!({
         "agent": name,
-        "exit_code": c.exit_code,
-        "timed_out": c.timed_out,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
         "stdout": String::from_utf8_lossy(&c.stdout),
         "stderr": String::from_utf8_lossy(&c.stderr),
         "stdout_truncated": c.stdout_total > c.stdout.len() as u64,
@@ -244,17 +346,20 @@ fn quote_argv(argv: &[String]) -> String {
 /// watchdog whose `TERM` finds no group left records `gone`: the command
 /// had already ended, so the run did not time out.
 ///
-/// In capture mode the command's streams go to temp files and the script
-/// prints a [`RESULT`] line (`exit timed_out stdout_bytes stderr_bytes`)
-/// followed by hex dumps of the capped streams, which survive the lossy UTF-8
-/// conversion and trimming of `Ssh::run`. Otherwise the command writes to the
-/// script's own streams and the script exits with the command's code.
+/// On its own stderr the script writes a [`STARTED`] marker right before the
+/// command starts and an [`EXITED`] marker (`exit timed_out`) after it ended
+/// (see [`Progress`]), so a failure of the script or the connection is never
+/// mistaken for the command's exit code. In capture mode the command's
+/// streams go to temp files and the script prints a [`RESULT`] line
+/// (`stdout_bytes stderr_bytes`) followed by hex dumps of the capped streams,
+/// which survive lossy UTF-8 decoding. Otherwise the command writes to the
+/// script's own streams.
 fn exec_script(agent: &Agent, worktree: &str, req: &ExecRequest, capture: bool) -> String {
     let wt = shell_quote_path(worktree);
     let name = agent.name();
     let session = agent.session_name();
     let mut s = format!(
-        "exec 3<&0; cd {wt} || exit 1; \
+        "exec 3<&0; cd {wt} 2>/dev/null || {{ echo 'skulk exec: cannot enter the worktree' >&2; exit 1; }}; \
          export SKULK_AGENT_NAME='{name}' SKULK_SESSION='{session}' SKULK_BRANCH='{session}' SKULK_WORKTREE=\"$PWD\"; \
          while IFS= read -r -d '' _kv <&3 && [ -n \"$_kv\" ]; do export \"$_kv\"; done; "
     );
@@ -265,9 +370,9 @@ fn exec_script(agent: &Agent, worktree: &str, req: &ExecRequest, capture: bool) 
     };
     let _ = write!(
         s,
-        "_st=$(mktemp -d \"${{TMPDIR:-/tmp}}/skulk-exec.XXXXXX\") || exit 1; _sp=; \
+        "_st=$(mktemp -d \"${{TMPDIR:-/tmp}}/skulk-exec.XXXXXX\") || {{ echo 'skulk exec: cannot create a temp directory' >&2; exit 1; }}; _sp=; \
          _sv=; _sw=; trap 'for _g in $_sp $_sw $_sv; do kill -TERM -\"$_g\" 2>/dev/null; done; rm -rf \"$_st\"; exit 130' INT TERM HUP; \
-         set -m; \
+         set -m; printf '\\036{STARTED}\\n' >&2; \
          {cmd} </dev/null 3<&-{redirect} & _sp=$!; \
          ( cat >/dev/null; kill -TERM -\"$_sp\" 2>/dev/null ) <&3 >/dev/null 2>&1 & _sv=$!; exec 3<&-; ",
         cmd = quote_argv(req.argv),
@@ -288,38 +393,34 @@ fn exec_script(agent: &Agent, worktree: &str, req: &ExecRequest, capture: bool) 
            if mkdir \"$_st/claim\" 2>/dev/null; then kill -TERM -\"$_sw\" 2>/dev/null; \
            else wait \"$_sw\" 2>/dev/null; [ -f \"$_st/gone\" ] || {{ _sc={TIMEOUT_EXIT_CODE}; _sx=1; }}; fi; \
          fi; \
-         kill -TERM -\"$_sv\" 2>/dev/null; set +m; "
+         kill -TERM -\"$_sv\" 2>/dev/null; set +m; \
+         printf '\\036{EXITED} %s %s\\n' \"$_sc\" \"$_sx\" >&2; "
     );
     if capture {
         let _ = write!(
             s,
-            "printf '{RESULT} %s %s %s %s\\n' \"$_sc\" \"$_sx\" $(wc -c <\"$_st/o\") $(wc -c <\"$_st/e\"); \
+            "printf '{RESULT} %s %s\\n' $(wc -c <\"$_st/o\") $(wc -c <\"$_st/e\"); \
              head -c {OUTPUT_CAP_BYTES} \"$_st/o\" | od -An -v -tx1; \
              echo {STDERR_MARK}; \
              head -c {OUTPUT_CAP_BYTES} \"$_st/e\" | od -An -v -tx1; \
              rm -rf \"$_st\"; exit 0"
         );
     } else {
-        let _ = write!(
-            s,
-            "[ \"$_sx\" = 1 ] && echo \"skulk exec: timed out after {secs}s; command killed\" >&2; \
-             rm -rf \"$_st\"; exit \"$_sc\"",
-            secs = req.timeout_secs.unwrap_or(0),
-        );
+        s.push_str("rm -rf \"$_st\"; exit 0");
     }
     format!("bash -c '{}'", shell_escape(&s))
 }
 
 /// Decode the capture script's output (see [`exec_script`]).
 fn parse_captured(out: &str) -> Result<Captured, SkulkError> {
-    let malformed = || SkulkError::SshFailed(format!("Unexpected output from skulk exec: {out}"));
+    let malformed =
+        || SkulkError::SshFailed(format!("Unexpected output from skulk exec: {}", quote(out)));
     let mut lines = out.lines().skip_while(|l| !l.starts_with(RESULT));
     let header = lines.next().ok_or_else(malformed)?;
     let fields: Vec<&str> = header.split_whitespace().skip(1).collect();
-    let [code, timed_out, stdout_total, stderr_total] = fields[..] else {
+    let [stdout_total, stderr_total] = fields[..] else {
         return Err(malformed());
     };
-    let exit_code = code.parse().map_err(|_| malformed())?;
     let stdout_total = stdout_total.parse().map_err(|_| malformed())?;
     let stderr_total = stderr_total.parse().map_err(|_| malformed())?;
 
@@ -336,8 +437,6 @@ fn parse_captured(out: &str) -> Result<Captured, SkulkError> {
         }
     }
     Ok(Captured {
-        exit_code,
-        timed_out: timed_out == "1",
         stdout,
         stdout_total,
         stderr,
@@ -349,6 +448,126 @@ fn parse_captured(out: &str) -> Result<Captured, SkulkError> {
 mod tests {
     use super::*;
     use crate::testutil::{InputRun, MockSsh, test_config};
+
+    fn marker(text: &str) -> Vec<u8> {
+        let mut line = vec![MARK];
+        line.extend_from_slice(text.as_bytes());
+        line.push(b'\n');
+        line
+    }
+
+    fn markers(code: i32) -> Vec<Vec<u8>> {
+        vec![marker(STARTED), marker(&format!("{EXITED} {code} 0"))]
+    }
+
+    fn input_run(code: Option<i32>, stderr: Vec<Vec<u8>>) -> InputRun {
+        InputRun {
+            code,
+            stdout: Vec::new(),
+            stderr,
+        }
+    }
+
+    fn run_human(run: InputRun) -> Result<(), SkulkError> {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Ok(READY.to_string())]).with_input_responses(vec![Ok(run)]);
+        let args = argv(&["true"]);
+        let req = ExecRequest {
+            name: "a",
+            argv: &args,
+            timeout_secs: None,
+        };
+        cmd_exec(&ssh, &req, &cfg)
+    }
+
+    #[test]
+    fn human_mode_succeeds_when_command_exits_zero() {
+        assert!(run_human(input_run(Some(0), markers(0))).is_ok());
+    }
+
+    #[test]
+    fn human_mode_returns_the_command_exit_code() {
+        let result = run_human(input_run(Some(0), markers(7)));
+
+        assert!(matches!(result, Err(SkulkError::CommandExit(7))));
+    }
+
+    #[test]
+    fn human_mode_reports_255_from_the_command_as_its_exit_code() {
+        let result = run_human(input_run(Some(0), markers(255)));
+
+        assert!(matches!(result, Err(SkulkError::CommandExit(255))));
+    }
+
+    #[test]
+    fn reports_ssh_failure_when_transport_exits_255_before_start() {
+        let stderr = vec![b"ssh: connect to host h port 22: Connection refused\n".to_vec()];
+
+        let err = run_human(input_run(Some(255), stderr)).unwrap_err();
+
+        assert!(matches!(err, SkulkError::Diagnostic { .. }));
+        assert!(err.to_string().contains("refused"), "{err}");
+    }
+
+    #[test]
+    fn reports_setup_failure_with_its_message_when_script_fails_before_start() {
+        let stderr = vec![b"skulk exec: cannot create a temp directory\n".to_vec()];
+
+        let err = run_human(input_run(Some(1), stderr)).unwrap_err();
+
+        assert!(matches!(err, SkulkError::Diagnostic { .. }));
+        assert!(
+            err.to_string().contains("Could not start the command"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("cannot create a temp directory"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reports_lost_connection_when_started_but_no_exit_marker() {
+        let err = run_human(input_run(Some(255), vec![marker(STARTED)])).unwrap_err();
+
+        assert!(matches!(err, SkulkError::SshFailed(_)));
+        assert!(err.to_string().contains("Lost the connection"), "{err}");
+    }
+
+    #[test]
+    fn progress_passes_command_output_and_splits_a_marker_off_a_partial_line() {
+        let mut progress = Progress::default();
+
+        let before = progress.feed(b"setup noise\n").to_vec();
+        progress.feed(&marker(STARTED));
+        let output = progress.feed(b"out\n").to_vec();
+        let mut tail = b"partial".to_vec();
+        tail.extend(marker(&format!("{EXITED} 124 1")));
+        let partial = progress.feed(&tail).to_vec();
+
+        assert_eq!(before, b"");
+        assert_eq!(output, b"out\n");
+        assert_eq!(partial, b"partial");
+        assert_eq!(progress.exit, Some((124, true)));
+        assert_eq!(progress.setup, b"setup noise\n");
+    }
+
+    #[test]
+    fn quote_shortens_long_output() {
+        let long = "x".repeat(QUOTE_CHARS + 50);
+
+        let quoted = quote(&long);
+
+        assert_eq!(quoted.chars().count(), QUOTE_CHARS + 1);
+        assert!(quoted.ends_with('…'));
+    }
+
+    #[test]
+    fn malformed_capture_error_quotes_only_a_prefix() {
+        let err = parse_captured(&"junk ".repeat(1000)).unwrap_err();
+
+        assert!(err.to_string().len() < QUOTE_CHARS + 100, "{err}");
+    }
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()
@@ -416,8 +635,8 @@ mod tests {
         ))])
         .with_input_responses(vec![Ok(InputRun {
             code: Some(0),
-            stdout: format!("{RESULT} 3 0 2 0\n 68 69\n{STDERR_MARK}").into_bytes(),
-            stderr: Vec::new(),
+            stdout: format!("{RESULT} 2 0\n 68 69\n{STDERR_MARK}").into_bytes(),
+            stderr: markers(3),
         })]);
         let args = argv(&["echo", "hi"]);
         let req = ExecRequest {
@@ -434,29 +653,6 @@ mod tests {
         assert!(calls[1].contains(RESULT));
         assert!(!calls[1].contains("A=1") && !calls[1].contains("B=2"));
         assert_eq!(ssh.inputs(), vec![b"A=1\0B=2\0\0".to_vec()]);
-    }
-
-    #[test]
-    fn human_mode_streams_through_interactive() {
-        let cfg = test_config();
-        let ssh =
-            MockSsh::new(vec![Ok(READY.to_string())]).with_input_responses(vec![Ok(InputRun {
-                code: Some(0),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })]);
-        let args = argv(&["echo", "hi"]);
-        let req = ExecRequest {
-            name: "a",
-            argv: &args,
-            timeout_secs: None,
-        };
-
-        cmd_exec(&ssh, &req, &cfg).expect("exec succeeds");
-
-        let calls = ssh.calls();
-        assert_eq!(calls.len(), 2);
-        assert!(!calls[1].contains(RESULT));
     }
 
     #[test]
@@ -545,15 +741,13 @@ mod tests {
 
     #[test]
     fn parse_captured_decodes_streams_and_flags() {
-        let out = format!("noise\n{RESULT} 124 1 5 1\n 68 69\n 0a\n{STDERR_MARK}\n 21");
+        let out = format!("noise\n{RESULT} 5 1\n 68 69\n 0a\n{STDERR_MARK}\n 21");
 
         let captured = parse_captured(&out).expect("parses");
 
         assert_eq!(
             captured,
             Captured {
-                exit_code: 124,
-                timed_out: true,
                 stdout: b"hi\n".to_vec(),
                 stdout_total: 5,
                 stderr: b"!".to_vec(),
@@ -570,15 +764,13 @@ mod tests {
     #[test]
     fn json_result_reports_truncation() {
         let c = Captured {
-            exit_code: 0,
-            timed_out: false,
             stdout: b"ab".to_vec(),
             stdout_total: 10,
             stderr: Vec::new(),
             stderr_total: 0,
         };
 
-        let v = json_exec_result("a", &c);
+        let v = json_exec_result("a", (0, false), &c);
 
         assert_eq!(v["stdout_truncated"], true);
         assert_eq!(v["stderr_truncated"], false);
