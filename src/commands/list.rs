@@ -45,10 +45,26 @@ fn parse_state_map(raw: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// Parse the URL section into a map of worktree path -> app URL.
+///
+/// Each line is `<worktree path>\t<first line of url_file>`. Blank URLs are
+/// dropped so an empty file reads the same as a missing one.
+fn parse_url_map(raw: &str) -> HashMap<String, String> {
+    raw.lines()
+        .filter_map(|line| {
+            let (path, url) = line.split_once('\t')?;
+            let url = url.trim();
+            (!url.is_empty()).then(|| (path.to_string(), url.to_string()))
+        })
+        .collect()
+}
+
 /// Build the SSH command for `skulk list`: epoch, tmux sessions, worktrees,
-/// and Stop/`UserPromptSubmit` hook marker contents in one call.
+/// Stop/`UserPromptSubmit` hook marker contents, and each worktree's app URL
+/// (first line of `url_file`) in one call.
 pub(crate) fn list_command(cfg: &Config) -> String {
     let base_path = &cfg.base_path;
+    let url_file = cfg.url_file();
     format!(
         "echo __EPOCH__$(date +%s)__EPOCH__ && \
          echo __TMUX_START__ && \
@@ -59,7 +75,11 @@ pub(crate) fn list_command(cfg: &Config) -> String {
          echo __WORKTREES_END__ && \
          echo __STATE_START__ && \
          for f in ~/.skulk/state/*; do [ -f \"$f\" ] && printf '%s %s\\n' \"$(basename \"$f\")\" \"$(cat \"$f\")\"; done 2>/dev/null; \
-         echo __STATE_END__"
+         echo __STATE_END__; \
+         echo __URLS_START__; \
+         cd {base_path} && git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | \
+         while IFS= read -r p; do [ -f \"$p/{url_file}\" ] && printf '%s\\t%s\\n' \"$p\" \"$(head -n 1 \"$p/{url_file}\")\"; done; \
+         echo __URLS_END__"
     )
 }
 
@@ -87,9 +107,16 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     let state_raw = extract_section(raw, "__STATE_START__\n", "\n__STATE_END__");
     let state_map = parse_state_map(state_raw);
 
+    let url_map = parse_url_map(extract_section(raw, "__URLS_START__\n", "\n__URLS_END__"));
+
     // Join worktree paths and upgrade live sessions to Idle when appropriate.
     for session in &mut sessions {
         session.worktree = worktree_map.get(&session.name).cloned();
+        session.url = session
+            .worktree
+            .as_ref()
+            .and_then(|path| url_map.get(path))
+            .cloned();
         session.state = resolve_agent_state(
             session.state,
             state_map.get(&session.name).map(String::as_str),
@@ -104,6 +131,7 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
                 created: 0,
                 state: AgentState::Stopped,
                 worktree: Some(path.clone()),
+                url: url_map.get(path).cloned(),
             });
         }
     }
@@ -143,6 +171,7 @@ pub(crate) fn json_sessions(
                 "branch": agent_ref.branch_name(),
                 "uptime_secs": uptime_secs,
                 "session_created_epoch": s.created,
+                "url": s.url,
             })
         })
         .collect();
@@ -165,7 +194,8 @@ mod tests {
     use super::*;
     use crate::inventory::Session;
     use crate::testutil::{
-        MockSsh, mock_list_output, mock_list_output_with_state, test_config, test_config_json,
+        MockSsh, mock_list_output, mock_list_output_with_state, mock_urls_section, test_config,
+        test_config_json,
     };
 
     #[test]
@@ -383,7 +413,96 @@ mod tests {
             created,
             state,
             worktree: worktree.map(ToString::to_string),
+            url: None,
         }
+    }
+
+    // ── url ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_command_reads_default_url_file_in_each_worktree() {
+        let cfg = test_config();
+
+        let cmd = list_command(&cfg);
+
+        assert!(cmd.contains("__URLS_START__"));
+        assert!(cmd.contains("__URLS_END__"));
+        assert!(cmd.contains("/tmp/dev-server-url"));
+    }
+
+    #[test]
+    fn list_command_reads_configured_url_file() {
+        let mut cfg = test_config();
+        cfg.url_file = Some("log/app-url".into());
+
+        let cmd = list_command(&cfg);
+
+        assert!(cmd.contains("/log/app-url"));
+        assert!(!cmd.contains("dev-server-url"));
+    }
+
+    #[test]
+    fn parse_list_output_joins_url_by_worktree_path() {
+        let cfg = test_config();
+        let raw = mock_list_output(
+            1_700_000_200,
+            "skulk-a\t1700000000\t0\nskulk-b\t1700000000\t0",
+            &[("skulk-a", "/wt/skulk-a"), ("skulk-b", "/wt/skulk-b")],
+        ) + &mock_urls_section(&[("/wt/skulk-a", "  http://localhost:3042  ")]);
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        let url_of = |name: &str| {
+            sessions
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.url.clone())
+        };
+        assert_eq!(url_of("skulk-a").as_deref(), Some("http://localhost:3042"));
+        assert_eq!(url_of("skulk-b"), None);
+    }
+
+    #[test]
+    fn parse_list_output_reports_url_for_stopped_agent_with_worktree() {
+        let cfg = test_config();
+        let raw = mock_list_output(1_700_000_200, "", &[("skulk-old", "/wt/skulk-old")])
+            + &mock_urls_section(&[("/wt/skulk-old", "http://localhost:3050")]);
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert_eq!(sessions[0].url.as_deref(), Some("http://localhost:3050"));
+    }
+
+    #[test]
+    fn parse_list_output_ignores_empty_url_file() {
+        let cfg = test_config();
+        let raw = mock_list_output(
+            1_700_000_200,
+            "skulk-a\t1700000000\t0",
+            &[("skulk-a", "/wt/skulk-a")],
+        ) + &mock_urls_section(&[("/wt/skulk-a", "")]);
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert!(sessions[0].url.is_none());
+    }
+
+    #[test]
+    fn json_sessions_includes_url_and_null_when_missing() {
+        let cfg = test_config_json();
+        let mut with_url = make_session(
+            "skulk-a",
+            1_700_000_000,
+            AgentState::Detached,
+            Some("/wt/skulk-a"),
+        );
+        with_url.url = Some("http://localhost:3042".into());
+        let without_url = make_session("skulk-b", 1_700_000_000, AgentState::Detached, None);
+
+        let value = json_sessions(&[with_url, without_url], 1_700_000_200, &cfg);
+
+        assert_eq!(value["agents"][0]["url"], "http://localhost:3042");
+        assert_eq!(value["agents"][1]["url"], serde_json::Value::Null);
     }
 
     #[test]

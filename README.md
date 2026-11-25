@@ -263,6 +263,13 @@ tmux set-option -w -t "$SKULK_SESSION:=server" remain-on-exit on
 
 Then `skulk logs <name> --window server` shows its output (`--follow` and `--lines` work too), and `skulk restart-window <name> server` restarts it without re-running `init.sh`. `restart-window` runs `tmux respawn-window -k`, which re-runs the window's *original* command — a window opened as a plain shell with `bin/dev` typed into it via `send-keys` comes back as an empty shell. Don't name the window `agent`: that's the window Claude runs in.
 
+**App URL:** if `init.sh` starts a dev server, have it write the app's URL to `tmp/dev-server-url` in the worktree (first line only). `skulk status --json` and `skulk list --json` report it as `url` (`null` when the file is missing). Change the path with `url_file = "log/app-url"` in `.skulk/config.toml`.
+
+```bash
+mkdir -p "$SKULK_WORKTREE/tmp"
+echo "http://localhost:$PORT" > "$SKULK_WORKTREE/tmp/dev-server-url"
+```
+
 `skulk init` writes `.skulk/init.sh.example` — rename it to `.skulk/init.sh` and customize to enable.
 
 ## Claude Code Plugin
@@ -453,7 +460,8 @@ reaches stdout).
 
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
-| `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch}` |
+| `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch, url}` |
+| `status` | `name`, `status`, `branch`, `uptime_secs`, `session_created_epoch`, `queried_at`, `url` |
 | `new`, `replay` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control`, `prompt` (`delivered` / `failed` / `none`), `warnings` |
 | `restart` | `ok`, `agent`, `branch`, `session`, `worktree`, `harness`, `model`, `remote_control` |
 | `archive` | `ok`, `agent`, `branch`, `worktree`, `reason`, `warnings` |
@@ -463,7 +471,7 @@ reaches stdout).
 | `pull` | `ok`, `base_path`, `branch`, `force`, `output` |
 | `ship` | `ok`, `agent`, `pr_url` |
 | `wait` | `ok`, `agent`, `status`, or `reason` on timeout |
-| `status`, `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
+| `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
 
 `destroy` and `destroy-all` need `--force` with `--json`, since nobody is there
 to answer the confirmation prompt. If they leave anything behind, they fail

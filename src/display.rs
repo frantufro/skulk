@@ -323,6 +323,7 @@ mod tests {
             name: name.to_string(),
             created,
             state,
+            url: None,
             worktree: worktree.map(ToString::to_string),
         }
     }

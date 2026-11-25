@@ -100,6 +100,8 @@ pub(crate) struct Session {
     pub created: i64,
     pub state: AgentState,
     pub worktree: Option<String>,
+    /// App URL read from the worktree's `url_file`, when present.
+    pub url: Option<String>,
 }
 
 /// Parse a raw tmux `list-sessions` output into `Session`s with an initial
@@ -126,6 +128,7 @@ pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
                 created,
                 state,
                 worktree: None,
+                url: None,
             })
         })
         .collect()
