@@ -108,16 +108,21 @@ pub(crate) fn git_log_command(name: &str, cfg: &Config) -> String {
 ///
 /// Used by both `logs` (snapshot mode) and `send` (delivery verification).
 pub(crate) fn capture_pane_command(name: &str, cfg: &Config) -> String {
-    let agent = AgentRef::new(name, cfg);
-    let resolve = remote::resolve_agent_window(&agent.session_name());
-    format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\"")
+    logs_command(name, None, cfg)
 }
 
 /// Build the SSH command to capture N lines of scrollback from an agent's tmux session.
 pub(crate) fn logs_snapshot_deep_command(name: &str, lines: u32, cfg: &Config) -> String {
-    let agent = AgentRef::new(name, cfg);
-    let resolve = remote::resolve_agent_window(&agent.session_name());
-    format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\" -S -{lines}")
+    logs_command(name, Some(lines), cfg)
+}
+
+/// Build the SSH command behind `skulk logs`: capture the agent's harness
+/// window with `lines` of scrollback (visible pane only when `None`).
+fn logs_command(name: &str, lines: Option<u32>, cfg: &Config) -> String {
+    let session = AgentRef::new(name, cfg).session_name();
+    let resolve = remote::resolve_agent_window(&session);
+    let scrollback = lines.map_or_else(String::new, |n| format!(" -S -{n}"));
+    format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\"{scrollback}")
 }
 
 /// Build the SSH command to write an archive reason sidecar file.
