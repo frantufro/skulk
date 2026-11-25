@@ -14,7 +14,8 @@ pub(crate) const OUTPUT_CAP_BYTES: u64 = 1024 * 1024;
 /// Exit code reported when `--timeout` kills the command, as GNU `timeout` does.
 pub(crate) const TIMEOUT_EXIT_CODE: i32 = 124;
 
-/// Seconds between the `TERM` and the `KILL` sent to a timed-out command.
+/// Most seconds between the `TERM` and the `KILL` sent to a timed-out
+/// command's process group; the `KILL` is skipped once the group is gone.
 const KILL_GRACE_SECS: u64 = 5;
 
 /// Printed by the preflight script when the worktree exists; the worktree's
@@ -234,6 +235,15 @@ fn quote_argv(argv: &[String]) -> String {
 /// terminal. The stdin watcher sends `TERM` to that group when stdin reaches
 /// EOF, which happens when skulk or its connection goes away.
 ///
+/// With a timeout, a watchdog and the script race to create the `claim`
+/// directory (`mkdir` is atomic), and the winner alone decides the outcome.
+/// If the command ends first, the script claims it and cancels the watchdog.
+/// If the watchdog claims it, it sends `TERM` to the group, polls it for up
+/// to [`KILL_GRACE_SECS`] and then sends `KILL`, and the script waits for it
+/// to finish so that `KILL` always reaches children that trap `TERM`. A
+/// watchdog whose `TERM` finds no group left records `gone`: the command
+/// had already ended, so the run did not time out.
+///
 /// In capture mode the command's streams go to temp files and the script
 /// prints a [`RESULT`] line (`exit timed_out stdout_bytes stderr_bytes`)
 /// followed by hex dumps of the capped streams, which survive the lossy UTF-8
@@ -256,7 +266,7 @@ fn exec_script(agent: &Agent, worktree: &str, req: &ExecRequest, capture: bool) 
     let _ = write!(
         s,
         "_st=$(mktemp -d \"${{TMPDIR:-/tmp}}/skulk-exec.XXXXXX\") || exit 1; _sp=; \
-         _sv=; trap 'for _g in $_sp $_sv; do kill -TERM -\"$_g\" 2>/dev/null; done; rm -rf \"$_st\"; exit 130' INT TERM HUP; \
+         _sv=; _sw=; trap 'for _g in $_sp $_sw $_sv; do kill -TERM -\"$_g\" 2>/dev/null; done; rm -rf \"$_st\"; exit 130' INT TERM HUP; \
          set -m; \
          {cmd} </dev/null 3<&-{redirect} & _sp=$!; \
          ( cat >/dev/null; kill -TERM -\"$_sp\" 2>/dev/null ) <&3 >/dev/null 2>&1 & _sv=$!; exec 3<&-; ",
@@ -265,17 +275,20 @@ fn exec_script(agent: &Agent, worktree: &str, req: &ExecRequest, capture: bool) 
     if let Some(secs) = req.timeout_secs {
         let _ = write!(
             s,
-            "( sleep {secs}; kill -TERM -\"$_sp\" 2>/dev/null || exit 0; : >\"$_st/x\"; \
-             sleep {KILL_GRACE_SECS}; kill -KILL -\"$_sp\" 2>/dev/null ) </dev/null >/dev/null 2>&1 & _sw=$!; "
+            "( sleep {secs}; mkdir \"$_st/claim\" 2>/dev/null || exit 0; \
+             kill -TERM -\"$_sp\" 2>/dev/null || {{ : >\"$_st/gone\"; exit 0; }}; \
+             _i=0; while [ \"$_i\" -lt {KILL_GRACE_SECS} ] && kill -0 -\"$_sp\" 2>/dev/null; do sleep 1; _i=$((_i + 1)); done; \
+             kill -KILL -\"$_sp\" 2>/dev/null; exit 0 ) </dev/null >/dev/null 2>&1 & _sw=$!; "
         );
-    }
-    s.push_str("wait \"$_sp\"; _sc=$?; kill -TERM -\"$_sv\" 2>/dev/null; ");
-    if req.timeout_secs.is_some() {
-        s.push_str("kill -TERM -\"$_sw\" 2>/dev/null; ");
     }
     let _ = write!(
         s,
-        "set +m; _sx=0; [ -f \"$_st/x\" ] && {{ _sc={TIMEOUT_EXIT_CODE}; _sx=1; }}; "
+        "wait \"$_sp\" 2>/dev/null; _sc=$?; _sx=0; \
+         if [ -n \"$_sw\" ]; then \
+           if mkdir \"$_st/claim\" 2>/dev/null; then kill -TERM -\"$_sw\" 2>/dev/null; \
+           else wait \"$_sw\" 2>/dev/null; [ -f \"$_st/gone\" ] || {{ _sc={TIMEOUT_EXIT_CODE}; _sx=1; }}; fi; \
+         fi; \
+         kill -TERM -\"$_sv\" 2>/dev/null; set +m; "
     );
     if capture {
         let _ = write!(

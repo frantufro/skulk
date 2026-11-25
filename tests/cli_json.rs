@@ -1486,3 +1486,38 @@ fn exec_stops_the_command_when_skulk_goes_away() {
     }
     assert!(!alive(), "command {} outlived skulk", pid.trim());
 }
+
+#[test]
+fn exec_timeout_kills_a_child_that_traps_term_after_the_grace_period() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    let worktree = project.exec_agent(&name);
+    let start = Instant::now();
+
+    let result = json_success(&project.skulk(&[
+        "exec",
+        &name,
+        "--timeout",
+        "1",
+        "--",
+        "sh",
+        "-c",
+        r#"sh -c 'trap "" TERM; echo $$ > child.pid; exec sleep 60' & sleep 60"#,
+    ]));
+
+    let elapsed = start.elapsed();
+    assert_eq!(result["exit_code"], 124);
+    assert_eq!(result["timed_out"], true);
+    assert!(
+        elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(20),
+        "expected TERM, a grace period, then KILL; took {elapsed:?}"
+    );
+    let child = std::fs::read_to_string(worktree.join("child.pid")).expect("child pid");
+    let alive = Command::new("kill")
+        .args(["-0", child.trim()])
+        .output()
+        .expect("run kill")
+        .status
+        .success();
+    assert!(!alive, "child {} survived KILL", child.trim());
+}
