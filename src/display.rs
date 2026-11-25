@@ -4,9 +4,13 @@ use crate::agent_ref::AgentRef;
 use crate::config::Config;
 use crate::inventory::{AgentState, GcOrphans, Session};
 
+/// Version of every JSON payload skulk prints, carried as `"v"`. Bump it when
+/// a payload changes in a way that breaks existing consumers.
+pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
+
 /// Serialize an error as a JSON object and print it to stderr.
 ///
-/// Schema: `{"error": "<msg>", "code": "<snake_case_variant>"}`
+/// Schema: `{"v": 1, "error": "<msg>", "code": "<snake_case_variant>"}`
 pub(crate) fn emit_json_error(msg: &str, err: &crate::error::SkulkError) {
     eprintln!("{}", render_json(&json_error(msg, err.code_str())));
 }
@@ -14,6 +18,7 @@ pub(crate) fn emit_json_error(msg: &str, err: &crate::error::SkulkError) {
 /// Build the JSON error object printed to stderr on failure.
 pub(crate) fn json_error(msg: &str, code: &str) -> serde_json::Value {
     serde_json::json!({
+        "v": JSON_SCHEMA_VERSION,
         "error": msg,
         "code": code,
     })
@@ -24,13 +29,24 @@ pub(crate) fn emit_json(value: &impl serde::Serialize) {
     println!("{}", render_json(value));
 }
 
-/// Render `value` as the compact JSON line `emit_json` prints.
+/// Render `value` as the compact JSON line `emit_json` prints, stamping
+/// `"v": JSON_SCHEMA_VERSION` onto it.
 pub(crate) fn render_json(value: &impl serde::Serialize) -> String {
-    // serde_json::to_string only fails for types that have non-string map keys
+    // Serialization only fails for types that have non-string map keys
     // or custom serializers that return errors — neither applies here.
-    match serde_json::to_string(value) {
+    let stamped = serde_json::to_value(value).map(|mut v| {
+        if let serde_json::Value::Object(map) = &mut v {
+            map.insert("v".to_string(), JSON_SCHEMA_VERSION.into());
+        }
+        v
+    });
+    match stamped.and_then(|v| serde_json::to_string(&v)) {
         Ok(json) => json,
-        Err(e) => format!("{{\"error\":\"json serialization failed: {e}\"}}"),
+        Err(e) => json_error(
+            &format!("json serialization failed: {e}"),
+            "json_serialization",
+        )
+        .to_string(),
     }
 }
 
@@ -261,6 +277,29 @@ mod tests {
             serde_json::from_str(&serialized).expect("output must be valid JSON");
         assert_eq!(round_tripped["name"], "skulk");
         assert_eq!(round_tripped["count"], 1_u32);
+    }
+
+    #[test]
+    fn render_json_stamps_schema_version_on_objects() {
+        let value = Payload {
+            name: "skulk",
+            count: 1,
+        };
+
+        let rendered: serde_json::Value =
+            serde_json::from_str(&render_json(&value)).expect("valid JSON");
+
+        assert_eq!(rendered["v"], 1);
+        assert_eq!(rendered["name"], "skulk");
+    }
+
+    #[test]
+    fn json_error_carries_schema_version_message_and_code() {
+        let err = json_error("skulk destroy: No agent 'x' found.", "not_found");
+
+        assert_eq!(err["v"], 1);
+        assert_eq!(err["error"], "skulk destroy: No agent 'x' found.");
+        assert_eq!(err["code"], "not_found");
     }
 
     fn sess(name: &str, created: i64, state: AgentState, worktree: Option<&str>) -> Session {
