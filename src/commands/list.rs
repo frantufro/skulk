@@ -111,7 +111,10 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
     (sessions, remote_now)
 }
 
-/// Build a JSON array of session objects for the `list` command's JSON output mode.
+/// Build the `list` command's JSON payload: `{"agents": [...]}`.
+///
+/// The array sits inside an object so the payload can carry the `"v"` schema
+/// version that `emit_json` stamps on every top-level object.
 ///
 /// This is a pure function (no I/O) so it is directly unit-testable.
 pub(crate) fn json_sessions(
@@ -143,7 +146,7 @@ pub(crate) fn json_sessions(
             })
         })
         .collect();
-    serde_json::Value::Array(agents)
+    serde_json::json!({ "agents": agents })
 }
 
 pub(crate) fn cmd_list(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError> {
@@ -384,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn json_sessions_emits_array() {
+    fn json_sessions_wraps_agents_in_an_object() {
         let cfg = test_config_json();
         let sessions = vec![make_session(
             "skulk-my-task",
@@ -393,8 +396,17 @@ mod tests {
             Some("/home/user/agents/skulk-my-task"),
         )];
         let value = json_sessions(&sessions, 1_700_000_200, &cfg);
-        assert!(value.is_array());
-        assert_eq!(value.as_array().unwrap().len(), 1);
+        assert!(value.is_object());
+        assert_eq!(value["agents"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn json_sessions_with_no_agents_has_empty_agents_array() {
+        let cfg = test_config_json();
+
+        let value = json_sessions(&[], 1_700_000_000, &cfg);
+
+        assert_eq!(value["agents"], serde_json::json!([]));
     }
 
     #[test]
@@ -407,7 +419,7 @@ mod tests {
             Some("/home/user/worktrees/skulk-my-task"),
         )];
         let value = json_sessions(&sessions, 1_700_000_200, &cfg);
-        let obj = &value[0];
+        let obj = &value["agents"][0];
         assert_eq!(obj["name"], "my-task");
         assert_eq!(obj["status"], "detached");
         // branch is derived from the session name, not the worktree path
@@ -426,7 +438,7 @@ mod tests {
             Some("/wt/skulk-zombie"),
         )];
         let value = json_sessions(&sessions, 1_700_000_000, &cfg);
-        let obj = &value[0];
+        let obj = &value["agents"][0];
         assert_eq!(obj["status"], "stopped");
         assert!(obj["uptime_secs"].is_null());
     }
@@ -441,7 +453,7 @@ mod tests {
             None,
         )];
         let value = json_sessions(&sessions, 1_700_000_100, &cfg);
-        assert_eq!(value[0]["name"], "feature-x");
+        assert_eq!(value["agents"][0]["name"], "feature-x");
     }
 
     #[test]
@@ -456,7 +468,7 @@ mod tests {
             None,
         )];
         let value = json_sessions(&sessions, 1_700_000_100, &cfg);
-        assert_eq!(value[0]["branch"], "skulk-task");
+        assert_eq!(value["agents"][0]["branch"], "skulk-task");
     }
 
     #[test]
@@ -483,7 +495,7 @@ mod tests {
         )];
         let value = json_sessions(&sessions, 1_700_000_100, &cfg);
         assert_eq!(
-            value[0]["name"], "my-feature",
+            value["agents"][0]["name"], "my-feature",
             "name field must strip session prefix"
         );
     }
@@ -500,7 +512,7 @@ mod tests {
             Some("/wt/skulk-dead-agent"),
         )];
         let value = json_sessions(&sessions, 1_700_000_000, &cfg);
-        let obj = &value[0];
+        let obj = &value["agents"][0];
         assert_eq!(obj["status"], "stopped");
         assert!(
             obj["uptime_secs"].is_null(),
