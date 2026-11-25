@@ -128,7 +128,12 @@ pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
             "No {CONFIG_DIR}/{CONFIG_FILENAME} found. Run `skulk init` to set up this project."
         ));
     };
-    let content = std::fs::read_to_string(&path)
+    load_config_file(&path)
+}
+
+/// Loads and validates the config file at `path`.
+fn load_config_file(path: &Path) -> Result<Config, String> {
+    let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut cfg: Config = toml::from_str(&content)
         .map_err(|e| format!("invalid config in {}: {e}", path.display()))?;
