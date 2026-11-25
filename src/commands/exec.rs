@@ -290,22 +290,22 @@ fn env_payload(env: &[(String, String)]) -> Vec<u8> {
 /// names that are not shell identifiers and other value types are skipped,
 /// as is a file that does not parse.
 fn settings_env(settings: &str) -> Vec<(String, String)> {
-    let Ok(serde_json::Value::Object(root)) = serde_json::from_str(settings) else {
+    let Ok(serde_json::Value::Object(mut root)) = serde_json::from_str(settings) else {
         return Vec::new();
     };
-    let Some(serde_json::Value::Object(env)) = root.get("env") else {
+    let Some(serde_json::Value::Object(env)) = root.remove("env") else {
         return Vec::new();
     };
-    env.iter()
+    env.into_iter()
         .filter(|(k, _)| is_shell_identifier(k))
         .filter_map(|(k, v)| {
             let value = match v {
-                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::String(s) => s,
                 serde_json::Value::Number(n) => n.to_string(),
                 serde_json::Value::Bool(b) => b.to_string(),
                 _ => return None,
             };
-            Some((k.clone(), value))
+            Some((k, value))
         })
         .collect()
 }
