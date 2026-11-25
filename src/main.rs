@@ -50,6 +50,12 @@ pub(crate) struct Cli {
     #[arg(long, global = true, conflicts_with = "json")]
     pub(crate) human: bool,
 
+    /// Use this config file, or the project directory holding
+    /// `.skulk/config.toml`, instead of searching upward from the current
+    /// directory
+    #[arg(long, global = true, value_name = "PATH")]
+    pub(crate) config: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
@@ -664,9 +670,36 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::List,
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn config_flag_parses_a_path_before_the_subcommand() {
+        let cli = Cli::try_parse_from(["skulk", "--config", "/p/.skulk/config.toml", "list"])
+            .expect("--config should parse");
+
+        assert_eq!(
+            cli.config.as_deref(),
+            Some(std::path::Path::new("/p/.skulk/config.toml"))
+        );
+    }
+
+    #[test]
+    fn config_flag_is_global_and_parses_after_the_subcommand() {
+        let cli = Cli::try_parse_from(["skulk", "--json", "destroy", "x", "--config", "/p"])
+            .expect("--config should parse after the subcommand");
+
+        assert_eq!(cli.config.as_deref(), Some(std::path::Path::new("/p")));
+    }
+
+    #[test]
+    fn config_flag_defaults_to_none() {
+        let cli = Cli::try_parse_from(["skulk", "list"]).expect("list should parse");
+
+        assert!(cli.config.is_none());
     }
 
     #[test]
@@ -677,6 +710,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Pull { force: false },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
@@ -696,6 +730,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::New {
                 name: "test".into(),
                 github: None,
@@ -722,6 +757,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Destroy {
                 name: "target".into(),
                 force: true,
@@ -738,6 +774,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::DestroyAll { force: true },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
@@ -751,6 +788,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Gc { dry_run: true },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
@@ -764,6 +802,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Connect {
                 name: "test".into(),
             },
@@ -779,6 +818,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Diff {
                 name: "test".into(),
                 stat: false,
@@ -796,6 +836,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Diff {
                 name: "test".into(),
                 stat: true,
@@ -813,6 +854,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Diff {
                 name: "test".into(),
                 stat: false,
@@ -908,6 +950,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::New {
                 name: "test".into(),
                 github: Some("42".into()),
@@ -940,6 +983,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::New {
                 name: "test".into(),
                 github: None,
@@ -962,6 +1006,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::New {
                 name: "test".into(),
                 github: Some("42".into()),
@@ -986,6 +1031,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Disconnect {
                 name: "test".into(),
             },
@@ -1001,6 +1047,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Logs {
                 name: "test".into(),
                 follow: false,
@@ -1051,6 +1098,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Send {
                 name: "test".into(),
                 prompt: Some("fix bug".into()),
@@ -1107,6 +1155,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Send {
                 name: "test".into(),
                 prompt: None,
@@ -1127,6 +1176,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Send {
                 name: "test".into(),
                 prompt: None,
@@ -1150,6 +1200,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Push {
                 name: "test".into(),
             },
@@ -1165,6 +1216,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Archive {
                 name: "test".into(),
                 reason: None,
@@ -1201,6 +1253,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Restart {
                 name: "test".into(),
                 remote_control: false,
@@ -1228,6 +1281,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Replay {
                 name: "task".into(),
                 new_name: None,
@@ -1269,6 +1323,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Replay {
                 name: "task".into(),
                 new_name: None,
@@ -1292,6 +1347,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::GitLog {
                 name: "test".into(),
             },
@@ -1311,6 +1367,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Ship {
                 name: "test".into(),
             },
@@ -1334,6 +1391,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Status {
                 name: "test".into(),
             },
@@ -1349,6 +1407,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Transcript {
                 name: "test".into(),
                 output: None,
@@ -1365,6 +1424,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Wait {
                 name: Some("test".into()),
                 all: false,
@@ -1382,6 +1442,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Wait {
                 name: None,
                 all: true,
@@ -1489,6 +1550,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Doctor,
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
@@ -1511,6 +1573,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Upload {
                 to: None,
                 force: false,
@@ -1554,6 +1617,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::Upload {
                 to: None,
                 force: false,
@@ -1576,6 +1640,7 @@ mod tests {
             no_color: true,
             json: false,
             human: false,
+            config: None,
             command: Commands::List,
         };
         let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());

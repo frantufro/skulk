@@ -18,7 +18,7 @@ use clap::Parser;
 
 use crate::commands::completions;
 use crate::commands::init::{self, InitOutcome, Prompter};
-use crate::config::{self, OutputFormat, load_config};
+use crate::config::{self, OutputFormat, load_config, load_explicit_config};
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_ssh_error};
 use crate::ssh::Ssh;
@@ -493,11 +493,26 @@ pub(crate) fn main() {
     }
 
     // All other commands require config
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut cfg = match load_config(&cwd) {
+    let loaded = if let Some(path) = cli.config.as_deref() {
+        load_explicit_config(path)
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        load_config(&cwd)
+    };
+    let mut cfg = match loaded {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("skulk: {e}");
+            if cli.json {
+                eprintln!(
+                    "{}",
+                    crate::display::render_json(&crate::display::json_error(
+                        &format!("skulk: {e}"),
+                        "config"
+                    ))
+                );
+            } else {
+                eprintln!("skulk: {e}");
+            }
             std::process::exit(1);
         }
     };

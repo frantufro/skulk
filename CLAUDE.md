@@ -70,6 +70,7 @@ worktree_base = "~/your-project-worktrees"
 ```
 
 `--json` / `--human` global flags override `output_format` at runtime.
+`--config <path>` (a config file or a project directory) skips the upward search.
 
 ## Never Do
 

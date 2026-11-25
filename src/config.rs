@@ -131,6 +131,27 @@ pub(crate) fn load_config(start: &Path) -> Result<Config, String> {
     load_config_file(&path)
 }
 
+/// Loads configuration from an explicitly named `path` (the `--config` flag).
+///
+/// `path` is either a config file or a project directory holding
+/// `.skulk/config.toml`. Unlike [`load_config`] it never walks upward, so the
+/// caller gets exactly the project it named, whatever the current directory.
+///
+/// # Errors
+///
+/// Returns an error if the file does not exist, cannot be read, or is invalid.
+pub(crate) fn load_explicit_config(path: &Path) -> Result<Config, String> {
+    let file = if path.is_dir() {
+        config_path_in(path)
+    } else {
+        path.to_path_buf()
+    };
+    if !file.is_file() {
+        return Err(format!("Config file not found: {}", file.display()));
+    }
+    load_config_file(&file)
+}
+
 /// Loads and validates the config file at `path`.
 fn load_config_file(path: &Path) -> Result<Config, String> {
     let content = std::fs::read_to_string(path)
@@ -146,10 +167,16 @@ fn load_config_file(path: &Path) -> Result<Config, String> {
     if let Some(ref script) = cfg.init_script {
         validate_shell_safe(script, "init_script")?;
     }
-    // root_dir is the project directory (parent of `.skulk/`), not the config
-    // file's parent. The config sits at `project/.skulk/config.toml`, so walk
-    // up twice.
-    cfg.root_dir = path.parent().and_then(Path::parent).map(Path::to_path_buf);
+    // root_dir is the project directory: the parent of `.skulk/` for the usual
+    // `project/.skulk/config.toml`, or the file's own directory for a config
+    // named directly with `--config` that lives elsewhere.
+    let parent = path.parent();
+    let root = if parent.and_then(Path::file_name) == Some(CONFIG_DIR.as_ref()) {
+        parent.and_then(Path::parent)
+    } else {
+        parent
+    };
+    cfg.root_dir = root.map(Path::to_path_buf);
     Ok(cfg)
 }
 
@@ -415,6 +442,76 @@ mod tests {
         assert_eq!(cfg.session_prefix, "bot-");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_config_loads_the_named_file() {
+        let dir = std::env::temp_dir().join("skulk_explicit_file_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(config_path_in(&dir), full_toml()).unwrap();
+
+        let cfg = load_explicit_config(&config_path_in(&dir)).unwrap();
+
+        assert_eq!(cfg.host, "mars");
+        assert_eq!(cfg.root_dir.as_deref(), Some(dir.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_config_accepts_the_project_directory() {
+        let dir = std::env::temp_dir().join("skulk_explicit_dir_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(config_path_in(&dir), full_toml()).unwrap();
+
+        let cfg = load_explicit_config(&dir).unwrap();
+
+        assert_eq!(cfg.host, "mars");
+        assert_eq!(cfg.root_dir.as_deref(), Some(dir.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_config_outside_skulk_dir_uses_its_parent_as_root() {
+        let dir = std::env::temp_dir().join("skulk_explicit_loose_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("project.toml");
+        std::fs::write(&path, full_toml()).unwrap();
+
+        let cfg = load_explicit_config(&path).unwrap();
+
+        assert_eq!(cfg.root_dir.as_deref(), Some(dir.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_config_does_not_walk_up_from_a_directory() {
+        let parent = std::env::temp_dir().join("skulk_explicit_nowalk_test");
+        let child = parent.join("subdir");
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(parent.join(CONFIG_DIR)).unwrap();
+        std::fs::write(config_path_in(&parent), full_toml()).unwrap();
+
+        let err = load_explicit_config(&child).unwrap_err();
+
+        assert!(
+            err.contains("subdir"),
+            "should name the missing path: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn explicit_config_errors_when_path_is_missing() {
+        let path = std::env::temp_dir().join("skulk_explicit_missing_test.toml");
+        let _ = std::fs::remove_file(&path);
+
+        let err = load_explicit_config(&path).unwrap_err();
+
+        assert!(err.contains("skulk_explicit_missing_test.toml"), "{err}");
     }
 
     #[test]
