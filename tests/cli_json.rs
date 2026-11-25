@@ -764,6 +764,9 @@ fn events_reports_an_idle_state_change_within_two_seconds() {
 
 #[test]
 fn events_exits_non_zero_when_the_connection_drops() {
+    if !tmux_available() {
+        return;
+    }
     let project = Project::with_base_clone();
     let mut events = EventStream::start(&project);
     events.next_of_type("snapshot", Duration::from_secs(10));
