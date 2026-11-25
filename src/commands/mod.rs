@@ -5,6 +5,7 @@ pub(crate) mod download;
 pub(crate) mod events;
 pub(crate) mod follow;
 pub(crate) mod gc;
+pub(crate) mod get;
 pub(crate) mod init;
 pub(crate) mod interact;
 pub(crate) mod list;

@@ -20,8 +20,8 @@ use clap::{Parser, Subcommand};
 
 use commands::local_ops::LocalOps;
 use commands::{
-    completions, destroy, doctor, download, events, gc, interact, list, new, pull, put, replay,
-    restart, ship, status, update, upload, wait,
+    completions, destroy, doctor, download, events, gc, get, interact, list, new, pull, put,
+    replay, restart, ship, status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -464,6 +464,34 @@ pub(crate) enum Commands {
         dest: Option<String>,
     },
 
+    /// Copy a file or directory out of an agent's worktree
+    ///
+    /// Copies one file, or a directory's files with `--recursive`, from a path
+    /// relative to the agent's worktree. A file goes to <DEST> (or into it, when
+    /// it is an existing directory); a directory's contents go into <DEST>.
+    /// Without <DEST>, both land in the current directory under their own name.
+    /// Existing local files are overwritten. Paths that leave the worktree,
+    /// including through a symlink, are refused; symlinks that stay inside are
+    /// copied as regular files. `--list` reports the files without copying.
+    Get {
+        /// Agent whose worktree holds the file
+        name: String,
+        /// File or directory, relative to the agent's worktree
+        path: String,
+        /// Local destination
+        #[arg(conflicts_with = "list")]
+        dest: Option<std::path::PathBuf>,
+        /// Copy a directory and everything under it
+        #[arg(short, long)]
+        recursive: bool,
+        /// List the files (and their sizes) instead of copying them
+        #[arg(long)]
+        list: bool,
+        /// Refuse when the files total more than this many megabytes (1 MB = 1,000,000 bytes)
+        #[arg(long, value_name = "MB", default_value_t = get::DEFAULT_MAX_MB)]
+        max_mb: u64,
+    },
+
     /// Bring a remote agent's branch and Claude session to a local worktree
     ///
     /// Reverse of `skulk upload`. Creates a local git worktree at `../<branch>`,
@@ -517,6 +545,7 @@ impl Commands {
             Commands::Update => "update",
             Commands::Upload { .. } => "upload",
             Commands::Put { .. } => "put",
+            Commands::Get { .. } => "get",
             Commands::Download { .. } => "download",
         }
     }
@@ -647,6 +676,25 @@ pub(crate) fn run(
         Commands::Update => update::cmd_update(&update::UreqClient),
         Commands::Upload { to, force } => upload::cmd_upload(ssh, local, to.as_deref(), force, cfg),
         Commands::Put { name, file, dest } => put::cmd_put(ssh, &name, &file, dest.as_deref(), cfg),
+        Commands::Get {
+            name,
+            path,
+            dest,
+            recursive,
+            list,
+            max_mb,
+        } => get::cmd_get(
+            ssh,
+            &get::GetRequest {
+                name: &name,
+                path: &path,
+                dest: dest.as_deref(),
+                recursive,
+                list,
+                max_bytes: max_mb.saturating_mul(1_000_000),
+            },
+            cfg,
+        ),
         Commands::Download { name, force } => download::cmd_download(ssh, local, &name, force, cfg),
     };
 
