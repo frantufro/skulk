@@ -284,7 +284,7 @@ pub(crate) fn send_initial_prompt(
 ) -> Result<Submission, SkulkError> {
     ssh.run(&send_prompt_command(name, prompt, cfg))?;
     let session_name = AgentRef::new(name, cfg).session_name();
-    Ok(confirm_submission(ssh, &session_name, cfg, pacing))
+    Ok(confirm_submission(ssh, &session_name, prompt, cfg, pacing))
 }
 
 /// Store the prompt on the remote so `skulk replay` can re-send it.
