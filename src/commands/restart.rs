@@ -1,5 +1,7 @@
 use crate::agent::Agent;
-use crate::config::{Config, DEFAULT_HARNESS};
+use crate::agent_ref::AgentRef;
+use crate::config::{Config, DEFAULT_HARNESS, OutputFormat};
+use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::inventory::{Lifecycle, fetch_inventory};
 use crate::remote::{self, LaunchOptions};
@@ -67,6 +69,11 @@ pub(crate) fn cmd_restart(
         return Err(agent.classify(failure.error));
     }
 
+    if cfg.output_format == OutputFormat::Json {
+        emit_json(&json_restart_result(name, model, remote_control, cfg));
+        return Ok(());
+    }
+
     // Mirrors the Mode-line logic in `cmd_new`: for OpenCode the
     // skip-permissions / remote-control flags don't apply (permission is
     // granted via opencode.json; --remote-control is silently dropped).
@@ -94,12 +101,34 @@ pub(crate) fn cmd_restart(
     Ok(())
 }
 
+/// Build the JSON result for a successful `restart`.
+///
+/// `remote_control` reports what took effect: `OpenCode` drops the flag.
+pub(crate) fn json_restart_result(
+    name: &str,
+    model: Option<&str>,
+    remote_control: bool,
+    cfg: &Config,
+) -> serde_json::Value {
+    let agent = AgentRef::new(name, cfg);
+    serde_json::json!({
+        "ok": true,
+        "agent": name,
+        "branch": agent.branch_name(),
+        "session": agent.session_name(),
+        "worktree": agent.worktree_path(cfg),
+        "harness": cfg.harness,
+        "model": model,
+        "remote_control": remote_control && cfg.harness == DEFAULT_HARNESS,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::{
         MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
-        ssh_ok, test_config,
+        ssh_ok, test_config, test_config_json,
     };
 
     #[test]
@@ -131,6 +160,60 @@ mod tests {
             ssh_ok(),
         ]);
         assert!(cmd_restart(&ssh, "task", false, None, None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn json_restart_result_reports_agent_location_and_launch_settings() {
+        let cfg = test_config_json();
+
+        let value = json_restart_result("task", Some("opus"), true, &cfg);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agent"], "task");
+        assert_eq!(value["branch"], "skulk-task");
+        assert_eq!(value["session"], "skulk-task");
+        assert_eq!(value["worktree"], "~/test-project-worktrees/skulk-task");
+        assert_eq!(value["harness"], "claude");
+        assert_eq!(value["model"], "opus");
+        assert_eq!(value["remote_control"], true);
+    }
+
+    #[test]
+    fn json_restart_result_reports_remote_control_off_for_opencode() {
+        let cfg = crate::config::Config {
+            harness: "opencode".to_string(),
+            ..test_config_json()
+        };
+
+        let value = json_restart_result("task", None, true, &cfg);
+
+        assert_eq!(value["remote_control"], false);
+        assert!(value["model"].is_null());
+    }
+
+    #[test]
+    fn cmd_restart_in_json_mode_succeeds() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(
+                &[],
+                &[("skulk-task", "/path/skulk-task")],
+                &["skulk-task"],
+            )),
+            ssh_ok(),
+        ]);
+
+        assert!(cmd_restart(&ssh, "task", false, None, None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_restart_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Ok(mock_empty_inventory())]);
+
+        let result = cmd_restart(&ssh, "ghost", false, None, None, &cfg);
+
+        assert_err!(result, SkulkError::NotFound(_) => {});
     }
 
     #[test]
