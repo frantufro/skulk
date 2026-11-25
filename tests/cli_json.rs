@@ -459,3 +459,127 @@ fn new_emits_json_error_when_base_clone_is_missing() {
 
     assert_eq!(err["code"], "validation");
 }
+
+// ── put ─────────────────────────────────────────────────────────────────
+
+impl Project {
+    fn worktree(&self, name: &str) -> PathBuf {
+        self.root.join("worktrees").join(format!("skulk-{name}"))
+    }
+
+    /// A local file outside every worktree, holding `contents`.
+    fn local_file(&self, file_name: &str, contents: &[u8]) -> PathBuf {
+        let dir = self.root.join("local");
+        std::fs::create_dir_all(&dir).expect("create local dir");
+        let file = dir.join(file_name);
+        std::fs::write(&file, contents).expect("write local file");
+        file
+    }
+}
+
+#[test]
+fn put_copies_file_into_default_upload_dir_and_reports_absolute_path() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let image = project.local_file("image.png", b"png bytes");
+
+    let value = json_success(&project.skulk(&["put", &name, path(&image)]));
+
+    let expected = project
+        .worktree(&name)
+        .join("tmp/bzworkspace-uploads/image.png");
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["path"], path(&expected));
+    assert_eq!(
+        std::fs::read(&expected).expect("uploaded file"),
+        b"png bytes"
+    );
+}
+
+#[test]
+fn put_numbers_the_default_name_when_it_is_taken() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let first = project.local_file("image.png", b"first");
+    json_success(&project.skulk(&["put", &name, path(&first)]));
+    let second = project.local_file("image.png", b"second");
+    json_success(&project.skulk(&["put", &name, path(&second)]));
+    let third = project.local_file("image.png", b"third");
+
+    let value = json_success(&project.skulk(&["put", &name, path(&third)]));
+
+    let dir = project.worktree(&name).join("tmp/bzworkspace-uploads");
+    assert_eq!(value["path"], path(&dir.join("image-2.png")));
+    assert_eq!(
+        std::fs::read(dir.join("image.png")).expect("first"),
+        b"first"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("image-1.png")).expect("second"),
+        b"second"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("image-2.png")).expect("third"),
+        b"third"
+    );
+}
+
+#[test]
+fn put_overwrites_an_explicit_destination() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let old = project.local_file("old.txt", b"old");
+    json_success(&project.skulk(&["put", &name, path(&old), "docs/my notes.txt"]));
+    let new = project.local_file("new.txt", b"new");
+
+    let value = json_success(&project.skulk(&["put", &name, path(&new), "docs/my notes.txt"]));
+
+    let expected = project.worktree(&name).join("docs/my notes.txt");
+    assert_eq!(value["path"], path(&expected));
+    assert_eq!(std::fs::read(&expected).expect("uploaded file"), b"new");
+}
+
+#[test]
+fn put_leaves_no_staging_file_in_the_worktree() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let image = project.local_file("image.png", b"png");
+
+    json_success(&project.skulk(&["put", &name, path(&image)]));
+
+    let leftovers: Vec<_> = std::fs::read_dir(project.worktree(&name))
+        .expect("read worktree")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".skulk-put"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging files left: {leftovers:?}");
+}
+
+#[test]
+fn put_emits_json_error_when_agent_has_no_worktree() {
+    let project = Project::with_base_clone();
+    let image = project.local_file("image.png", b"png");
+
+    let err = json_failure(&project.skulk(&["put", &unique("ghost"), path(&image)]));
+
+    assert_eq!(err["code"], "not_found");
+}
+
+#[test]
+fn put_emits_json_error_when_destination_escapes_the_worktree() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let image = project.local_file("image.png", b"png");
+
+    let err = json_failure(&project.skulk(&["put", &name, path(&image), "../outside.png"]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!project.root.join("worktrees/outside.png").exists());
+}

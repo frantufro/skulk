@@ -20,8 +20,8 @@ use clap::{Parser, Subcommand};
 
 use commands::local_ops::LocalOps;
 use commands::{
-    completions, destroy, doctor, download, gc, interact, list, new, pull, replay, restart, ship,
-    status, update, upload, wait,
+    completions, destroy, doctor, download, gc, interact, list, new, pull, put, replay, restart,
+    ship, status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -437,6 +437,23 @@ pub(crate) enum Commands {
         force: bool,
     },
 
+    /// Copy a local file into an agent's worktree
+    ///
+    /// Prints the absolute path the file landed at on the remote. With no
+    /// destination, the file goes to `tmp/bzworkspace-uploads/<name>`, with
+    /// characters other than letters, digits, `.`, `_` and `-` replaced by
+    /// `-`; when that name is taken, it is numbered (`image-1.png`,
+    /// `image-2.png`, ...) so earlier paths keep their files. An explicit
+    /// destination is overwritten.
+    Put {
+        /// Agent whose worktree receives the file
+        name: String,
+        /// Local file to copy
+        file: std::path::PathBuf,
+        /// Destination relative to the agent's worktree
+        dest: Option<String>,
+    },
+
     /// Bring a remote agent's branch and Claude session to a local worktree
     ///
     /// Reverse of `skulk upload`. Creates a local git worktree at `../<branch>`,
@@ -488,6 +505,7 @@ impl Commands {
             Commands::Completions { .. } => "completions",
             Commands::Update => "update",
             Commands::Upload { .. } => "upload",
+            Commands::Put { .. } => "put",
             Commands::Download { .. } => "download",
         }
     }
@@ -616,6 +634,7 @@ pub(crate) fn run(
         ),
         Commands::Update => update::cmd_update(&update::UreqClient),
         Commands::Upload { to, force } => upload::cmd_upload(ssh, local, to.as_deref(), force, cfg),
+        Commands::Put { name, file, dest } => put::cmd_put(ssh, &name, &file, dest.as_deref(), cfg),
         Commands::Download { name, force } => download::cmd_download(ssh, local, &name, force, cfg),
     };
 
@@ -649,6 +668,30 @@ mod tests {
                 assert!(force);
             }
             _ => panic!("expected Commands::Download"),
+        }
+    }
+
+    #[test]
+    fn put_accepts_agent_file_and_optional_destination() {
+        let cli = Cli::try_parse_from(["skulk", "put", "task", "/tmp/a.png", "docs/a.png"])
+            .expect("parsing put with a destination should succeed");
+        match cli.command {
+            Commands::Put { name, file, dest } => {
+                assert_eq!(name, "task");
+                assert_eq!(file, std::path::PathBuf::from("/tmp/a.png"));
+                assert_eq!(dest.as_deref(), Some("docs/a.png"));
+            }
+            _ => panic!("expected Commands::Put"),
+        }
+    }
+
+    #[test]
+    fn put_destination_defaults_to_none() {
+        let cli = Cli::try_parse_from(["skulk", "put", "task", "/tmp/a.png"])
+            .expect("bare put should parse");
+        match cli.command {
+            Commands::Put { dest, .. } => assert_eq!(dest, None),
+            _ => panic!("expected Commands::Put"),
         }
     }
 

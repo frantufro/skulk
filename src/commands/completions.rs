@@ -36,6 +36,7 @@ const AGENT_COMMANDS: &[&str] = &[
     "git-log",
     "logs",
     "push",
+    "put",
     "restart",
     "send",
     "ship",
