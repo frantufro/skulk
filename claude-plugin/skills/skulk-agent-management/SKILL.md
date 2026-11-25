@@ -102,6 +102,12 @@ skulk send <name> "Also add tests for the edge case"
 # Send a prompt from a file
 skulk send <name> --from <file>
 
+# Copy a local file (e.g. a screenshot) into the agent's worktree; prints its
+# absolute remote path. Defaults to tmp/bzworkspace-uploads/<file name>,
+# numbered (image-1.png, ...) when taken. A path given as the third argument
+# is relative to the worktree and overwritten.
+skulk put <name> <file> [<dest>]
+
 # Attach to the live tmux session (interactive terminal)
 skulk connect <name>
 # Detach with Ctrl+B then D

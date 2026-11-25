@@ -216,7 +216,7 @@ skulk gc --dry-run
 | `skulk connect <name>` | Attach to an agent's live tmux session |
 | `skulk disconnect <name>` | Detach all clients from an agent's session |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent (`--from` to read from a file) |
-| `skulk put <name> <file> [<dest>]` | Copy a local file into the agent's worktree and print its absolute remote path. Default destination is `tmp/bzworkspace-uploads/<file name>`, numbered (`image-1.png`, …) when taken; an explicit `<dest>` (relative to the worktree) is overwritten |
+| `skulk put <name> <file> [<dest>]` | Copy a local file into the agent's worktree and print its absolute remote path. Default destination is `tmp/bzworkspace-uploads/<file name>`, numbered (`image-1.png`, …) when taken; an explicit `<dest>` (relative to the worktree) is overwritten. Refuses paths that leave the worktree through a symlink |
 | `skulk restart-window <name> <window>` | Restart one window of the agent's session (e.g. the dev server in `server`) with the command it was created with — see [Init Hook](#per-agent-setup-init-hook) |
 | **Review** | |
 | `skulk diff <name>` | Show git diff against the default branch (`--stat`, `--name-only`) |
