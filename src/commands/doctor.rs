@@ -30,6 +30,8 @@ enum CheckStatus {
 
 #[derive(Debug)]
 struct CheckRow {
+    /// Stable machine-readable identifier used in the JSON output.
+    id: &'static str,
     /// Stored as `String` so the harness row can carry the configured
     /// binary name (e.g. `"opencode"`) — every other row uses a static
     /// label.
@@ -146,6 +148,7 @@ fn config_row(cfg: &Config) -> CheckRow {
         },
     );
     CheckRow {
+        id: "config",
         label: "Config".into(),
         value: display,
         status: CheckStatus::Ok,
@@ -155,6 +158,7 @@ fn config_row(cfg: &Config) -> CheckRow {
 
 fn skulk_row() -> CheckRow {
     CheckRow {
+        id: "skulk",
         label: "skulk".into(),
         value: LOCAL_SKULK_VERSION.to_string(),
         status: CheckStatus::Ok,
@@ -164,6 +168,7 @@ fn skulk_row() -> CheckRow {
 
 fn ssh_ok_row(cfg: &Config) -> CheckRow {
     CheckRow {
+        id: "ssh",
         label: "SSH".into(),
         value: cfg.host.clone(),
         status: CheckStatus::Ok,
@@ -180,6 +185,7 @@ fn ssh_fail_row(cfg: &Config, err: &SkulkError) -> CheckRow {
         other => other.to_string(),
     };
     CheckRow {
+        id: "ssh",
         label: "SSH".into(),
         value: cfg.host.clone(),
         status: CheckStatus::Fail,
@@ -189,16 +195,17 @@ fn ssh_fail_row(cfg: &Config, err: &SkulkError) -> CheckRow {
 
 fn skipped_remote_rows(cfg: &Config) -> Vec<CheckRow> {
     vec![
-        skipped_row("tmux", "—"),
-        skipped_row(&cfg.harness, "—"),
-        skipped_row("gh", "—"),
-        skipped_row("Base clone", &cfg.base_path),
-        skipped_row("Worktree dir", &cfg.worktree_base),
+        skipped_row("tmux", "tmux", "—"),
+        skipped_row("harness", &cfg.harness, "—"),
+        skipped_row("gh", "gh", "—"),
+        skipped_row("base_clone", "Base clone", &cfg.base_path),
+        skipped_row("worktree_dir", "Worktree dir", &cfg.worktree_base),
     ]
 }
 
-fn skipped_row(label: &str, value: &str) -> CheckRow {
+fn skipped_row(id: &'static str, label: &str, value: &str) -> CheckRow {
     CheckRow {
+        id,
         label: label.to_string(),
         value: value.to_string(),
         status: CheckStatus::Skipped,
@@ -219,12 +226,14 @@ fn remote_rows(probe: &ProbeResults, cfg: &Config) -> Vec<CheckRow> {
 fn tmux_row(version: Option<&str>, host: &str) -> CheckRow {
     match version {
         Some(v) => CheckRow {
+            id: "tmux",
             label: "tmux".into(),
             value: v.to_string(),
             status: CheckStatus::Ok,
             note: None,
         },
         None => CheckRow {
+            id: "tmux",
             label: "tmux".into(),
             value: "missing".into(),
             status: CheckStatus::Fail,
@@ -245,12 +254,14 @@ fn tmux_row(version: Option<&str>, host: &str) -> CheckRow {
 fn harness_row(version: Option<&str>, harness: &str, host: &str) -> CheckRow {
     match version {
         Some(v) => CheckRow {
+            id: "harness",
             label: harness.to_string(),
             value: v.to_string(),
             status: CheckStatus::Ok,
             note: None,
         },
         None => CheckRow {
+            id: "harness",
             label: harness.to_string(),
             value: "missing".into(),
             status: CheckStatus::Fail,
@@ -279,12 +290,14 @@ fn harness_install_hint(harness: &str, host: &str) -> String {
 fn gh_row(version: Option<&str>, authenticated: bool, host: &str) -> CheckRow {
     match (version, authenticated) {
         (Some(v), true) => CheckRow {
+            id: "gh",
             label: "gh".into(),
             value: format!("authenticated ({v})"),
             status: CheckStatus::Ok,
             note: None,
         },
         (Some(v), false) => CheckRow {
+            id: "gh",
             label: "gh".into(),
             value: format!("{v} (not authenticated)"),
             status: CheckStatus::Warn,
@@ -295,6 +308,7 @@ fn gh_row(version: Option<&str>, authenticated: bool, host: &str) -> CheckRow {
             )),
         },
         (None, _) => CheckRow {
+            id: "gh",
             label: "gh".into(),
             value: "missing".into(),
             status: CheckStatus::Warn,
@@ -310,6 +324,7 @@ fn gh_row(version: Option<&str>, authenticated: bool, host: &str) -> CheckRow {
 fn base_clone_row(exists: bool, base_path: &str, host: &str) -> CheckRow {
     if exists {
         CheckRow {
+            id: "base_clone",
             label: "Base clone".into(),
             value: base_path.to_string(),
             status: CheckStatus::Ok,
@@ -317,6 +332,7 @@ fn base_clone_row(exists: bool, base_path: &str, host: &str) -> CheckRow {
         }
     } else {
         CheckRow {
+            id: "base_clone",
             label: "Base clone".into(),
             value: base_path.to_string(),
             status: CheckStatus::Fail,
@@ -331,6 +347,7 @@ fn base_clone_row(exists: bool, base_path: &str, host: &str) -> CheckRow {
 fn worktree_dir_row(exists: bool, worktree_base: &str, host: &str) -> CheckRow {
     if exists {
         CheckRow {
+            id: "worktree_dir",
             label: "Worktree dir".into(),
             value: worktree_base.to_string(),
             status: CheckStatus::Ok,
@@ -338,6 +355,7 @@ fn worktree_dir_row(exists: bool, worktree_base: &str, host: &str) -> CheckRow {
         }
     } else {
         CheckRow {
+            id: "worktree_dir",
             label: "Worktree dir".into(),
             value: worktree_base.to_string(),
             status: CheckStatus::Fail,
@@ -712,6 +730,7 @@ mod tests {
     #[test]
     fn render_row_appends_indented_note() {
         let row = CheckRow {
+            id: "ssh",
             label: "SSH".into(),
             value: "myhost".into(),
             status: CheckStatus::Fail,
@@ -731,6 +750,7 @@ mod tests {
     #[test]
     fn render_row_no_note_is_single_line() {
         let row = CheckRow {
+            id: "config",
             label: "Config".into(),
             value: ".skulk/config.toml".into(),
             status: CheckStatus::Ok,
