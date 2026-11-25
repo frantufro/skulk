@@ -620,7 +620,7 @@ fn format_rollback_failure_warning(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{MockSsh, ssh_err, ssh_ok, test_config};
+    use crate::testutil::{MockSsh, PrivateTmux, ssh_err, ssh_ok, test_config};
 
     #[test]
     fn create_worktree_command_generates_correct_shell() {
@@ -1037,6 +1037,83 @@ mod tests {
             "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null \
              | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^')"
         );
+    }
+
+    // ── resolve_agent_window on a private tmux server ──────────────
+
+    /// Type `marker` into the window `resolve_agent_window` picks and read it
+    /// back through the same resolution, as `send` and `logs` do.
+    fn send_and_capture_via_resolved_window(tmux: &PrivateTmux, marker: &str) -> String {
+        let resolve = resolve_agent_window("skulk-my-task");
+        tmux.sh(&format!(
+            "{resolve} && tmux send-keys -t \"$skulk_win\" -l {marker}"
+        ));
+        tmux.sh_until(
+            &format!("{resolve} && tmux capture-pane -p -t \"$skulk_win\""),
+            marker,
+        )
+    }
+
+    fn active_window_name(tmux: &PrivateTmux) -> String {
+        tmux.sh("tmux display-message -p -t skulk-my-task '#{window_name}'")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn resolved_window_is_the_named_agent_window_when_server_window_is_active() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux new-window -t skulk-my-task -n server cat");
+        assert_eq!(active_window_name(&tmux), "server");
+
+        let resolved = send_and_capture_via_resolved_window(&tmux, "MARK-NAMED");
+
+        assert!(resolved.contains("MARK-NAMED"), "capture: {resolved}");
+        let agent = tmux.sh_until("tmux capture-pane -p -t skulk-my-task:agent", "MARK-NAMED");
+        assert!(agent.contains("MARK-NAMED"), "agent window: {agent}");
+        let server = tmux.sh("tmux capture-pane -p -t skulk-my-task:server");
+        assert!(!server.contains("MARK-NAMED"), "server window: {server}");
+    }
+
+    #[test]
+    fn resolved_window_falls_back_to_window_zero_in_an_unnamed_session() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task cat && \
+             tmux new-window -t skulk-my-task -n server cat");
+        assert_eq!(active_window_name(&tmux), "server");
+
+        let resolved = send_and_capture_via_resolved_window(&tmux, "MARK-OLD");
+
+        assert!(resolved.contains("MARK-OLD"), "capture: {resolved}");
+        let first = tmux.sh_until("tmux capture-pane -p -t skulk-my-task:0", "MARK-OLD");
+        assert!(first.contains("MARK-OLD"), "window 0: {first}");
+        let server = tmux.sh("tmux capture-pane -p -t skulk-my-task:server");
+        assert!(!server.contains("MARK-OLD"), "server window: {server}");
+    }
+
+    #[test]
+    fn resolved_window_falls_back_to_window_one_when_base_index_is_one() {
+        let Some(tmux) = PrivateTmux::start(1) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task cat && \
+             tmux new-window -t skulk-my-task -n server cat");
+        let indexes = tmux.sh("tmux list-windows -t skulk-my-task -F '#{window_index}'");
+        assert_eq!(indexes, "1\n2\n");
+        assert_eq!(active_window_name(&tmux), "server");
+
+        let resolved = send_and_capture_via_resolved_window(&tmux, "MARK-BASE1");
+
+        assert!(resolved.contains("MARK-BASE1"), "capture: {resolved}");
+        let first = tmux.sh_until("tmux capture-pane -p -t skulk-my-task:1", "MARK-BASE1");
+        assert!(first.contains("MARK-BASE1"), "window 1: {first}");
+        let server = tmux.sh("tmux capture-pane -p -t skulk-my-task:server");
+        assert!(!server.contains("MARK-BASE1"), "server window: {server}");
     }
 
     #[test]

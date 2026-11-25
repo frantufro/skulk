@@ -360,7 +360,7 @@ pub(crate) fn cmd_send(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::resolve_agent_window;
+    use crate::testutil::PrivateTmux;
     use crate::testutil::{MockSsh, assert_err, ssh_err, ssh_ok, test_config};
 
     #[test]
@@ -369,10 +369,7 @@ mod tests {
         let cmd = connect_command("my-task", &cfg);
         assert_eq!(
             cmd,
-            format!(
-                "{} && tmux attach-session -t \"$skulk_win\"",
-                resolve_agent_window("skulk-my-task")
-            )
+            "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && tmux attach-session -t \"$skulk_win\""
         );
     }
 
@@ -629,10 +626,7 @@ mod tests {
         let cmd = capture_pane_command("my-task", &cfg);
         assert_eq!(
             cmd,
-            format!(
-                "{} && tmux capture-pane -p -t \"$skulk_win\"",
-                resolve_agent_window("skulk-my-task")
-            )
+            "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && tmux capture-pane -p -t \"$skulk_win\""
         );
     }
 
@@ -649,10 +643,7 @@ mod tests {
         let cmd = logs_snapshot_deep_command("my-task", 500, &cfg);
         assert_eq!(
             cmd,
-            format!(
-                "{} && tmux capture-pane -p -t \"$skulk_win\" -S -500",
-                resolve_agent_window("skulk-my-task")
-            )
+            "skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && tmux capture-pane -p -t \"$skulk_win\" -S -500"
         );
     }
 
@@ -674,9 +665,37 @@ mod tests {
     fn send_command_types_prompt_then_submits() {
         let cfg = test_config();
         let cmd = send_command("my-task", "fix the bug", &cfg);
-        assert!(cmd.contains(&resolve_agent_window("skulk-my-task")));
-        assert!(cmd.contains("tmux send-keys -t \"$skulk_win\" 'fix the bug'"));
-        assert!(cmd.contains("tmux send-keys -t \"$skulk_win\" Enter"));
+        assert_eq!(
+            cmd,
+            "mkdir -p ~/.skulk/state && printf busy > ~/.skulk/state/skulk-my-task && \
+             skulk_win=$(tmux list-windows -t skulk-my-task -F '#{window_name}' 2>/dev/null | grep -qx agent && echo skulk-my-task:agent || echo 'skulk-my-task:^') && \
+             tmux send-keys -t \"$skulk_win\" 'fix the bug' && \
+             sleep 0.1 && \
+             tmux send-keys -t \"$skulk_win\" Enter"
+        );
+    }
+
+    #[test]
+    fn send_and_logs_reach_the_agent_window_while_server_window_is_active() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
+             tmux new-window -t skulk-my-task -n server cat");
+        let active = tmux.sh("tmux display-message -p -t skulk-my-task '#{window_name}'");
+        assert_eq!(active.trim(), "server");
+        let cfg = test_config();
+
+        tmux.sh(&send_command("my-task", "MARK-SEND", &cfg));
+
+        let logs = tmux.sh_until(&capture_pane_command("my-task", &cfg), "MARK-SEND");
+        assert!(logs.contains("MARK-SEND"), "logs: {logs}");
+        let deep = tmux.sh(&logs_snapshot_deep_command("my-task", 50, &cfg));
+        assert!(deep.contains("MARK-SEND"), "deep logs: {deep}");
+        let agent = tmux.sh("tmux capture-pane -p -t skulk-my-task:agent");
+        assert!(agent.contains("MARK-SEND"), "agent window: {agent}");
+        let server = tmux.sh("tmux capture-pane -p -t skulk-my-task:server");
+        assert!(!server.contains("MARK-SEND"), "server window: {server}");
     }
 
     #[test]

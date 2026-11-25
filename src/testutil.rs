@@ -480,6 +480,92 @@ impl LocalOps for MockLocalOps {
     }
 }
 
+static NEXT_PRIVATE_TMUX: AtomicU64 = AtomicU64::new(0);
+
+/// A tmux server private to one test.
+///
+/// Every command run through [`PrivateTmux::sh`] gets `TMUX_TMPDIR` (and
+/// `HOME`) pointed at a fresh temp dir and `TMUX` unset, so even a bare
+/// `tmux` call inside it can never reach the default server, where every
+/// agent on the host runs. Dropping it kills that private server only.
+pub(crate) struct PrivateTmux {
+    dir: PathBuf,
+}
+
+impl PrivateTmux {
+    /// Start a private server whose new windows are numbered from
+    /// `base_index`. Returns `None` (the caller skips) when tmux is not
+    /// installed.
+    pub(crate) fn start(base_index: u32) -> Option<Self> {
+        let installed = std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !installed {
+            eprintln!("skipping: tmux is not installed");
+            return None;
+        }
+        // Kept short: tmux socket paths are limited to about 100 bytes.
+        let dir = PathBuf::from(format!(
+            "/tmp/skulk-tmux-{}-{}",
+            std::process::id(),
+            NEXT_PRIVATE_TMUX.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("create private tmux dir");
+        let tmux = Self { dir };
+        // A keeper session holds the server open; `-f /dev/null` ignores the
+        // user's config so window numbering is predictable.
+        tmux.sh(&format!(
+            "tmux -f /dev/null new-session -d -s keeper cat && \
+             tmux set-option -g base-index {base_index}"
+        ));
+        Some(tmux)
+    }
+
+    /// Run `script` with `sh -c` against this server and return stdout.
+    /// Panics with stderr when the script fails.
+    pub(crate) fn sh(&self, script: &str) -> String {
+        let output = self.command(script).output().expect("run sh");
+        assert!(
+            output.status.success(),
+            "script failed: {script}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Run `script` repeatedly for up to three seconds until its stdout
+    /// contains `needle` (keystrokes reach a pane asynchronously). Returns
+    /// the last stdout.
+    pub(crate) fn sh_until(&self, script: &str, needle: &str) -> String {
+        let mut stdout = String::new();
+        for _ in 0..60 {
+            stdout = self.sh(script);
+            if stdout.contains(needle) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        stdout
+    }
+
+    fn command(&self, script: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script])
+            .env("TMUX_TMPDIR", &self.dir)
+            .env("HOME", &self.dir)
+            .env_remove("TMUX");
+        cmd
+    }
+}
+
+impl Drop for PrivateTmux {
+    fn drop(&mut self) {
+        let _ = self.command("tmux kill-server").output();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
