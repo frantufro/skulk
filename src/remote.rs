@@ -578,10 +578,21 @@ fn create_tmux_command(
     let worktree = agent.worktree_path(cfg);
     let sequence = build_launch_sequence(name, cfg, remote_control, model, claude_args);
     let escaped = shell_escape(&sequence);
+    let hide_status = hide_status_line_command(&session);
     format!(
         "tmux new-session -d -s {session} -n {AGENT_WINDOW} -c {worktree} && \
+         {hide_status} && \
          tmux send-keys -t {session}:{AGENT_WINDOW} '{escaped}' C-m"
     )
+}
+
+/// Build the tmux command that hides the status line of one agent session.
+///
+/// It sets a session option, so other sessions and the user's global tmux
+/// config keep their status line. Viewers of an agent see only the harness,
+/// and phones get the row back.
+pub(crate) fn hide_status_line_command(session: &str) -> String {
+    format!("tmux set-option -t {session} status off")
 }
 
 /// Build the SSH command to persist an agent's initial prompt to
@@ -1071,6 +1082,64 @@ mod tests {
             cmd.contains("tmux new-session -d -s skulk-my-task -n agent "),
             "new-session must name the harness window, got: {cmd}"
         );
+    }
+
+    #[test]
+    fn create_tmux_command_hides_the_status_line_before_launching() {
+        let cfg = test_config();
+        let cmd = create_tmux_command("my-task", &cfg, false, None, None);
+        let create = cmd.find("tmux new-session").expect("new-session missing");
+        let hide = cmd
+            .find(&hide_status_line_command("skulk-my-task"))
+            .expect("status off missing");
+        let launch = cmd.find("tmux send-keys").expect("send-keys missing");
+        assert!(create < hide && hide < launch, "got: {cmd}");
+    }
+
+    #[test]
+    fn hide_status_line_command_sets_the_session_option_only() {
+        assert_eq!(
+            hide_status_line_command("skulk-my-task"),
+            "tmux set-option -t skulk-my-task status off"
+        );
+    }
+
+    #[test]
+    fn new_agent_session_has_the_status_line_off_on_a_real_tmux() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        let cfg = Config {
+            harness: "true".to_string(),
+            ..test_config()
+        };
+        tmux.sh("mkdir -p ~/test-project-worktrees/skulk-my-task");
+
+        tmux.sh(&create_tmux_command("my-task", &cfg, false, None, None));
+
+        let session = tmux.sh("tmux show-options -t skulk-my-task -v status");
+        assert_eq!(session.trim(), "off");
+        let global = tmux.sh("tmux show-options -g -v status");
+        assert_eq!(global.trim(), "on", "the global option must stay untouched");
+        let keeper = tmux.sh("tmux display-message -p -t keeper '#{status}'");
+        assert_eq!(
+            keeper.trim(),
+            "on",
+            "other sessions must keep their status line"
+        );
+    }
+
+    #[test]
+    fn hide_status_line_turns_off_an_existing_sessions_status_line_on_a_real_tmux() {
+        let Some(tmux) = PrivateTmux::start(0) else {
+            return;
+        };
+        tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat");
+
+        tmux.sh(&hide_status_line_command("skulk-my-task"));
+
+        let status = tmux.sh("tmux display-message -p -t skulk-my-task '#{status}'");
+        assert_eq!(status.trim(), "off");
     }
 
     #[test]
