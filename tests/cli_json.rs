@@ -1443,11 +1443,42 @@ fn exec_reads_dotenv_as_data_without_running_it() {
     assert!(!worktree.join("pwned2").exists(), ".env was executed");
 }
 
+fn pid_alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid.trim()])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Poll until `done` holds or `secs` pass; returns whether it held.
+fn eventually(secs: u64, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while !done() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+fn read_pid(file: &Path) -> String {
+    assert!(
+        eventually(10, || file.exists()),
+        "{} never appeared",
+        file.display()
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::read_to_string(file).expect("read pid file")
+}
+
 #[test]
-fn exec_stops_the_command_when_skulk_goes_away() {
+fn exec_kills_a_term_trapping_command_and_its_child_when_skulk_goes_away() {
     let project = Project::with_base_clone();
     let name = unique("exec");
     let worktree = project.exec_agent(&name);
+    let tmpdir = project.root.join("exec-tmp");
+    std::fs::create_dir_all(&tmpdir).expect("create TMPDIR");
     let mut skulk = Command::new(env!("CARGO_BIN_EXE_skulk"))
         .args(["--json", "--config", path(&project.root)])
         .args([
@@ -1456,36 +1487,65 @@ fn exec_stops_the_command_when_skulk_goes_away() {
             "--",
             "sh",
             "-c",
-            "echo $$ > cmd.pid; exec sleep 60",
+            r#"trap "" TERM; sh -c 'echo $$ > child.pid; exec sleep 60' & echo $$ > cmd.pid; exec sleep 60"#,
         ])
         .env("SKULK_NO_UPDATE_CHECK", "1")
         .env("HOME", project.home())
+        .env("TMPDIR", &tmpdir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn skulk");
-    let pid_file = worktree.join("cmd.pid");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !pid_file.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    std::thread::sleep(Duration::from_millis(100));
-    let pid = std::fs::read_to_string(&pid_file).expect("command pid");
+    let cmd = read_pid(&worktree.join("cmd.pid"));
+    let child = read_pid(&worktree.join("child.pid"));
 
     skulk.kill().expect("kill skulk");
     let _ = skulk.wait();
 
-    let alive = || {
-        Command::new("kill")
-            .args(["-0", pid.trim()])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while alive() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(!alive(), "command {} outlived skulk", pid.trim());
+    assert!(
+        eventually(15, || !pid_alive(&cmd)),
+        "command outlived skulk"
+    );
+    assert!(
+        eventually(15, || !pid_alive(&child)),
+        "child outlived skulk"
+    );
+    let left_in_tmpdir = || std::fs::read_dir(&tmpdir).map_or(0, Iterator::count);
+    assert!(
+        eventually(15, || left_in_tmpdir() == 0),
+        "temp files left in TMPDIR"
+    );
+}
+
+#[test]
+fn exec_human_mode_stops_a_leftover_background_child_without_hanging() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    let worktree = project.exec_agent(&name);
+    let start = Instant::now();
+
+    let out = project.skulk_human(&[
+        "exec",
+        &name,
+        "--",
+        "sh",
+        "-c",
+        "sleep 60 & echo $! > bg.pid; echo hi",
+    ]);
+
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    let bg = std::fs::read_to_string(worktree.join("bg.pid")).expect("bg pid");
+    assert!(
+        !pid_alive(&bg),
+        "background child {} still running",
+        bg.trim()
+    );
 }
 
 #[test]

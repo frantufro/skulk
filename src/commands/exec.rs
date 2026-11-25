@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::io::Write as _;
 
 use crate::agent::Agent;
@@ -332,19 +331,26 @@ fn quote_argv(argv: &[String]) -> String {
 /// (see [`env_payload`]) with `export "$kv"`, which never evaluates the value,
 /// so secrets stay off every command line. It starts the command as a
 /// background job under `set -m`, so the command and its children form their
-/// own process group that the watchdog, the signal trap and the stdin watcher
-/// can kill as a whole. bash, not `sh`: dash ignores `set -m` without a
-/// terminal. The stdin watcher sends `TERM` to that group when stdin reaches
-/// EOF, which happens when skulk or its connection goes away.
+/// own process group. bash, not `sh`: dash ignores `set -m` without a
+/// terminal.
 ///
-/// With a timeout, a watchdog and the script race to create the `claim`
+/// Every stop goes through `_reap`: `TERM` to the group, up to
+/// [`KILL_GRACE_SECS`] for it to empty, then `KILL`. It runs after the
+/// command's leader exits (so background children never outlive the run or
+/// hold its streams open), from the timeout watchdog, from the stdin watcher
+/// when stdin reaches EOF (skulk or its connection went away), and from the
+/// `INT`/`TERM`/`HUP` trap.
+///
+/// With a timeout, the watchdog and the script race to create the `claim`
 /// directory (`mkdir` is atomic), and the winner alone decides the outcome.
 /// If the command ends first, the script claims it and cancels the watchdog.
-/// If the watchdog claims it, it sends `TERM` to the group, polls it for up
-/// to [`KILL_GRACE_SECS`] and then sends `KILL`, and the script waits for it
-/// to finish so that `KILL` always reaches children that trap `TERM`. A
-/// watchdog whose `TERM` finds no group left records `gone`: the command
-/// had already ended, so the run did not time out.
+/// If the watchdog claims it, it reaps the group and the script waits for
+/// it. A watchdog whose `TERM` finds no group left records `gone`: the
+/// command had already ended, so the run did not time out.
+///
+/// The temp dir goes away (an `EXIT` trap covers early exits) before the
+/// script writes its report, and `SIGPIPE` is ignored from then on, so a
+/// dead connection never leaves captured output behind in `$TMPDIR`.
 ///
 /// On its own stderr the script writes a [`STARTED`] marker right before the
 /// command starts and an [`EXITED`] marker (`exit timed_out`) after it ended
@@ -355,60 +361,77 @@ fn quote_argv(argv: &[String]) -> String {
 /// which survive lossy UTF-8 decoding. Otherwise the command writes to the
 /// script's own streams.
 fn exec_script(agent: &Agent, worktree: &str, req: &ExecRequest, capture: bool) -> String {
-    let wt = shell_quote_path(worktree);
-    let name = agent.name();
-    let session = agent.session_name();
-    let mut s = format!(
-        "exec 3<&0; cd {wt} 2>/dev/null || {{ echo 'skulk exec: cannot enter the worktree' >&2; exit 1; }}; \
-         export SKULK_AGENT_NAME='{name}' SKULK_SESSION='{session}' SKULK_BRANCH='{session}' SKULK_WORKTREE=\"$PWD\"; \
-         while IFS= read -r -d '' _kv <&3 && [ -n \"$_kv\" ]; do export \"$_kv\"; done; "
-    );
     let redirect = if capture {
-        " >\"$_st/o\" 2>\"$_st/e\""
+        r#" >"$_st/o" 2>"$_st/e""#
     } else {
         ""
     };
-    let _ = write!(
-        s,
-        "_st=$(mktemp -d \"${{TMPDIR:-/tmp}}/skulk-exec.XXXXXX\") || {{ echo 'skulk exec: cannot create a temp directory' >&2; exit 1; }}; _sp=; \
-         _sv=; _sw=; trap 'for _g in $_sp $_sw $_sv; do kill -TERM -\"$_g\" 2>/dev/null; done; rm -rf \"$_st\"; exit 130' INT TERM HUP; \
-         set -m; printf '\\036{STARTED}\\n' >&2; \
-         {cmd} </dev/null 3<&-{redirect} & _sp=$!; \
-         ( cat >/dev/null; kill -TERM -\"$_sp\" 2>/dev/null ) <&3 >/dev/null 2>&1 & _sv=$!; exec 3<&-; ",
+    let watchdog = match req.timeout_secs {
+        Some(secs) => format!(
+            r#"( sleep {secs}; mkdir "$_st/claim" 2>/dev/null || exit 0
+  _reap "$_sp" || : >"$_st/gone" ) </dev/null >/dev/null 2>&1 & _sw=$!
+"#
+        ),
+        None => String::new(),
+    };
+    let report = if capture {
+        format!(
+            r#"_so=$(wc -c <"$_st/o"); _se=$(wc -c <"$_st/e")
+exec 4<"$_st/o" 5<"$_st/e"; rm -rf "$_st"
+printf '\036{EXITED} %s %s\n' "$_sc" "$_sx" >&2
+printf '{RESULT} %s %s\n' $_so $_se
+head -c {OUTPUT_CAP_BYTES} <&4 | od -An -v -tx1
+echo {STDERR_MARK}
+head -c {OUTPUT_CAP_BYTES} <&5 | od -An -v -tx1
+"#
+        )
+    } else {
+        format!(
+            r#"rm -rf "$_st"
+printf '\036{EXITED} %s %s\n' "$_sc" "$_sx" >&2
+"#
+        )
+    };
+    let script = format!(
+        r#"exec 3<&0
+cd {wt} 2>/dev/null || {{ echo 'skulk exec: cannot enter the worktree' >&2; exit 1; }}
+export SKULK_AGENT_NAME='{name}' SKULK_SESSION='{session}' SKULK_BRANCH='{session}' SKULK_WORKTREE="$PWD"
+while IFS= read -r -d '' _kv <&3 && [ -n "$_kv" ]; do export "$_kv"; done
+_reap() {{
+  kill -TERM -"$1" 2>/dev/null || return 1
+  _i=0
+  while [ "$_i" -lt {grace_tenths} ] && kill -0 -"$1" 2>/dev/null; do sleep 0.1; _i=$((_i + 1)); done
+  kill -KILL -"$1" 2>/dev/null
+  return 0
+}}
+_st=$(mktemp -d "${{TMPDIR:-/tmp}}/skulk-exec.XXXXXX") || {{ echo 'skulk exec: cannot create a temp directory' >&2; exit 1; }}
+_sp= _sv= _sw=
+trap 'rm -rf "$_st"' EXIT
+trap 'for _g in $_sw $_sv; do kill -TERM -"$_g" 2>/dev/null; done; [ -n "$_sp" ] && _reap "$_sp"; exit 130' INT TERM HUP
+set -m
+printf '\036{STARTED}\n' >&2
+{cmd} </dev/null 3<&-{redirect} & _sp=$!
+( cat >/dev/null; _reap "$_sp" ) <&3 >/dev/null 2>&1 & _sv=$!
+exec 3<&-
+{watchdog}wait "$_sp" 2>/dev/null; _sc=$?; _sx=0
+if [ -n "$_sw" ]; then
+  if mkdir "$_st/claim" 2>/dev/null; then kill -TERM -"$_sw" 2>/dev/null
+  else wait "$_sw" 2>/dev/null; [ -f "$_st/gone" ] || {{ _sc={TIMEOUT_EXIT_CODE}; _sx=1; }}
+  fi
+fi
+kill -TERM -"$_sv" 2>/dev/null
+_reap "$_sp"
+set +m
+trap '' PIPE
+{report}exit 0
+"#,
+        wt = shell_quote_path(worktree),
+        name = agent.name(),
+        session = agent.session_name(),
+        grace_tenths = KILL_GRACE_SECS * 10,
         cmd = quote_argv(req.argv),
     );
-    if let Some(secs) = req.timeout_secs {
-        let _ = write!(
-            s,
-            "( sleep {secs}; mkdir \"$_st/claim\" 2>/dev/null || exit 0; \
-             kill -TERM -\"$_sp\" 2>/dev/null || {{ : >\"$_st/gone\"; exit 0; }}; \
-             _i=0; while [ \"$_i\" -lt {KILL_GRACE_SECS} ] && kill -0 -\"$_sp\" 2>/dev/null; do sleep 1; _i=$((_i + 1)); done; \
-             kill -KILL -\"$_sp\" 2>/dev/null; exit 0 ) </dev/null >/dev/null 2>&1 & _sw=$!; "
-        );
-    }
-    let _ = write!(
-        s,
-        "wait \"$_sp\" 2>/dev/null; _sc=$?; _sx=0; \
-         if [ -n \"$_sw\" ]; then \
-           if mkdir \"$_st/claim\" 2>/dev/null; then kill -TERM -\"$_sw\" 2>/dev/null; \
-           else wait \"$_sw\" 2>/dev/null; [ -f \"$_st/gone\" ] || {{ _sc={TIMEOUT_EXIT_CODE}; _sx=1; }}; fi; \
-         fi; \
-         kill -TERM -\"$_sv\" 2>/dev/null; set +m; \
-         printf '\\036{EXITED} %s %s\\n' \"$_sc\" \"$_sx\" >&2; "
-    );
-    if capture {
-        let _ = write!(
-            s,
-            "printf '{RESULT} %s %s\\n' $(wc -c <\"$_st/o\") $(wc -c <\"$_st/e\"); \
-             head -c {OUTPUT_CAP_BYTES} \"$_st/o\" | od -An -v -tx1; \
-             echo {STDERR_MARK}; \
-             head -c {OUTPUT_CAP_BYTES} \"$_st/e\" | od -An -v -tx1; \
-             rm -rf \"$_st\"; exit 0"
-        );
-    } else {
-        s.push_str("rm -rf \"$_st\"; exit 0");
-    }
-    format!("bash -c '{}'", shell_escape(&s))
+    format!("bash -c '{}'", shell_escape(&script))
 }
 
 /// Decode the capture script's output (see [`exec_script`]).
@@ -734,9 +757,9 @@ mod tests {
         req.timeout_secs = Some(7);
         let with = exec_script(&agent, "/w", &req, true);
 
-        assert!(!without.contains("sleep"));
+        assert!(!without.contains("_sw=$!"));
+        assert!(with.contains("_sw=$!"));
         assert!(with.contains("sleep 7"));
-        assert!(with.contains("kill -KILL"));
     }
 
     #[test]
