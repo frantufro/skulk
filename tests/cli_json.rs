@@ -203,3 +203,25 @@ fn list_emits_versioned_object_with_agents_array() {
 
     assert_eq!(value["agents"], serde_json::json!([]));
 }
+
+// ── push ────────────────────────────────────────────────────────────────
+
+#[test]
+fn push_emits_one_json_result_on_success() {
+    let project = Project::with_base_clone();
+    let name = unique("push");
+    git(&project.base_path(), &["branch", &format!("skulk-{name}")]);
+
+    let value = json_success(&project.skulk(&["push", &name]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["branch"], format!("skulk-{name}"));
+}
+
+#[test]
+fn push_emits_json_error_when_branch_is_missing() {
+    let project = Project::with_base_clone();
+
+    json_failure(&project.skulk(&["push", &unique("ghost")]));
+}
