@@ -95,9 +95,15 @@ impl Project {
     /// Install a stub harness that drops the first `ignored` Enters, as Claude
     /// Code does when one arrives mid-paste, then shows the working indicator
     /// for each later one.
+    ///
+    /// The tty goes non-canonical first: in canonical mode the kernel caps a
+    /// line (4096 bytes on Linux, 1024 on macOS) and drops the rest of a
+    /// 10 KiB prompt. `min 1 time 0` makes each read return per byte, since
+    /// `-icanon` alone keeps the VEOF value in the shared VMIN slot.
     fn set_harness_ignoring_enters(&self, ignored: u32) {
         let script = format!(
             "#!/bin/sh\n\
+             stty -icanon min 1 time 0\n\
              echo harness-ready\n\
              n=0\n\
              while IFS= read -r _; do\n\
