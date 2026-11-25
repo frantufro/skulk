@@ -777,7 +777,7 @@ mod tests {
         let cfg = test_config();
         assert_eq!(
             logs_command("my-task", Some("server"), None, &cfg),
-            "skulk_win='skulk-my-task:=server' && tmux capture-pane -p -t \"$skulk_win\""
+            "skulk_win=skulk-my-task:=server && tmux capture-pane -p -t \"$skulk_win\""
         );
     }
 
@@ -786,7 +786,7 @@ mod tests {
         let cfg = test_config();
         assert_eq!(
             logs_command("my-task", Some("server"), Some(300), &cfg),
-            "skulk_win='skulk-my-task:=server' && tmux capture-pane -p -t \"$skulk_win\" -S -300"
+            "skulk_win=skulk-my-task:=server && tmux capture-pane -p -t \"$skulk_win\" -S -300"
         );
     }
 
@@ -800,7 +800,7 @@ mod tests {
         let calls = ssh.calls();
         assert_eq!(calls.len(), 1);
         assert!(
-            calls[0].contains("skulk_win='skulk-test:=server'") && calls[0].contains("-S -100"),
+            calls[0].contains("skulk_win=skulk-test:=server") && calls[0].contains("-S -100"),
             "got: {}",
             calls[0]
         );
@@ -840,7 +840,7 @@ mod tests {
 
         assert_eq!(
             ssh.calls(),
-            vec!["tmux respawn-window -k -t 'skulk-test:=server'".to_string()]
+            vec!["tmux respawn-window -k -t skulk-test:=server".to_string()]
         );
     }
 

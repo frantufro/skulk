@@ -216,7 +216,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         for call in &calls {
             assert!(
-                call.contains("skulk_win='skulk-alpha:=server'"),
+                call.contains("skulk_win=skulk-alpha:=server"),
                 "poll must target the server window: {call}"
             );
         }
