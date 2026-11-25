@@ -463,8 +463,14 @@ fn new_emits_json_error_when_base_clone_is_missing() {
 // ── put ─────────────────────────────────────────────────────────────────
 
 impl Project {
+    /// The agent's worktree as a physical path, which is what `put` prints
+    /// (on macOS `/tmp` is a symlink to `/private/tmp`).
     fn worktree(&self, name: &str) -> PathBuf {
-        self.root.join("worktrees").join(format!("skulk-{name}"))
+        self.root
+            .join("worktrees")
+            .join(format!("skulk-{name}"))
+            .canonicalize()
+            .expect("worktree exists")
     }
 
     /// A local file outside every worktree, holding `contents`.
@@ -552,12 +558,13 @@ fn put_leaves_no_staging_file_in_the_worktree() {
 
     json_success(&project.skulk(&["put", &name, path(&image)]));
 
-    let leftovers: Vec<_> = std::fs::read_dir(project.worktree(&name))
-        .expect("read worktree")
-        .filter_map(Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with(".skulk-put"))
-        .collect();
+    let leftovers: Vec<_> =
+        std::fs::read_dir(project.worktree(&name).join("tmp/bzworkspace-uploads"))
+            .expect("read worktree")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".skulk-put"))
+            .collect();
     assert!(leftovers.is_empty(), "staging files left: {leftovers:?}");
 }
 
@@ -582,4 +589,46 @@ fn put_emits_json_error_when_destination_escapes_the_worktree() {
 
     assert_eq!(err["code"], "validation");
     assert!(!project.root.join("worktrees/outside.png").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn put_refuses_explicit_destination_under_a_symlink_leading_outside() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let outside = project.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("create outside dir");
+    std::os::unix::fs::symlink(&outside, project.worktree(&name).join("docs")).expect("symlink");
+    let file = project.local_file("bashrc", b"evil");
+
+    let err = json_failure(&project.skulk(&["put", &name, path(&file), "docs/.bashrc"]));
+
+    assert_eq!(err["code"], "validation");
+    assert_eq!(
+        std::fs::read_dir(&outside).expect("read outside").count(),
+        0,
+        "nothing written outside the worktree"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn put_refuses_default_destination_when_tmp_is_symlinked_outside() {
+    let project = Project::with_base_clone();
+    let name = unique("put");
+    project.stage_archived_agent(&name);
+    let outside = project.root.join("outside");
+    std::fs::create_dir_all(&outside).expect("create outside dir");
+    std::os::unix::fs::symlink(&outside, project.worktree(&name).join("tmp")).expect("symlink");
+    let image = project.local_file("image.png", b"png");
+
+    let err = json_failure(&project.skulk(&["put", &name, path(&image)]));
+
+    assert_eq!(err["code"], "validation");
+    assert_eq!(
+        std::fs::read_dir(&outside).expect("read outside").count(),
+        0,
+        "nothing written outside the worktree"
+    );
 }

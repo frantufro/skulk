@@ -444,7 +444,8 @@ pub(crate) enum Commands {
     /// characters other than letters, digits, `.`, `_` and `-` replaced by
     /// `-`; when that name is taken, it is numbered (`image-1.png`,
     /// `image-2.png`, ...) so earlier paths keep their files. An explicit
-    /// destination is overwritten.
+    /// destination is overwritten. Paths that leave the worktree through a
+    /// symlink are refused.
     Put {
         /// Agent whose worktree receives the file
         name: String,
