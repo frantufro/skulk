@@ -218,6 +218,7 @@ skulk gc --dry-run
 | `skulk disconnect <name>` | Detach all clients from an agent's session |
 | `skulk send <name> <prompt>` | Send a prompt to a running agent (`--from` to read from a file) |
 | `skulk put <name> <file> [<dest>]` | Copy a local file into the agent's worktree and print its absolute remote path. Default destination is `tmp/bzworkspace-uploads/<file name>`, numbered (`image-1.png`, …) when taken; an explicit `<dest>` (relative to the worktree) is overwritten. Refuses paths that leave the worktree through a symlink |
+| `skulk get <name> <path> [<dest>]` | Copy a file (or a directory with `--recursive`) out of the agent's worktree. A file goes to `<dest>` or into it when it is a directory; a directory's contents go into `<dest>`; the default is the current directory under the same name. `--list` reports files and sizes without copying. Refuses `..`, absolute paths and symlinks leading outside the worktree; symlinks that stay inside are copied as regular files. Capped at 200 MB (200,000,000 bytes) per call (`--max-mb`) |
 | `skulk restart-window <name> <window>` | Restart one window of the agent's session (e.g. the dev server in `server`) with the command it was created with — see [Init Hook](#per-agent-setup-init-hook) |
 | **Review** | |
 | `skulk diff <name>` | Show git diff against the default branch (`--stat`, `--name-only`) |
@@ -430,6 +431,9 @@ skulk new -bad-name       # invalid (leading hyphen)
 | `--lines`, `-l` | `logs` | Number of scrollback lines to show |
 | `--window <WINDOW>`, `-w` | `logs` | Read this tmux window of the agent's session (e.g. `server`) instead of the agent's own window |
 | `--output <FILE>`, `-o` | `transcript` | Write transcript to this file instead of stdout |
+| `--recursive`, `-r` | `get` | Copy a directory and everything under it |
+| `--list` | `get` | List the files (path relative to the worktree, bytes) instead of copying |
+| `--max-mb <MB>` | `get` | Refuse when the files total more than this many megabytes, where 1 MB = 1,000,000 bytes (default: 200) |
 | `--all` | `wait` | Wait for every running agent instead of one |
 | `--timeout <SECS>` | `wait` | Maximum seconds to wait before giving up (default: 1800; applies per agent with `--all`) |
 | `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
@@ -473,6 +477,7 @@ result could not be encoded; it never reaches stdout).
 | `pull` | `ok`, `base_path`, `branch`, `force`, `output` |
 | `ship` | `ok`, `agent`, `pr_url` |
 | `put` | `ok`, `agent`, `path` (absolute path of the file on the remote) |
+| `get` | `agent`, `files` (array of `path` relative to the worktree and `bytes`), `dest` (absolute local path, `null` with `--list`) |
 | `wait` | `ok`, `agent`, `status`, or `reason` on timeout |
 | `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
 
