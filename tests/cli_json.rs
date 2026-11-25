@@ -715,6 +715,12 @@ fn get_copies_a_directory_with_recursive() {
         std::fs::read(dest.join("walkthrough/video.webm")).expect("video"),
         b"webm bytes"
     );
+    let siblings: Vec<_> = std::fs::read_dir(project.root.join("out"))
+        .expect("read out dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(siblings, ["media"], "no temp dir left next to dest");
 }
 
 #[test]
