@@ -274,6 +274,7 @@ pub(crate) enum Commands {
         /// Agent name to archive
         name: String,
         /// Optional annotation stored on the remote as ~/.skulk/archive/<session>.txt
+        /// (the file is written, empty, even without a reason)
         #[arg(long, value_name = "TEXT")]
         reason: Option<String>,
     },
@@ -1255,7 +1256,7 @@ mod tests {
     #[test]
     fn run_dispatches_archive() {
         let cfg = test_config();
-        let ssh = MockSsh::new(vec![ssh_ok()]);
+        let ssh = MockSsh::new(vec![ssh_ok(), ssh_ok()]);
         let cli = Cli {
             no_color: true,
             json: false,
