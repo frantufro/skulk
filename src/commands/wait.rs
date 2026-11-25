@@ -28,8 +28,9 @@ pub(crate) fn json_wait_result(name: &str, success: bool, reason: Option<&str>) 
 ///
 /// The marker file is maintained by the Stop and `UserPromptSubmit` hooks
 /// installed at agent creation (see `remote::hooks_settings_json`).
-/// It contains either `idle` or `busy`. If the file doesn't exist yet
-/// (the agent has never processed a turn) the command prints `missing`.
+/// It contains `idle`, `busy`, or `pending` (skulk is delivering a prompt;
+/// read as busy). If the file doesn't exist yet (the agent has never
+/// processed a turn) the command prints `missing`.
 pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
     let agent = AgentRef::new(name, cfg);
     format!(
@@ -225,6 +226,19 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![ssh_ok(), Ok("idle".into())]);
         assert!(cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn cmd_wait_keeps_polling_while_prompt_is_pending() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            ssh_ok(),
+            Ok("pending".into()),
+            Ok("busy".into()),
+            Ok("idle".into()),
+        ]);
+        assert!(cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::from_secs(60)).is_ok());
+        assert_eq!(ssh.calls().len(), 4);
     }
 
     #[test]
