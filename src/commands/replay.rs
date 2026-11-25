@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::error::SkulkError;
 use crate::inventory::fetch_inventory;
 use crate::ssh::Ssh;
+use crate::submit::SubmitPacing;
 use crate::util::validate_name;
 
 /// Build the SSH command that reads an agent's persisted prompt.
@@ -122,6 +123,7 @@ pub(crate) fn cmd_replay(
     opts: &ReplayOptions,
     cfg: &Config,
     local_env_file: Option<&Path>,
+    pacing: &SubmitPacing,
 ) -> Result<(), SkulkError> {
     let ReplayOptions {
         name: source_name,
@@ -173,6 +175,7 @@ pub(crate) fn cmd_replay(
         claude_args,
         cfg,
         local_env_file,
+        pacing,
     )
 }
 
@@ -352,6 +355,7 @@ mod tests {
             ssh_ok(),                                      // tmux create
             ssh_ok(),                                      // persist prompt
             ssh_ok(),                                      // send prompt
+            crate::submit::probe_frame("busy", ""),        // prompt submitted
         ]);
         let result = cmd_replay(
             &ssh,
@@ -361,6 +365,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert!(result.is_ok(), "replay should succeed: {result:?}");
         // Second-to-last call is the persist; last is send.
@@ -385,6 +390,7 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         assert!(
             cmd_replay(
@@ -395,7 +401,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -419,6 +426,7 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         assert!(
             cmd_replay(
@@ -429,7 +437,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -454,6 +463,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(_) => {});
         assert!(
@@ -476,6 +486,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(_) => {});
         assert!(ssh.calls().is_empty(), "no SSH expected: {:?}", ssh.calls());
@@ -493,6 +504,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("task"));
@@ -522,6 +534,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("retry"));
@@ -560,6 +573,7 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         assert!(
             cmd_replay(
@@ -569,7 +583,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -600,6 +615,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Diagnostic { .. } => {});
     }
@@ -617,6 +633,7 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         assert!(
             cmd_replay(
@@ -626,7 +643,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -656,6 +674,7 @@ mod tests {
             ssh_ok(),
             ssh_ok(),
             ssh_ok(),
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         assert!(
             cmd_replay(
@@ -667,7 +686,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );

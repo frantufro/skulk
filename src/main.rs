@@ -8,6 +8,7 @@ mod inventory;
 mod io;
 mod remote;
 mod ssh;
+mod submit;
 mod timings;
 mod util;
 
@@ -622,7 +623,7 @@ pub(crate) fn run(
                 model: model.as_deref(),
                 claude_args: claude_args.as_deref(),
             };
-            new::cmd_new(ssh, &opts, cfg, env_file.as_deref())
+            new::cmd_new(ssh, &opts, cfg, env_file.as_deref(), &timings.submit)
         }
         Commands::Destroy { name, force } => destroy::cmd_destroy(ssh, &name, force, cfg, confirm),
         Commands::DestroyAll { force } => destroy::cmd_destroy_all(ssh, force, cfg, confirm),
@@ -697,7 +698,7 @@ pub(crate) fn run(
                 model: model.as_deref(),
                 claude_args: claude_args.as_deref(),
             };
-            replay::cmd_replay(ssh, &opts, cfg, env_file.as_deref())
+            replay::cmd_replay(ssh, &opts, cfg, env_file.as_deref(), &timings.submit)
         }
         Commands::GitLog { name, limit } => interact::cmd_git_log(ssh, &name, limit, cfg),
         Commands::Ship { name } => ship::cmd_ship(ssh, &name, cfg),
@@ -1085,10 +1086,11 @@ mod tests {
             Ok(r#"{"title":"T","body":"B","comments":[]}"#.into()),
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(), // worktree
-            ssh_ok(), // tmux create
-            ssh_ok(), // persist prompt
-            ssh_ok(), // send prompt
+            ssh_ok(),                               // worktree
+            ssh_ok(),                               // tmux create
+            ssh_ok(),                               // persist prompt
+            ssh_ok(),                               // send prompt
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         let cli = Cli {
             no_color: true,
@@ -1118,10 +1120,11 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(), // worktree
-            ssh_ok(), // tmux create
-            ssh_ok(), // persist prompt
-            ssh_ok(), // send prompt
+            ssh_ok(),                               // worktree
+            ssh_ok(),                               // tmux create
+            ssh_ok(),                               // persist prompt
+            ssh_ok(),                               // send prompt
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         let cli = Cli {
             no_color: true,
@@ -1439,6 +1442,7 @@ mod tests {
             ssh_ok(),                                      // tmux create
             ssh_ok(),                                      // persist prompt
             ssh_ok(),                                      // send prompt
+            crate::submit::probe_frame("busy", ""),        // prompt submitted
         ]);
         let cli = Cli {
             no_color: true,
