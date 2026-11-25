@@ -12,7 +12,7 @@ pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
 ///
 /// Schema: `{"v": 1, "error": "<msg>", "code": "<snake_case_variant>"}`
 pub(crate) fn emit_json_error(msg: &str, err: &crate::error::SkulkError) {
-    eprintln!("{}", render_json(&json_error(msg, err.code_str())));
+    eprintln!("{}", json_error(msg, err.code_str()));
 }
 
 /// Build the JSON error object printed to stderr on failure.
@@ -25,29 +25,39 @@ pub(crate) fn json_error(msg: &str, code: &str) -> serde_json::Value {
 }
 
 /// Serialize `value` as compact JSON and print it to stdout.
+///
+/// A payload that fails to serialize is reported on stderr as an error
+/// object with code `json_serialization`, keeping stdout free of anything
+/// but results.
 pub(crate) fn emit_json(value: &impl serde::Serialize) {
-    println!("{}", render_json(value));
+    match render_json(value) {
+        Ok(json) => println!("{json}"),
+        Err(e) => eprintln!(
+            "{}",
+            json_error(
+                &format!("json serialization failed: {e}"),
+                "json_serialization"
+            )
+        ),
+    }
 }
 
 /// Render `value` as the compact JSON line `emit_json` prints, stamping
 /// `"v": JSON_SCHEMA_VERSION` onto it.
-pub(crate) fn render_json(value: &impl serde::Serialize) -> String {
-    // Serialization only fails for types that have non-string map keys
-    // or custom serializers that return errors — neither applies here.
-    let stamped = serde_json::to_value(value).map(|mut v| {
-        if let serde_json::Value::Object(map) = &mut v {
-            map.insert("v".to_string(), JSON_SCHEMA_VERSION.into());
-        }
-        v
-    });
-    match stamped.and_then(|v| serde_json::to_string(&v)) {
-        Ok(json) => json,
-        Err(e) => json_error(
-            &format!("json serialization failed: {e}"),
-            "json_serialization",
-        )
-        .to_string(),
+///
+/// Every payload must be a JSON object so it can carry the version.
+///
+/// # Errors
+///
+/// Fails only for types with non-string map keys or custom serializers that
+/// return errors; skulk's payloads have neither.
+pub(crate) fn render_json(value: &impl serde::Serialize) -> Result<String, serde_json::Error> {
+    let mut v = serde_json::to_value(value)?;
+    debug_assert!(v.is_object(), "JSON payloads must be objects, got: {v}");
+    if let serde_json::Value::Object(map) = &mut v {
+        map.insert("v".to_string(), JSON_SCHEMA_VERSION.into());
     }
+    serde_json::to_string(&v)
 }
 
 const GREEN: &str = "\x1b[32m";
@@ -287,10 +297,16 @@ mod tests {
         };
 
         let rendered: serde_json::Value =
-            serde_json::from_str(&render_json(&value)).expect("valid JSON");
+            serde_json::from_str(&render_json(&value).expect("renders")).expect("valid JSON");
 
         assert_eq!(rendered["v"], 1);
         assert_eq!(rendered["name"], "skulk");
+    }
+
+    #[test]
+    #[should_panic(expected = "JSON payloads must be objects")]
+    fn render_json_rejects_non_object_payloads_in_debug_builds() {
+        let _ = render_json(&serde_json::json!([1, 2]));
     }
 
     #[test]

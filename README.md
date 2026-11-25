@@ -447,8 +447,9 @@ object on stderr:
 ```
 
 `code` is one of `validation`, `not_found`, `ssh_exec`, `ssh_failed`,
-`diagnostic`, `update_failed`, or `config` (the config file could not be found
-or loaded).
+`diagnostic`, `update_failed`, `config` (the config file could not be found
+or loaded), or `json_serialization` (a result could not be encoded; it never
+reaches stdout).
 
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
