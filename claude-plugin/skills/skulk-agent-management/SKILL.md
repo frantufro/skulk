@@ -114,6 +114,12 @@ skulk put <name> <file> [<dest>]
 skulk get <name> <path> [<dest>]
 skulk get <name> tmp/review-media --list
 
+# Run a one-off command in the agent's worktree with its session environment
+# (.env and .claude/settings.local.json env). Arguments after -- are passed
+# verbatim. Exits with the command's code; --json returns exit_code, stdout
+# and stderr (1 MiB each). --timeout kills it and reports exit code 124.
+skulk exec <name> --timeout 300 -- bin/rails db:migrate
+
 # Attach to the live tmux session (interactive terminal)
 skulk connect <name>
 # Detach with Ctrl+B then D

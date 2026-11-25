@@ -1202,3 +1202,214 @@ fn git_log_limit_zero_emits_no_commits() {
 
     assert_eq!(json["commits"], serde_json::json!([]));
 }
+
+// ── exec ────────────────────────────────────────────────────────────────
+
+impl Project {
+    /// Run `skulk --config <project> <args>` with human output.
+    fn skulk_human(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_skulk"))
+            .args(["--config", path(&self.root)])
+            .args(args)
+            .current_dir(std::env::temp_dir())
+            .env("SKULK_NO_UPDATE_CHECK", "1")
+            .env("HOME", self.home())
+            .env("SHELL", "/bin/sh")
+            .env("TMUX_TMPDIR", self.root.join("tmux"))
+            .env_remove("TMUX")
+            .output()
+            .expect("run skulk")
+    }
+
+    /// Stage an archived agent named `name` and return its worktree path.
+    fn exec_agent(&self, name: &str) -> PathBuf {
+        self.stage_archived_agent(name);
+        self.worktree(name)
+    }
+}
+
+#[test]
+fn exec_returns_stdout_stderr_and_zero_exit() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let result =
+        json_success(&project.skulk(&["exec", &name, "--", "sh", "-c", "echo out; echo err >&2"]));
+
+    assert_eq!(result["agent"], name.as_str());
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["stdout"], "out\n");
+    assert_eq!(result["stderr"], "err\n");
+    assert_eq!(result["stdout_truncated"], false);
+}
+
+#[test]
+fn exec_runs_in_worktree_with_agent_environment() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    let worktree = project.exec_agent(&name);
+    std::fs::write(worktree.join(".env"), "FROM_DOTENV=dot\n").expect("write .env");
+    std::fs::create_dir_all(worktree.join(".claude")).expect("mkdir .claude");
+    std::fs::write(
+        worktree.join(".claude/settings.local.json"),
+        r#"{"env":{"FROM_SETTINGS":"it's set"}}"#,
+    )
+    .expect("write settings");
+
+    let result = json_success(&project.skulk(&[
+        "exec",
+        &name,
+        "--",
+        "sh",
+        "-c",
+        "pwd -P; echo \"$SKULK_AGENT_NAME|$FROM_DOTENV|$FROM_SETTINGS\"",
+    ]));
+
+    assert_eq!(
+        result["stdout"],
+        format!("{}\n{name}|dot|it's set\n", worktree.display()).as_str()
+    );
+}
+
+#[test]
+fn exec_reports_nonzero_exit_in_json_not_as_failure() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let result =
+        json_success(&project.skulk(&["exec", &name, "--", "sh", "-c", "echo boom >&2; exit 3"]));
+
+    assert_eq!(result["exit_code"], 3);
+    assert_eq!(result["timed_out"], false);
+    assert_eq!(result["stderr"], "boom\n");
+}
+
+#[test]
+fn exec_human_mode_streams_output_and_exits_with_command_code() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let out = project.skulk_human(&["exec", &name, "--", "sh", "-c", "echo hi; exit 7"]);
+
+    assert_eq!(out.status.code(), Some(7));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    assert!(
+        out.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn exec_passes_arguments_with_spaces_and_quotes_verbatim() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+    let args = [
+        "two words",
+        "it's",
+        "say \"hi\"",
+        "$HOME",
+        "`id`; rm -rf /",
+        "",
+    ];
+
+    let mut cmd = vec!["exec", &name, "--", "printf", "[%s]\\n"];
+    cmd.extend(args);
+    let result = json_success(&project.skulk(&cmd));
+
+    let expected: String = args
+        .iter()
+        .fold(String::new(), |acc, a| acc + "[" + a + "]\n");
+    assert_eq!(result["stdout"], expected.as_str());
+    assert_eq!(result["exit_code"], 0);
+}
+
+#[test]
+fn exec_timeout_kills_command_and_its_children_and_keeps_partial_output() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    let worktree = project.exec_agent(&name);
+    let start = Instant::now();
+
+    let result = json_success(&project.skulk(&[
+        "exec",
+        &name,
+        "--timeout",
+        "1",
+        "--",
+        "sh",
+        "-c",
+        "echo before; echo warn >&2; sleep 60 & echo $! > child.pid; wait",
+    ]));
+
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "took {:?}",
+        start.elapsed()
+    );
+    assert_eq!(result["exit_code"], 124);
+    assert_eq!(result["timed_out"], true);
+    assert_eq!(result["stdout"], "before\n");
+    assert_eq!(result["stderr"], "warn\n");
+    let child = std::fs::read_to_string(worktree.join("child.pid")).expect("child pid");
+    let alive = Command::new("kill")
+        .args(["-0", child.trim()])
+        .output()
+        .expect("run kill")
+        .status
+        .success();
+    assert!(
+        !alive,
+        "child process {} survived the timeout",
+        child.trim()
+    );
+}
+
+#[test]
+fn exec_caps_captured_output() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let result = json_success(&project.skulk(&[
+        "exec",
+        &name,
+        "--",
+        "sh",
+        "-c",
+        "head -c 1100000 /dev/zero | tr '\\0' a",
+    ]));
+
+    assert_eq!(result["stdout"].as_str().map(str::len), Some(1024 * 1024));
+    assert_eq!(result["stdout_truncated"], true);
+}
+
+#[test]
+fn exec_emits_json_error_when_agent_is_missing() {
+    let project = Project::with_base_clone();
+
+    let err = json_failure(&project.skulk(&["exec", &unique("exec"), "--", "true"]));
+
+    assert_eq!(err["code"], "not_found");
+}
+
+#[test]
+fn exec_human_mode_reports_timeout_and_exits_124() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let out = project.skulk_human(&["exec", &name, "--timeout", "1", "--", "sleep", "60"]);
+
+    assert_eq!(out.status.code(), Some(124));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("timed out after 1s"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

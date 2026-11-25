@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 
 use commands::local_ops::LocalOps;
 use commands::{
-    completions, destroy, doctor, download, events, gc, get, interact, list, new, pull, put,
+    completions, destroy, doctor, download, events, exec, gc, get, interact, list, new, pull, put,
     replay, restart, ship, status, update, upload, wait,
 };
 use config::Config;
@@ -233,6 +233,27 @@ pub(crate) enum Commands {
         name: String,
         /// Name of the tmux window to restart, e.g. `server`
         window: String,
+    },
+
+    /// Run a one-off command in an agent's worktree
+    ///
+    /// Runs `<cmd> [args…]` in the agent's worktree with the environment its
+    /// session gets: `SKULK_*`, the worktree's `.env`, and the `env` of
+    /// `.claude/settings.local.json`. Each argument reaches the command as
+    /// typed, with no shell interpretation. The agent does not need to be
+    /// running. Output streams and skulk exits with the command's exit code;
+    /// with `--json`, stdout and stderr (1 MiB each at most) and the exit code
+    /// are returned in one object, and a failing command is not a skulk error.
+    Exec {
+        /// Agent name
+        name: String,
+        /// Kill the command (and its children) after this many seconds and
+        /// report exit code 124
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+        /// The command and its arguments, after `--`
+        #[arg(last = true, required = true, value_name = "CMD")]
+        command: Vec<String>,
     },
 
     /// Send a prompt to a running agent
@@ -536,6 +557,7 @@ impl Commands {
             Commands::Disconnect { .. } => "disconnect",
             Commands::Logs { .. } => "logs",
             Commands::RestartWindow { .. } => "restart-window",
+            Commands::Exec { .. } => "exec",
             Commands::Send { .. } => "send",
             Commands::Push { .. } => "push",
             Commands::Archive { .. } => "archive",
@@ -626,6 +648,19 @@ pub(crate) fn run(
         Commands::RestartWindow { name, window } => {
             interact::cmd_restart_window(ssh, &name, &window, cfg)
         }
+        Commands::Exec {
+            name,
+            timeout,
+            command,
+        } => exec::cmd_exec(
+            ssh,
+            &exec::ExecRequest {
+                name: &name,
+                argv: &command,
+                timeout_secs: timeout,
+            },
+            cfg,
+        ),
         Commands::Send { name, prompt, from } => {
             interact::resolve_send_prompt(prompt, from.as_deref())
                 .and_then(|p| interact::cmd_send(ssh, &name, &p, cfg, timings.send_verify_delay))

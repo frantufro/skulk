@@ -21,6 +21,9 @@ pub(crate) enum SkulkError {
     /// Writing results to stdout failed (e.g. the reader went away)
     #[error("Failed to write output: {0}")]
     Output(String),
+    /// A command run by `skulk exec` exited non-zero; skulk exits with its code
+    #[error("Command exited with status {0}")]
+    CommandExit(i32),
 }
 
 impl SkulkError {
@@ -33,6 +36,7 @@ impl SkulkError {
             SkulkError::NotFound(_) => "not_found",
             SkulkError::UpdateFailed(_) => "update_failed",
             SkulkError::Output(_) => "output",
+            SkulkError::CommandExit(_) => "command_exit",
         }
     }
 }
