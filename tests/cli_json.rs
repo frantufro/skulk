@@ -331,3 +331,31 @@ fn archive_emits_json_error_when_agent_is_not_running() {
 
     json_failure(&project.skulk(&["archive", &unique("ghost")]));
 }
+
+// ── restart ─────────────────────────────────────────────────────────────
+
+#[test]
+fn restart_emits_one_json_result_on_success() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let name = unique("restart");
+    project.stage_archived_agent(&name);
+
+    let value = json_success(&project.skulk(&["restart", &name]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["session"], format!("skulk-{name}"));
+    assert!(project.has_session(&format!("skulk-{name}")));
+}
+
+#[test]
+fn restart_emits_json_error_when_agent_has_no_worktree() {
+    let project = Project::with_base_clone();
+
+    let err = json_failure(&project.skulk(&["restart", &unique("ghost")]));
+
+    assert_eq!(err["code"], "not_found");
+}
