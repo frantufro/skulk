@@ -10,7 +10,7 @@ use crate::commands::local_ops::LocalOps;
 use crate::config::{Config, OutputFormat};
 use crate::error::SkulkError;
 use crate::inventory::AgentInventory;
-use crate::ssh::{LineStream, Ssh, StreamRecv};
+use crate::ssh::{LineStream, Ssh, StdoutMode, StreamRecv};
 
 /// Matches a `Result<_, SkulkError>` against an expected error variant.
 ///
@@ -94,7 +94,17 @@ pub(crate) struct MockSsh {
     pub upload_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
     pub download_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
     pub stream_responses: RefCell<VecDeque<Result<Vec<StreamRecv>, SkulkError>>>,
+    pub input_responses: RefCell<VecDeque<Result<InputRun, SkulkError>>>,
+    inputs: RefCell<Vec<Vec<u8>>>,
     calls: RefCell<Vec<String>>,
+}
+
+/// A scripted result of [`Ssh::run_with_input`]: exit code, stdout, and the
+/// stderr lines replayed through `on_stderr`.
+pub(crate) struct InputRun {
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<Vec<u8>>,
 }
 
 /// A [`LineStream`] that replays a fixed script, then reports `Closed`.
@@ -115,6 +125,8 @@ impl MockSsh {
             upload_responses: RefCell::new(VecDeque::new()),
             download_responses: RefCell::new(VecDeque::new()),
             stream_responses: RefCell::new(VecDeque::new()),
+            input_responses: RefCell::new(VecDeque::new()),
+            inputs: RefCell::new(Vec::new()),
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -141,6 +153,17 @@ impl MockSsh {
     ) -> Self {
         self.stream_responses = RefCell::new(responses.into());
         self
+    }
+
+    /// Queue responses for `run_with_input` calls.
+    pub fn with_input_responses(mut self, responses: Vec<Result<InputRun, SkulkError>>) -> Self {
+        self.input_responses = RefCell::new(responses.into());
+        self
+    }
+
+    /// The stdin payloads passed to `run_with_input`, in call order.
+    pub fn inputs(&self) -> Vec<Vec<u8>> {
+        self.inputs.borrow().clone()
     }
 
     /// Returns the commands passed to `run`, `interactive`, `upload_file`, and
@@ -194,6 +217,26 @@ impl Ssh for MockSsh {
             .pop_front()
             .expect("MockSsh: unexpected stream call")?;
         Ok(Box::new(ScriptedStream(script.into())))
+    }
+
+    fn run_with_input(
+        &self,
+        cmd: &str,
+        input: &[u8],
+        _stdout: StdoutMode,
+        on_stderr: &mut dyn FnMut(&[u8]),
+    ) -> Result<(Option<i32>, Vec<u8>), SkulkError> {
+        self.calls.borrow_mut().push(cmd.to_string());
+        self.inputs.borrow_mut().push(input.to_vec());
+        let run = self
+            .input_responses
+            .borrow_mut()
+            .pop_front()
+            .expect("MockSsh: unexpected run_with_input call")?;
+        for line in &run.stderr {
+            on_stderr(line);
+        }
+        Ok((run.code, run.stdout))
     }
 }
 

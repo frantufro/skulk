@@ -21,7 +21,7 @@ use crate::commands::init::{self, InitOutcome, Prompter};
 use crate::config::{self, OutputFormat, load_config, load_explicit_config};
 use crate::display::{COLOR_ENABLED, use_color};
 use crate::error::{SkulkError, classify_ssh_error};
-use crate::ssh::{LineStream, Ssh, StreamRecv};
+use crate::ssh::{LineStream, Ssh, StdoutMode, StreamRecv};
 use crate::util::{confirm_from_reader, shell_escape};
 use crate::{Cli, Commands, run};
 
@@ -131,6 +131,96 @@ impl Ssh for RealSsh {
     ///
     /// Remote hosts get SSH keepalives, so a dead link closes the stream
     /// instead of hanging; `skulk events` also times out on missing frames.
+    fn run_with_input(
+        &self,
+        cmd: &str,
+        input: &[u8],
+        stdout: StdoutMode,
+        on_stderr: &mut dyn FnMut(&[u8]),
+    ) -> Result<(Option<i32>, Vec<u8>), SkulkError> {
+        use std::io::{BufRead, Read, Write};
+        use std::process::Stdio;
+
+        let local = is_localhost(&self.host);
+        let mut command = if local {
+            let mut c = ProcessCommand::new("sh");
+            c.args(["-c", cmd]);
+            c
+        } else {
+            let mut c = ProcessCommand::new("ssh");
+            c.args([
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                &self.host,
+                cmd,
+            ]);
+            c
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(match stdout {
+                StdoutMode::Capture => Stdio::piped(),
+                StdoutMode::Inherit => Stdio::inherit(),
+            })
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if !local && e.kind() == std::io::ErrorKind::NotFound {
+                    SkulkError::Diagnostic {
+                        message: "ssh command not found.".into(),
+                        suggestion: "Install OpenSSH.".into(),
+                    }
+                } else {
+                    SkulkError::SshExec(e.to_string())
+                }
+            })?;
+
+        // Held until the child exits: closing it is the remote's signal that
+        // skulk went away.
+        let mut stdin = child.stdin.take();
+        if let Some(pipe) = stdin.as_mut() {
+            // A command that exits before reading its input is reported through
+            // its exit status, not as a write error.
+            let _ = pipe.write_all(input).and_then(|()| pipe.flush());
+        }
+        let reader = child.stdout.take().map(|mut out| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                out.read_to_end(&mut buf).map(|_| buf)
+            })
+        });
+        if let Some(err) = child.stderr.take() {
+            let mut err = std::io::BufReader::new(err);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match err.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => on_stderr(&line),
+                }
+            }
+        }
+        let captured = match reader {
+            Some(handle) => handle
+                .join()
+                .map_err(|_| SkulkError::SshExec("stdout reader panicked".into()))?
+                .map_err(|e| SkulkError::SshExec(e.to_string()))?,
+            None => Vec::new(),
+        };
+        let status = child
+            .wait()
+            .map_err(|e| SkulkError::SshExec(e.to_string()))?;
+        drop(stdin);
+        Ok((status.code(), captured))
+    }
+
     fn stream(&self, cmd: &str) -> Result<Box<dyn LineStream>, SkulkError> {
         let local = is_localhost(&self.host);
         let mut command = if local {
