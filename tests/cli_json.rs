@@ -225,3 +225,25 @@ fn push_emits_json_error_when_branch_is_missing() {
 
     json_failure(&project.skulk(&["push", &unique("ghost")]));
 }
+
+// ── pull ────────────────────────────────────────────────────────────────
+
+#[test]
+fn pull_emits_one_json_result_on_success() {
+    let project = Project::with_base_clone();
+
+    let value = json_success(&project.skulk(&["pull"]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["branch"], "main");
+    assert_eq!(value["force"], false);
+}
+
+#[test]
+fn pull_emits_json_error_when_base_clone_is_missing() {
+    let project = Project::empty();
+
+    let err = json_failure(&project.skulk(&["pull"]));
+
+    assert_eq!(err["code"], "validation");
+}
