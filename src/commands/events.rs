@@ -52,15 +52,19 @@ const WAIT_FOR_CHANGE: &str = "if command -v inotifywait >/dev/null 2>&1; then \
      else sleep 1; fi";
 
 /// Build the remote watch loop.
+///
+/// The probe's stderr is discarded so nothing piles up on the connection's
+/// stderr, and every write ends the loop when it fails: skulk is gone, even
+/// if SIGPIPE is ignored on the remote.
 pub(crate) fn events_command(cfg: &Config) -> String {
     let probe = agent_state_probe(cfg);
     format!(
         "mkdir -p ~/.skulk/state ~/.skulk/archive; prev=; \
          while :; do \
-         cur=$({probe}; {ARCHIVE_PROBE}); \
+         cur=$({{ {probe}; {ARCHIVE_PROBE}; }} 2>/dev/null); \
          if [ \"$cur\" != \"$prev\" ]; then \
-         printf '{FRAME_START}\\n%s\\n{FRAME_END}\\n' \"$cur\"; prev=$cur; \
-         else echo {SAME}; fi; \
+         printf '{FRAME_START}\\n%s\\n{FRAME_END}\\n' \"$cur\" || exit 1; prev=$cur; \
+         else echo {SAME} || exit 1; fi; \
          {WAIT_FOR_CHANGE}; \
          done"
     )
@@ -751,6 +755,26 @@ mod tests {
         assert!(cmd.contains(&agent_state_probe(&cfg)));
         assert!(cmd.contains("~/.skulk/archive/*.txt"));
         assert!(cmd.contains(FRAME_START) && cmd.contains(FRAME_END) && cmd.contains(SAME));
+    }
+
+    #[test]
+    fn events_command_exits_when_a_write_to_skulk_fails() {
+        let cmd = events_command(&test_config());
+
+        assert!(cmd.contains(&format!("{FRAME_END}\\n' \"$cur\" || exit 1;")));
+        assert!(cmd.contains(&format!("echo {SAME} || exit 1;")));
+    }
+
+    #[test]
+    fn events_command_discards_the_probe_stderr() {
+        let cfg = test_config();
+
+        let cmd = events_command(&cfg);
+
+        assert!(cmd.contains(&format!(
+            "cur=$({{ {}; {ARCHIVE_PROBE}; }} 2>/dev/null);",
+            agent_state_probe(&cfg)
+        )));
     }
 
     #[test]
