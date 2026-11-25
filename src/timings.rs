@@ -6,12 +6,15 @@
 
 use std::time::Duration;
 
+use crate::submit::SubmitPacing;
+
 /// Tunable timing parameters threaded through `run()`.
 ///
 /// Kept as a struct so adding a new timing doesn't touch every call site.
 pub(crate) struct Timings {
     pub send_verify_delay: Duration,
     pub wait_poll_interval: Duration,
+    pub submit: SubmitPacing,
 }
 
 impl Timings {
@@ -19,6 +22,7 @@ impl Timings {
         Self {
             send_verify_delay: Duration::from_millis(500),
             wait_poll_interval: Duration::from_millis(500),
+            submit: SubmitPacing::production(),
         }
     }
 
@@ -27,6 +31,7 @@ impl Timings {
         Self {
             send_verify_delay: Duration::ZERO,
             wait_poll_interval: Duration::ZERO,
+            submit: SubmitPacing::zero(),
         }
     }
 }

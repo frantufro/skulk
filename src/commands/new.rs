@@ -9,12 +9,15 @@ use crate::error::SkulkError;
 use crate::inventory::fetch_inventory;
 use crate::remote::{self, LaunchOptions, STARTUP_DELAY};
 use crate::ssh::Ssh;
+use crate::submit::{Submission, SubmitPacing};
 use crate::util::{check_base_clone, validate_model};
 
 /// Result of delivering a prompt to a newly-created agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptStatus {
     Delivered,
+    /// Pasted, but the harness never took the Enter: it sits in the input box.
+    NotSubmitted,
     Failed,
     NotSent,
 }
@@ -24,6 +27,7 @@ impl PromptStatus {
     fn key(self) -> &'static str {
         match self {
             PromptStatus::Delivered => "delivered",
+            PromptStatus::NotSubmitted => "not_submitted",
             PromptStatus::Failed => "failed",
             PromptStatus::NotSent => "none",
         }
@@ -89,6 +93,7 @@ pub(crate) fn cmd_new(
     opts: &NewOptions,
     cfg: &Config,
     local_env_file: Option<&Path>,
+    pacing: &SubmitPacing,
 ) -> Result<(), SkulkError> {
     let NewOptions {
         name,
@@ -120,6 +125,7 @@ pub(crate) fn cmd_new(
         claude_args,
         cfg,
         local_env_file,
+        pacing,
     )
 }
 
@@ -142,6 +148,7 @@ pub(crate) fn create_agent_with_prompt(
     claude_args: Option<&str>,
     cfg: &Config,
     local_env_file: Option<&Path>,
+    pacing: &SubmitPacing,
 ) -> Result<(), SkulkError> {
     let base_path = &cfg.base_path;
     let host = &cfg.host;
@@ -224,17 +231,29 @@ pub(crate) fn create_agent_with_prompt(
 
     // Step 6: Send prompt if provided
     let prompt_status = if let Some(prompt_text) = prompt {
-        if remote::send_initial_prompt(ssh, name, prompt_text, cfg).is_ok() {
-            PromptStatus::Delivered
-        } else {
-            warn(
-                cfg,
-                &mut warnings,
-                format!(
-                    "Agent '{name}' created but prompt delivery failed. Send manually:\n  skulk send {name} \"...\""
-                ),
-            );
-            PromptStatus::Failed
+        match remote::send_initial_prompt(ssh, name, prompt_text, cfg, pacing) {
+            Ok(Submission::Submitted) => PromptStatus::Delivered,
+            Ok(Submission::NotSubmitted) => {
+                warn(
+                    cfg,
+                    &mut warnings,
+                    format!(
+                        "Agent '{name}' created but its prompt is still in the input box, not submitted. \
+                         Inspect with `skulk connect {name}` and press Enter."
+                    ),
+                );
+                PromptStatus::NotSubmitted
+            }
+            Err(_) => {
+                warn(
+                    cfg,
+                    &mut warnings,
+                    format!(
+                        "Agent '{name}' created but prompt delivery failed. Send manually:\n  skulk send {name} \"...\""
+                    ),
+                );
+                PromptStatus::Failed
+            }
         }
     } else {
         PromptStatus::NotSent
@@ -253,6 +272,9 @@ pub(crate) fn create_agent_with_prompt(
 
     let prompt_line = match prompt_status {
         PromptStatus::Delivered => format!("  Prompt: delivered (after {STARTUP_DELAY}s delay)"),
+        PromptStatus::NotSubmitted => {
+            "  Prompt: not submitted (pasted, but still in the input box)".to_string()
+        }
         PromptStatus::Failed => {
             "  Prompt: delivery failed (agent is running, send manually)".to_string()
         }
@@ -340,10 +362,11 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(), // worktree
-            ssh_ok(), // tmux create
-            ssh_ok(), // persist prompt
-            ssh_ok(), // send prompt
+            ssh_ok(),                               // worktree
+            ssh_ok(),                               // tmux create
+            ssh_ok(),                               // persist prompt
+            ssh_ok(),                               // send prompt
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_persists_prompt.txt");
         std::fs::write(&prompt_file, "fix the bug").unwrap();
@@ -356,6 +379,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         let _ = std::fs::remove_file(&prompt_file);
         assert!(result.is_ok());
@@ -403,7 +427,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -434,6 +459,7 @@ mod tests {
             ssh_ok(),                                       // tmux create
             Err(SkulkError::SshFailed("disk full".into())), // persist fails
             ssh_ok(),                                       // send still runs
+            crate::submit::probe_frame("busy", ""),         // prompt submitted
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_persist_fail.txt");
         std::fs::write(&prompt_file, "fix it").unwrap();
@@ -446,6 +472,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         let _ = std::fs::remove_file(&prompt_file);
         assert!(result.is_ok(), "persist failure must not abort cmd_new");
@@ -469,7 +496,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -481,10 +509,11 @@ mod tests {
         let ssh = MockSsh::new(vec![
             Ok("exists".into()),
             Ok(mock_empty_inventory()),
-            ssh_ok(), // worktree
-            ssh_ok(), // tmux create
-            ssh_ok(), // persist prompt
-            ssh_ok(), // send prompt
+            ssh_ok(),                               // worktree
+            ssh_ok(),                               // tmux create
+            ssh_ok(),                               // persist prompt
+            ssh_ok(),                               // send prompt
+            crate::submit::probe_frame("busy", ""), // prompt submitted
         ]);
         let prompt_file = std::env::temp_dir().join("skulk_cmd_new_succeeds_with_prompt.txt");
         std::fs::write(&prompt_file, "fix the bug").unwrap();
@@ -497,6 +526,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         let _ = std::fs::remove_file(&prompt_file);
         assert!(result.is_ok());
@@ -584,6 +614,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
 
         let _ = std::fs::remove_file(&prompt_file);
@@ -606,6 +637,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
 
         assert!(result.is_err());
@@ -630,7 +662,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -660,7 +693,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -690,7 +724,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -715,6 +750,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("Invalid character"));
@@ -745,7 +781,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -771,6 +808,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("already exists"));
@@ -797,6 +835,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(
@@ -822,6 +861,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Validation(msg) => {
             assert!(msg.contains("Base clone not found"));
@@ -847,6 +887,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert!(result.is_err());
     }
@@ -871,6 +912,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
 
         assert!(result.is_err());
@@ -899,6 +941,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::SshFailed(msg) => {
             assert!(msg.contains("tmux creation failed"));
@@ -927,6 +970,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         let _ = std::fs::remove_file(&prompt_file);
         assert!(result.is_ok());
@@ -953,7 +997,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                Some(&env_path)
+                Some(&env_path),
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -985,7 +1030,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                None
+                None,
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -1017,7 +1063,8 @@ mod tests {
                     ..Default::default()
                 },
                 &cfg,
-                Some(&env_path)
+                Some(&env_path),
+                &SubmitPacing::zero(),
             )
             .is_ok()
         );
@@ -1075,6 +1122,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Diagnostic { message, .. } => {
             assert!(message.contains("refused"));
@@ -1102,6 +1150,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::Diagnostic { message, .. } => {
             assert!(message.contains("not installed"));
@@ -1139,6 +1188,7 @@ mod tests {
             },
             &cfg,
             None,
+            &SubmitPacing::zero(),
         );
         assert_err!(result, SkulkError::NotFound(msg) => {
             assert!(msg.contains("#999"));

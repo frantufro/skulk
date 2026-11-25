@@ -69,9 +69,8 @@ impl Project {
             std::fs::create_dir_all(root.join(dir)).expect("create project dirs");
         }
         let project = Self { root };
-        let harness = project.root.join("bin/harness");
-        std::fs::write(&harness, "#!/bin/sh\nexec sleep 600\n").expect("write stub harness");
-        make_executable(&harness);
+        let harness = project.harness();
+        project.set_harness_ignoring_enters(0);
         std::fs::write(
             project.root.join(".skulk/config.toml"),
             format!(
@@ -87,6 +86,27 @@ impl Project {
         )
         .expect("write config");
         project
+    }
+
+    fn harness(&self) -> PathBuf {
+        self.root.join("bin/harness")
+    }
+
+    /// Install a stub harness that drops the first `ignored` Enters, as Claude
+    /// Code does when one arrives mid-paste, then shows the working indicator
+    /// for each later one.
+    fn set_harness_ignoring_enters(&self, ignored: u32) {
+        let script = format!(
+            "#!/bin/sh\n\
+             n=0\n\
+             while IFS= read -r _; do\n\
+             \x20 n=$((n + 1))\n\
+             \x20 [ \"$n\" -gt {ignored} ] && echo 'Working... (esc to interrupt)'\n\
+             done\n\
+             exec sleep 600\n"
+        );
+        std::fs::write(self.harness(), script).expect("write stub harness");
+        make_executable(&self.harness());
     }
 
     fn base_path(&self) -> PathBuf {
@@ -491,6 +511,48 @@ fn replay_emits_one_json_result_on_success() {
     assert_eq!(value["agent"], replayed.as_str());
     assert_eq!(value["prompt"], "delivered");
     assert!(project.has_session(&format!("skulk-{replayed}")));
+}
+
+#[test]
+fn new_submits_a_long_prompt_when_the_first_enter_is_swallowed() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    project.set_harness_ignoring_enters(1);
+    let name = unique("long");
+    let prompt = project.root.join("prompt.txt");
+    std::fs::write(&prompt, "x".repeat(10 * 1024)).expect("write prompt");
+
+    let value = json_success(&project.skulk(&["new", &name, "--from", path(&prompt)]));
+
+    assert_eq!(value["prompt"], "delivered");
+    assert_eq!(value["warnings"], serde_json::json!([]));
+}
+
+#[test]
+fn new_reports_not_submitted_when_the_prompt_stays_in_the_input_box() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    project.set_harness_ignoring_enters(1_000);
+    let name = unique("stuck");
+    let prompt = project.root.join("prompt.txt");
+    std::fs::write(&prompt, "x".repeat(10 * 1024)).expect("write prompt");
+
+    let value = json_success(&project.skulk(&["new", &name, "--from", path(&prompt)]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["prompt"], "not_submitted");
+    let warnings = value["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().is_some_and(|w| w.contains("not submitted"))),
+        "{warnings:?}"
+    );
+    assert!(project.has_session(&format!("skulk-{name}")));
 }
 
 #[test]

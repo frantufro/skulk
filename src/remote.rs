@@ -12,6 +12,7 @@ use crate::agent_ref::AgentRef;
 use crate::config::{Config, DEFAULT_HARNESS, DEFAULT_INIT_SCRIPT};
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
+use crate::submit::{Submission, SubmitPacing, confirm_submission, settle_delay, sleep_arg};
 use crate::util::shell_escape;
 
 /// Seconds the remote waits before pasting an initial prompt, giving the
@@ -269,14 +270,21 @@ pub(crate) fn roll_back_worktree(ssh: &impl Ssh, name: &str, cfg: &Config) {
     }
 }
 
-/// Paste the initial prompt into the agent's session after the startup delay.
+/// Paste the initial prompt into the agent's session after the startup delay,
+/// then confirm the harness submitted it (see [`confirm_submission`]).
+///
+/// `Err` means the paste itself failed; a paste whose Enter never took is
+/// `Ok(Submission::NotSubmitted)`.
 pub(crate) fn send_initial_prompt(
     ssh: &impl Ssh,
     name: &str,
     prompt: &str,
     cfg: &Config,
-) -> Result<(), SkulkError> {
-    ssh.run(&send_prompt_command(name, prompt, cfg)).map(|_| ())
+    pacing: &SubmitPacing,
+) -> Result<Submission, SkulkError> {
+    ssh.run(&send_prompt_command(name, prompt, cfg))?;
+    let session_name = AgentRef::new(name, cfg).session_name();
+    Ok(confirm_submission(ssh, &session_name, cfg, pacing))
 }
 
 /// Store the prompt on the remote so `skulk replay` can re-send it.
@@ -645,8 +653,9 @@ fn clear_prompt_command(session_name: &str) -> String {
 /// Uses a tmux named buffer + `paste-buffer -p` (bracketed paste) so multi-line
 /// prompts arrive as a single pasted block rather than line-by-line — each newline
 /// in a `send-keys` call would otherwise submit a partial message to Claude Code.
-/// After the paste we sleep briefly then send Enter separately, which defeats
-/// Claude Code's paste-detection swallowing the trailing Enter as a newline.
+/// After the paste we wait for it to settle, longer for a larger prompt (see
+/// [`settle_delay`]), then send Enter separately: an Enter that arrives while
+/// Claude Code is still taking in the paste is swallowed.
 ///
 /// `paste-buffer -d` deletes the buffer atomically with a successful paste, so a
 /// prompt containing sensitive context never lingers in tmux's server-wide buffer
@@ -665,12 +674,13 @@ fn send_prompt_command(name: &str, prompt: &str, cfg: &Config) -> String {
     let session_name = AgentRef::new(name, cfg).session_name();
     let buffer = format!("skulk-prompt-{session_name}");
     let mark_pending = mark_pending_command(&session_name);
+    let settle = sleep_arg(settle_delay(prompt.len()));
     format!(
         "sleep {STARTUP_DELAY} && tmux has-session -t {session_name} && \
          {mark_pending} && \
          tmux set-buffer -b {buffer} -- '{escaped}' && \
          tmux paste-buffer -p -d -t {session_name}:{AGENT_WINDOW} -b {buffer} && \
-         sleep 0.1 && \
+         sleep {settle} && \
          tmux send-keys -t {session_name}:{AGENT_WINDOW} Enter"
     )
 }
@@ -1481,7 +1491,7 @@ mod tests {
         let cmd = send_prompt_command("my-task", "fix the bug", &cfg);
         let paste_idx = cmd.find("tmux paste-buffer").expect("paste step missing");
         let submit_sleep_idx = cmd[paste_idx..]
-            .find("sleep 0.1")
+            .find("sleep 0.200")
             .map(|i| i + paste_idx)
             .expect("submit delay missing");
         let enter_idx = cmd[submit_sleep_idx..]
@@ -1491,6 +1501,67 @@ mod tests {
         assert!(paste_idx < submit_sleep_idx);
         assert!(submit_sleep_idx < enter_idx);
         assert!(cmd[enter_idx..].contains("Enter"));
+    }
+
+    #[test]
+    fn send_prompt_command_lets_a_large_paste_settle_longer_before_enter() {
+        let cfg = test_config();
+        let prompt = "x".repeat(10 * 1024);
+        let cmd = send_prompt_command("my-task", &prompt, &cfg);
+        let paste_idx = cmd.find("tmux paste-buffer").expect("paste step missing");
+        assert!(
+            cmd[paste_idx..].contains("sleep 1.200 && "),
+            "10 KiB prompt should settle for 1.2s: {}",
+            &cmd[paste_idx..]
+        );
+    }
+
+    #[test]
+    fn send_initial_prompt_resends_enter_until_submitted() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![
+            ssh_ok(), // paste + first Enter
+            crate::submit::probe_frame("pending", "> [Pasted text #1 +79 lines]"),
+            ssh_ok(), // second Enter
+            crate::submit::probe_frame("busy", ""),
+        ]);
+
+        let result =
+            send_initial_prompt(&ssh, "my-task", "fix it", &cfg, &SubmitPacing::zero()).unwrap();
+
+        assert_eq!(result, Submission::Submitted);
+        assert!(ssh.calls()[2].contains("skulk-my-task"));
+        assert!(ssh.calls()[2].ends_with("Enter"));
+    }
+
+    #[test]
+    fn send_initial_prompt_reports_not_submitted_when_input_stays_stuck() {
+        let cfg = test_config();
+        let stuck = || crate::submit::probe_frame("pending", "> [Pasted text #1 +79 lines]");
+        let ssh = MockSsh::new(vec![
+            ssh_ok(),
+            stuck(),
+            ssh_ok(),
+            stuck(),
+            ssh_ok(),
+            stuck(),
+        ]);
+
+        let result =
+            send_initial_prompt(&ssh, "my-task", "fix it", &cfg, &SubmitPacing::zero()).unwrap();
+
+        assert_eq!(result, Submission::NotSubmitted);
+    }
+
+    #[test]
+    fn send_initial_prompt_fails_when_paste_fails() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![ssh_err("no session")]);
+
+        let result = send_initial_prompt(&ssh, "my-task", "fix it", &cfg, &SubmitPacing::zero());
+
+        assert!(result.is_err());
+        assert_eq!(ssh.calls().len(), 1, "no probes after a failed paste");
     }
 
     #[test]
