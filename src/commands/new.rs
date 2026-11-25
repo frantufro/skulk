@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::agent::Agent;
 use crate::agent_ref::AgentRef;
 use crate::commands::prompt_source;
-use crate::config::{Config, DEFAULT_HARNESS};
+use crate::config::{Config, DEFAULT_HARNESS, OutputFormat};
+use crate::display::emit_json;
 use crate::error::SkulkError;
 use crate::inventory::fetch_inventory;
 use crate::remote::{self, LaunchOptions, STARTUP_DELAY};
@@ -11,15 +12,31 @@ use crate::ssh::Ssh;
 use crate::util::{check_base_clone, validate_model};
 
 /// Result of delivering a prompt to a newly-created agent.
-enum PromptStatus {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptStatus {
     Delivered,
     Failed,
     NotSent,
 }
 
-/// Report a non-fatal problem to the user.
-fn warn(msg: &str) {
-    eprintln!("Warning: {msg}");
+impl PromptStatus {
+    /// Stable identifier used in JSON output.
+    fn key(self) -> &'static str {
+        match self {
+            PromptStatus::Delivered => "delivered",
+            PromptStatus::Failed => "failed",
+            PromptStatus::NotSent => "none",
+        }
+    }
+}
+
+/// Record a non-fatal problem: printed now in human mode, carried in the
+/// JSON result's `warnings` otherwise.
+fn warn(cfg: &Config, warnings: &mut Vec<String>, msg: String) {
+    if cfg.output_format == OutputFormat::Human {
+        eprintln!("Warning: {msg}");
+    }
+    warnings.push(msg);
 }
 
 /// Resolve the local `.skulk/.env` path for the current project, if it exists.
@@ -150,16 +167,21 @@ pub(crate) fn create_agent_with_prompt(
 
     // Step 3: Create worktree
     remote::create_worktree(ssh, name, cfg)?;
+    let mut warnings: Vec<String> = Vec::new();
 
     // Step 4: Upload local .env to worktree if present.
     // Non-fatal: if the copy fails, init.sh still runs but without the sourced vars.
     if let Some(env_file) = local_env_file {
         let remote_env = format!("{worktree}/.env");
         if let Err(e) = ssh.upload_file(env_file, &remote_env) {
-            warn(&format!(
-                "failed to copy {} to agent worktree: {e}",
-                env_file.display()
-            ));
+            warn(
+                cfg,
+                &mut warnings,
+                format!(
+                    "failed to copy {} to agent worktree: {e}",
+                    env_file.display()
+                ),
+            );
         }
     }
 
@@ -193,9 +215,11 @@ pub(crate) fn create_agent_with_prompt(
         None => remote::clear_prompt(ssh, &session_name),
     };
     if let Err(e) = stored {
-        warn(&format!(
-            "failed to update stored prompt for agent '{name}': {e}"
-        ));
+        warn(
+            cfg,
+            &mut warnings,
+            format!("failed to update stored prompt for agent '{name}': {e}"),
+        );
     }
 
     // Step 6: Send prompt if provided
@@ -203,9 +227,13 @@ pub(crate) fn create_agent_with_prompt(
         if remote::send_initial_prompt(ssh, name, prompt_text, cfg).is_ok() {
             PromptStatus::Delivered
         } else {
-            warn(&format!(
-                "Agent '{name}' created but prompt delivery failed. Send manually:\n  skulk send {name} \"...\""
-            ));
+            warn(
+                cfg,
+                &mut warnings,
+                format!(
+                    "Agent '{name}' created but prompt delivery failed. Send manually:\n  skulk send {name} \"...\""
+                ),
+            );
             PromptStatus::Failed
         }
     } else {
@@ -213,6 +241,16 @@ pub(crate) fn create_agent_with_prompt(
     };
 
     // Step 7: Print success output
+    if cfg.output_format == OutputFormat::Json {
+        let launch = LaunchSummary {
+            model,
+            remote_control,
+            prompt: prompt_status,
+        };
+        emit_json(&json_new_result(name, &launch, &warnings, cfg));
+        return Ok(());
+    }
+
     let prompt_line = match prompt_status {
         PromptStatus::Delivered => format!("  Prompt: delivered (after {STARTUP_DELAY}s delay)"),
         PromptStatus::Failed => {
@@ -255,12 +293,45 @@ pub(crate) fn create_agent_with_prompt(
     Ok(())
 }
 
+/// How a newly created agent was launched, as reported in its JSON result.
+pub(crate) struct LaunchSummary<'a> {
+    pub(crate) model: Option<&'a str>,
+    /// What was requested; `OpenCode` drops it, so the result reports what took effect.
+    pub(crate) remote_control: bool,
+    pub(crate) prompt: PromptStatus,
+}
+
+/// Build the JSON result for a successful `new` (and `replay`).
+///
+/// `ok` is true once the agent is running, even if prompt delivery failed:
+/// `prompt` and `warnings` say what still needs attention.
+pub(crate) fn json_new_result(
+    name: &str,
+    launch: &LaunchSummary,
+    warnings: &[String],
+    cfg: &Config,
+) -> serde_json::Value {
+    let agent = AgentRef::new(name, cfg);
+    serde_json::json!({
+        "ok": true,
+        "agent": name,
+        "branch": agent.branch_name(),
+        "session": agent.session_name(),
+        "worktree": agent.worktree_path(cfg),
+        "harness": cfg.harness,
+        "model": launch.model,
+        "remote_control": launch.remote_control && cfg.harness == DEFAULT_HARNESS,
+        "prompt": launch.prompt.key(),
+        "warnings": warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::{
         MockSsh, assert_err, mock_empty_inventory, mock_inventory, mock_inventory_single_agent,
-        ssh_ok, test_config,
+        ssh_ok, test_config, test_config_json,
     };
 
     #[test]
@@ -429,6 +500,115 @@ mod tests {
         );
         let _ = std::fs::remove_file(&prompt_file);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn json_new_result_reports_agent_location_launch_and_prompt() {
+        let cfg = test_config_json();
+        let launch = LaunchSummary {
+            model: Some("opus"),
+            remote_control: false,
+            prompt: PromptStatus::Delivered,
+        };
+
+        let value = json_new_result("test", &launch, &[], &cfg);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agent"], "test");
+        assert_eq!(value["branch"], "skulk-test");
+        assert_eq!(value["session"], "skulk-test");
+        assert_eq!(value["worktree"], "~/test-project-worktrees/skulk-test");
+        assert_eq!(value["harness"], "claude");
+        assert_eq!(value["model"], "opus");
+        assert_eq!(value["remote_control"], false);
+        assert_eq!(value["prompt"], "delivered");
+        assert_eq!(value["warnings"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn json_new_result_reports_failed_prompt_delivery_and_warnings() {
+        let cfg = test_config_json();
+        let launch = LaunchSummary {
+            model: None,
+            remote_control: true,
+            prompt: PromptStatus::Failed,
+        };
+        let warnings = vec!["prompt delivery failed".to_string()];
+
+        let value = json_new_result("test", &launch, &warnings, &cfg);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["prompt"], "failed");
+        assert_eq!(value["remote_control"], true);
+        assert!(value["model"].is_null());
+        assert_eq!(
+            value["warnings"],
+            serde_json::json!(["prompt delivery failed"])
+        );
+    }
+
+    #[test]
+    fn json_new_result_without_prompt_reports_none() {
+        let cfg = test_config_json();
+        let launch = LaunchSummary {
+            model: None,
+            remote_control: false,
+            prompt: PromptStatus::NotSent,
+        };
+
+        let value = json_new_result("test", &launch, &[], &cfg);
+
+        assert_eq!(value["prompt"], "none");
+    }
+
+    #[test]
+    fn cmd_new_in_json_mode_succeeds_when_prompt_delivery_fails() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_empty_inventory()),
+            ssh_ok(), // worktree
+            ssh_ok(), // tmux create
+            ssh_ok(), // persist prompt
+            Err(SkulkError::SshFailed("send-keys failed".into())),
+        ]);
+        let prompt_file = std::env::temp_dir().join("skulk_cmd_new_json_delivery_fails.txt");
+        std::fs::write(&prompt_file, "fix the bug").unwrap();
+
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                from: Some(&prompt_file),
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
+
+        let _ = std::fs::remove_file(&prompt_file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cmd_new_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![
+            Ok("exists".into()),
+            Ok(mock_inventory_single_agent("skulk-test")),
+        ]);
+
+        let result = cmd_new(
+            &ssh,
+            &NewOptions {
+                name: "test",
+                ..Default::default()
+            },
+            &cfg,
+            None,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
