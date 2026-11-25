@@ -645,6 +645,243 @@ fn put_refuses_default_destination_when_tmp_is_symlinked_outside() {
     );
 }
 
+// ── get ─────────────────────────────────────────────────────────────────
+
+impl Project {
+    /// Stage an agent whose worktree holds `tmp/review-media` with two files.
+    fn agent_with_media(&self) -> String {
+        let name = unique("get");
+        self.stage_archived_agent(&name);
+        let media = self.worktree(&name).join("tmp/review-media");
+        std::fs::create_dir_all(media.join("walkthrough")).expect("create media dir");
+        std::fs::write(media.join("shot-1.png"), b"png!").expect("write shot");
+        std::fs::write(media.join("walkthrough/video.webm"), b"webm bytes").expect("write video");
+        name
+    }
+
+    /// A fresh local directory outside every worktree, as a physical path.
+    fn local_dir(&self, dir: &str) -> PathBuf {
+        let dir = self.root.join(dir);
+        std::fs::create_dir_all(&dir).expect("create local dir");
+        dir.canonicalize().expect("canonicalize local dir")
+    }
+}
+
+#[test]
+fn get_copies_a_file_and_reports_it() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let dest = project.local_dir("out").join("shot.png");
+
+    let value =
+        json_success(&project.skulk(&["get", &name, "tmp/review-media/shot-1.png", path(&dest)]));
+
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(
+        value["files"],
+        serde_json::json!([{"path": "tmp/review-media/shot-1.png", "bytes": 4}])
+    );
+    assert_eq!(value["dest"], path(&dest));
+    assert_eq!(std::fs::read(&dest).expect("copied file"), b"png!");
+}
+
+#[test]
+fn get_copies_a_directory_with_recursive() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let dest = project.local_dir("out").join("media");
+
+    let value = json_success(&project.skulk(&[
+        "get",
+        &name,
+        "tmp/review-media",
+        path(&dest),
+        "--recursive",
+    ]));
+
+    assert_eq!(
+        value["files"],
+        serde_json::json!([
+            {"path": "tmp/review-media/shot-1.png", "bytes": 4},
+            {"path": "tmp/review-media/walkthrough/video.webm", "bytes": 10},
+        ])
+    );
+    assert_eq!(value["dest"], path(&dest));
+    assert_eq!(
+        std::fs::read(dest.join("shot-1.png")).expect("shot"),
+        b"png!"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("walkthrough/video.webm")).expect("video"),
+        b"webm bytes"
+    );
+}
+
+#[test]
+fn get_refuses_a_directory_without_recursive() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let dest = project.local_dir("out").join("media");
+
+    let err = json_failure(&project.skulk(&["get", &name, "tmp/review-media", path(&dest)]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!dest.exists());
+}
+
+#[test]
+fn get_list_reports_files_without_copying() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+
+    let out = project.skulk(&["get", &name, "tmp/review-media", "--list"]);
+
+    let value = json_success(&out);
+    assert_eq!(value["dest"], serde_json::Value::Null);
+    assert_eq!(
+        value["files"],
+        serde_json::json!([
+            {"path": "tmp/review-media/shot-1.png", "bytes": 4},
+            {"path": "tmp/review-media/walkthrough/video.webm", "bytes": 10},
+        ])
+    );
+    assert!(!std::env::temp_dir().join("review-media").exists());
+}
+
+#[test]
+fn get_refuses_when_the_files_exceed_the_cap() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let big = project.worktree(&name).join("big.bin");
+    std::fs::write(&big, vec![0u8; 1_000_001]).expect("write big file");
+    let dest = project.local_dir("out").join("big.bin");
+
+    let err =
+        json_failure(&project.skulk(&["get", &name, "big.bin", path(&dest), "--max-mb", "1"]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!dest.exists());
+}
+
+#[test]
+fn get_refuses_paths_with_dot_dot() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let dest = project.local_dir("out").join("config.toml");
+
+    let err =
+        json_failure(&project.skulk(&["get", &name, "../../.skulk/config.toml", path(&dest)]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!dest.exists());
+}
+
+#[test]
+fn get_refuses_absolute_paths() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let secret = project.root.join(".skulk/config.toml");
+    let dest = project.local_dir("out").join("config.toml");
+
+    let err = json_failure(&project.skulk(&["get", &name, path(&secret), path(&dest)]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!dest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn get_refuses_a_symlink_leading_outside_the_worktree() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let outside = project.local_dir("outside");
+    std::fs::write(outside.join("secret"), b"secret").expect("write secret");
+    let worktree = project.worktree(&name);
+    std::os::unix::fs::symlink(outside.join("secret"), worktree.join("leak")).expect("symlink");
+    let dest = project.local_dir("out").join("leak");
+
+    let err = json_failure(&project.skulk(&["get", &name, "leak", path(&dest)]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!dest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn get_refuses_a_directory_holding_a_symlink_leading_outside() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let outside = project.local_dir("outside");
+    std::fs::write(outside.join("secret"), b"secret").expect("write secret");
+    let media = project.worktree(&name).join("tmp/review-media");
+    std::os::unix::fs::symlink(&outside, media.join("escape")).expect("symlink");
+    let dest = project.local_dir("out").join("media");
+
+    let err = json_failure(&project.skulk(&[
+        "get",
+        &name,
+        "tmp/review-media",
+        path(&dest),
+        "--recursive",
+    ]));
+
+    assert_eq!(err["code"], "validation");
+    assert!(!dest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn get_copies_a_symlink_that_stays_inside_as_a_regular_file() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let worktree = project.worktree(&name);
+    std::fs::write(worktree.join("notes.txt"), b"notes").expect("write notes");
+    std::os::unix::fs::symlink(
+        worktree.join("notes.txt"),
+        worktree.join("tmp/review-media/notes.txt"),
+    )
+    .expect("symlink");
+    let dest = project.local_dir("out").join("media");
+
+    let value = json_success(&project.skulk(&[
+        "get",
+        &name,
+        "tmp/review-media",
+        path(&dest),
+        "--recursive",
+    ]));
+
+    assert_eq!(value["files"].as_array().map(Vec::len), Some(3));
+    let copied = dest.join("notes.txt");
+    assert!(!copied.is_symlink());
+    assert_eq!(std::fs::read(&copied).expect("copied link"), b"notes");
+}
+
+#[test]
+fn get_emits_not_found_when_the_path_is_missing() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+
+    let err = json_failure(&project.skulk(&["get", &name, "tmp/review-media/nope.png"]));
+
+    assert_eq!(err["code"], "not_found");
+    assert!(
+        err["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("nope.png")),
+        "{err}"
+    );
+}
+
+#[test]
+fn get_emits_not_found_when_the_agent_is_missing() {
+    let project = Project::with_base_clone();
+
+    let err = json_failure(&project.skulk(&["get", &unique("ghost"), "a.png"]));
+
+    assert_eq!(err["code"], "not_found");
+}
+
 // ── events ──────────────────────────────────────────────────────────────
 
 /// A running `skulk --json events` whose stdout lines arrive on a channel.

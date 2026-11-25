@@ -33,6 +33,7 @@ const AGENT_COMMANDS: &[&str] = &[
     "destroy",
     "diff",
     "disconnect",
+    "get",
     "git-log",
     "logs",
     "push",
