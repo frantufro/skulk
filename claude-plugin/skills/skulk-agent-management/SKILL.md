@@ -108,6 +108,12 @@ skulk send <name> --from <file>
 # is relative to the worktree and overwritten.
 skulk put <name> <file> [<dest>]
 
+# Copy a file out of the agent's worktree (a directory needs --recursive);
+# --list shows files and sizes without copying. Paths are relative to the
+# worktree and may not leave it. Capped at 200 MB (1 MB = 1,000,000 bytes) per call (--max-mb).
+skulk get <name> <path> [<dest>]
+skulk get <name> tmp/review-media --list
+
 # Attach to the live tmux session (interactive terminal)
 skulk connect <name>
 # Detach with Ctrl+B then D
