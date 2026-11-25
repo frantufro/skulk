@@ -99,10 +99,15 @@ impl Project {
 
     /// Run `skulk --json --config <project> <args>` from an unrelated cwd.
     fn skulk(&self, args: &[&str]) -> Output {
+        self.skulk_in(&std::env::temp_dir(), args)
+    }
+
+    /// Run `skulk --json --config <project> <args>` from `cwd`.
+    fn skulk_in(&self, cwd: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_skulk"))
             .args(["--json", "--config", path(&self.root)])
             .args(args)
-            .current_dir(std::env::temp_dir())
+            .current_dir(cwd)
             .env("SKULK_NO_UPDATE_CHECK", "1")
             .env("HOME", self.home())
             .env("SHELL", "/bin/sh")
@@ -676,6 +681,7 @@ fn get_copies_a_file_and_reports_it() {
     let value =
         json_success(&project.skulk(&["get", &name, "tmp/review-media/shot-1.png", path(&dest)]));
 
+    assert_eq!(value["v"], 1);
     assert_eq!(value["agent"], name.as_str());
     assert_eq!(
         value["files"],
@@ -740,9 +746,12 @@ fn get_list_reports_files_without_copying() {
     let project = Project::with_base_clone();
     let name = project.agent_with_media();
 
-    let out = project.skulk(&["get", &name, "tmp/review-media", "--list"]);
+    let cwd = project.local_dir("cwd");
+
+    let out = project.skulk_in(&cwd, &["get", &name, "tmp/review-media", "--list"]);
 
     let value = json_success(&out);
+    assert_eq!(value["v"], 1);
     assert_eq!(value["dest"], serde_json::Value::Null);
     assert_eq!(
         value["files"],
@@ -751,7 +760,7 @@ fn get_list_reports_files_without_copying() {
             {"path": "tmp/review-media/walkthrough/video.webm", "bytes": 10},
         ])
     );
-    assert!(!std::env::temp_dir().join("review-media").exists());
+    assert!(!cwd.join("review-media").exists());
 }
 
 #[test]
