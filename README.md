@@ -500,15 +500,22 @@ tmux, the worktrees and the Stop/`UserPromptSubmit` marker files every second
 - `snapshot` comes first and lists every agent, archived ones as `stopped`.
 - `state` is `working`, `idle` or `stopped`. `url` is the app URL from
   `url_file`, or `null`.
+- `agent.created` waits until the new agent's session is up, so it doesn't
+  flash as `stopped`. A worktree that has no session after 5s is announced
+  as `stopped`.
 - `agent.gone` has `reason` `archived` (by `skulk archive`), `crashed` (the
-  session ended without an archive; reported after a 3s grace), or
-  `destroyed` (the worktree is gone). Restarting an archived or crashed
-  agent shows up as `idle_state` from `stopped`.
+  session ended without an archive, for 3s), or `destroyed` (the agent has
+  been missing for 3s). An agent already reported `archived` or `crashed`
+  gets no second `agent.gone` when its worktree is later destroyed: treat
+  those as final. Restarting an archived or crashed agent shows up as
+  `idle_state` from `stopped`.
 - `heartbeat` arrives every 30s.
 
-When the connection closes, or nothing arrives from the remote for 20s, skulk
-prints an error object on stderr and exits non-zero, so a supervisor can
-restart it. Without `--json`, it prints the same changes as plain text and
+If the remote can't list worktrees (for example a `git` failure in
+`base_path`), skulk skips that check instead of reporting every agent
+destroyed. When the connection closes, nothing arrives from the remote for
+20s, or the worktree listing fails for 20s straight, skulk prints an error
+object on stderr and exits non-zero, so a supervisor can restart it. Without `--json`, it prints the same changes as plain text and
 skips heartbeats.
 
 > **Breaking change in the `v: 1` contract:** `list` used to print a bare JSON

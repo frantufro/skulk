@@ -68,6 +68,11 @@ pub(crate) fn list_command(cfg: &Config) -> String {
     )
 }
 
+/// Printed inside the worktrees section of [`agent_state_probe`] when the
+/// worktree listing failed, so a reader can tell "no worktrees" from "could
+/// not list them".
+pub(crate) const WORKTREES_FAILED: &str = "__WORKTREES_FAILED__";
+
 /// Shell snippet printing tmux sessions, worktrees, Stop/`UserPromptSubmit`
 /// hook marker contents, and each worktree's app URL (first line of
 /// `url_file`) as delimited sections. Parse it with [`parse_agent_sessions`].
@@ -79,7 +84,7 @@ pub(crate) fn agent_state_probe(cfg: &Config) -> String {
          tmux list-sessions -F '{TMUX_FORMAT}' 2>&1; \
          echo __TMUX_END__ && \
          echo __WORKTREES_START__ && \
-         cd {base_path} && git worktree list --porcelain 2>/dev/null || true && \
+         {{ cd {base_path} && git worktree list --porcelain 2>/dev/null; }} || echo {WORKTREES_FAILED}; \
          echo __WORKTREES_END__ && \
          echo __STATE_START__ && \
          for f in ~/.skulk/state/*; do [ -f \"$f\" ] && printf '%s %s\\n' \"$(basename \"$f\")\" \"$(cat \"$f\")\"; done 2>/dev/null; \
@@ -236,6 +241,29 @@ mod tests {
 
         assert!(probe.contains("cd \"$HOME\"/'my proj' && git worktree list"));
         assert!(!probe.contains("cd ~/my proj"));
+    }
+
+    #[test]
+    fn agent_state_probe_marks_a_failed_worktree_listing() {
+        let probe = agent_state_probe(&test_config());
+
+        assert!(probe.contains(&format!(
+            "git worktree list --porcelain 2>/dev/null; }} || echo {WORKTREES_FAILED}; echo __WORKTREES_END__"
+        )));
+    }
+
+    #[test]
+    fn parse_list_output_ignores_the_worktree_failure_marker() {
+        let cfg = test_config();
+        let raw = mock_list_output(0, "", &[]).replacen(
+            "__WORKTREES_END__",
+            &format!("{WORKTREES_FAILED}\n__WORKTREES_END__"),
+            1,
+        );
+
+        let (sessions, _) = parse_list_output(&raw, &cfg);
+
+        assert!(sessions.is_empty());
     }
 
     #[test]
