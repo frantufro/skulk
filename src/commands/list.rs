@@ -76,7 +76,7 @@ pub(crate) fn agent_state_probe(cfg: &Config) -> String {
     let url_file = cfg.url_file();
     format!(
         "echo __TMUX_START__ && \
-         tmux list-sessions -F '{TMUX_FORMAT}' 2>&1 && \
+         tmux list-sessions -F '{TMUX_FORMAT}' 2>&1; \
          echo __TMUX_END__ && \
          echo __WORKTREES_START__ && \
          cd {base_path} && git worktree list --porcelain 2>/dev/null || true && \
