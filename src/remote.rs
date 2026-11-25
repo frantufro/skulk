@@ -1517,7 +1517,7 @@ mod tests {
     // treats that pair as an *archived* agent and refuses to touch it, so
     // advising gc strands the user. These tests pin the corrected advice
     // (`skulk destroy <name>`) so the misdirection can't silently return.
-    // Mirrors `format_partial_destroy_warning_points_at_destroy_not_gc`.
+    // Mirrors `partial_destroy_error_points_at_destroy_not_gc`.
 
     #[test]
     fn format_rollback_failure_warning_points_at_destroy_not_gc() {

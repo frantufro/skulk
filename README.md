@@ -481,7 +481,7 @@ A `wait` that times out is the one failure reported on stdout:
 
 Run `skulk doctor` any time for a full health check (SSH reachability, required tools on the remote, base clone, worktree directory).
 
-Destructive operations (`destroy`, `destroy-all`) require confirmation unless `--force` is passed. If agent creation fails partway through (e.g., tmux session can't start), the worktree is rolled back automatically.
+Destructive operations (`destroy`, `destroy-all`) require confirmation unless `--force` is passed, and exit non-zero if any session, worktree or branch could not be removed. If agent creation fails partway through (e.g., tmux session can't start), the worktree is rolled back automatically.
 
 ## Contributing
 
