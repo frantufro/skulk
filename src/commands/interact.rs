@@ -310,12 +310,14 @@ pub(crate) fn cmd_restart_window(
     let agent = Agent::resolve(name, cfg)?;
     validate_window_name(window)?;
     if window == remote::AGENT_WINDOW {
-        return Err(SkulkError::Validation(format!(
-            "Window '{window}' runs the agent itself and can't be restarted this way. \
-             Use `skulk archive {name}` and `skulk restart {name}` instead."
-        )));
+        return Err(agent_window_refusal(name, window));
     }
-    remote::respawn_window(ssh, name, window, cfg).map_err(|e| agent.classify_window(window, e))?;
+    remote::respawn_window(ssh, name, window, cfg).map_err(|e| match e {
+        SkulkError::SshFailed(stderr) if stderr.contains(remote::AGENT_WINDOW_REFUSAL) => {
+            agent_window_refusal(name, window)
+        }
+        other => agent.classify_window(window, other),
+    })?;
     match cfg.output_format {
         OutputFormat::Json => emit_json(&serde_json::json!({
             "agent": name,
@@ -325,6 +327,13 @@ pub(crate) fn cmd_restart_window(
         OutputFormat::Human => eprintln!("Restarted window '{window}' of agent '{name}'."),
     }
     Ok(())
+}
+
+fn agent_window_refusal(name: &str, window: &str) -> SkulkError {
+    SkulkError::Validation(format!(
+        "Window '{window}' runs the agent itself and can't be restarted this way. \
+         Use `skulk archive {name}` and `skulk restart {name}` instead."
+    ))
 }
 
 /// Archive an agent: kill its tmux session but leave the worktree and branch.
@@ -838,9 +847,12 @@ mod tests {
 
         cmd_restart_window(&ssh, "test", "server", &cfg).expect("restart succeeds");
 
-        assert_eq!(
-            ssh.calls(),
-            vec!["tmux respawn-window -k -t skulk-test:=server".to_string()]
+        let calls = ssh.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].ends_with("tmux respawn-window -k -t skulk-test:=server"),
+            "got: {}",
+            calls[0]
         );
     }
 
@@ -883,6 +895,20 @@ mod tests {
             assert!(msg.contains("skulk restart"), "{msg}");
         });
         assert_eq!(ssh.calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn cmd_restart_window_refuses_when_the_remote_finds_the_agent_window() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            remote::AGENT_WINDOW_REFUSAL.into(),
+        ))]);
+
+        let result = cmd_restart_window(&ssh, "test", "claude", &cfg);
+
+        assert_err!(result, SkulkError::Validation(msg) => {
+            assert!(msg.contains("runs the agent itself"), "{msg}");
+        });
     }
 
     #[test]
