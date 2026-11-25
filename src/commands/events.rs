@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::commands::list::{agent_state_probe, parse_agent_sessions};
+use crate::commands::list::{WORKTREES_FAILED, agent_state_probe, parse_agent_sessions};
 use crate::config::{Config, OutputFormat};
 use crate::display::render_json;
 use crate::error::SkulkError;
@@ -31,6 +31,13 @@ const FRAME_TIMEOUT_MS: u64 = 20_000;
 /// the session before removing the worktree, and this keeps that from
 /// reading as a crash.
 const CRASH_GRACE_MS: u64 = 3_000;
+/// How long an agent must be missing from consecutive frames before it is
+/// reported destroyed, so one odd frame can't remove it.
+const DESTROY_GRACE_MS: u64 = 3_000;
+/// How long a new agent may have a worktree but no session before it is
+/// announced as `stopped`. `skulk new` creates the worktree a moment before
+/// the session, and this keeps new agents from flashing as stopped.
+const CREATE_GRACE_MS: u64 = 5_000;
 
 const FRAME_START: &str = "__FRAME_START__";
 const FRAME_END: &str = "__FRAME_END__";
@@ -114,7 +121,14 @@ pub(crate) struct Frame {
 }
 
 /// Parse one frame (the agent state probe plus the archive section).
-pub(crate) fn parse_frame(raw: &str, cfg: &Config) -> Frame {
+///
+/// Returns `None` when the remote could not list worktrees: every agent
+/// would look destroyed, so the frame must not be compared.
+pub(crate) fn parse_frame(raw: &str, cfg: &Config) -> Option<Frame> {
+    let worktrees = extract_section(raw, "__WORKTREES_START__\n", "\n__WORKTREES_END__");
+    if worktrees.lines().any(|l| l == WORKTREES_FAILED) {
+        return None;
+    }
     let short = |qualified: &str| {
         qualified
             .strip_prefix(&*cfg.session_prefix)
@@ -142,10 +156,10 @@ pub(crate) fn parse_frame(raw: &str, cfg: &Config) -> Frame {
             Some((short(session), mtime.trim().parse().ok()?))
         })
         .collect();
-    Frame {
+    Some(Frame {
         agents,
         archived_at,
-    }
+    })
 }
 
 /// Why an agent left the fleet.
@@ -193,10 +207,32 @@ pub(crate) enum Event {
 
 #[derive(Debug)]
 struct Tracked {
-    /// The state last reported to the consumer.
+    /// The state last reported, or last seen while `announced` is false.
     view: AgentView,
+    /// The snapshot or an `agent.created` has listed this agent.
+    announced: bool,
+    /// An `agent.gone` (archived or crashed) was reported and the agent has
+    /// not run since, so its later removal is not reported again.
+    gone_reported: bool,
+    /// When this agent first appeared, for [`CREATE_GRACE_MS`].
+    first_seen_ms: u64,
     /// Set while a vanished session waits out [`CRASH_GRACE_MS`].
     crash_pending_since: Option<u64>,
+    /// Set while a vanished agent waits out [`DESTROY_GRACE_MS`].
+    absent_since: Option<u64>,
+}
+
+impl Tracked {
+    fn new(view: &AgentView, announced: bool, now_ms: u64) -> Self {
+        Self {
+            view: view.clone(),
+            announced,
+            gone_reported: false,
+            first_seen_ms: now_ms,
+            crash_pending_since: None,
+            absent_since: None,
+        }
+    }
 }
 
 /// The fleet as last reported, and the rules that turn a new frame into
@@ -212,13 +248,7 @@ impl Fleet {
         let agents = frame
             .agents
             .iter()
-            .map(|(name, view)| {
-                let tracked = Tracked {
-                    view: view.clone(),
-                    crash_pending_since: None,
-                };
-                (name.clone(), tracked)
-            })
+            .map(|(name, view)| (name.clone(), Tracked::new(view, true, 0)))
             .collect();
         let snapshot = frame
             .agents
@@ -238,40 +268,60 @@ impl Fleet {
             .collect();
         let mut events = Vec::new();
         for name in names {
-            match (self.agents.get_mut(&name), frame.agents.get(&name)) {
+            let event = match (self.agents.get_mut(&name), frame.agents.get(&name)) {
                 (None, Some(view)) => {
-                    events.push(Event::Created {
-                        agent: name.clone(),
-                        state: view.state,
-                        url: view.url.clone(),
-                    });
-                    let tracked = Tracked {
-                        view: view.clone(),
-                        crash_pending_since: None,
-                    };
+                    let mut tracked = Tracked::new(view, false, now_ms);
+                    let event = announce(&name, &mut tracked, view, now_ms);
                     self.agents.insert(name, tracked);
-                }
-                (Some(_), None) => {
-                    self.agents.remove(&name);
-                    events.push(Event::Gone {
-                        agent: name,
-                        reason: GoneReason::Destroyed,
-                    });
+                    event
                 }
                 (Some(tracked), Some(view)) => {
-                    let archived_at = frame.archived_at.get(&name).copied();
-                    if let Some(event) = transition(&name, tracked, view, archived_at, now_ms) {
-                        events.push(event);
+                    tracked.absent_since = None;
+                    if tracked.announced {
+                        let archived_at = frame.archived_at.get(&name).copied();
+                        transition(&name, tracked, view, archived_at, now_ms)
+                    } else {
+                        announce(&name, tracked, view, now_ms)
                     }
                 }
-                (None, None) => {}
-            }
+                (Some(tracked), None) => {
+                    let since = *tracked.absent_since.get_or_insert(now_ms);
+                    let expired = now_ms.saturating_sub(since) >= DESTROY_GRACE_MS;
+                    if tracked.announced && !expired {
+                        continue;
+                    }
+                    let report = tracked.announced && !tracked.gone_reported;
+                    self.agents.remove(&name);
+                    report.then_some(Event::Gone {
+                        agent: name,
+                        reason: GoneReason::Destroyed,
+                    })
+                }
+                (None, None) => None,
+            };
+            events.extend(event);
         }
         events
     }
 }
 
-/// Move one agent that is in both the report and the frame to its new view.
+/// Announce a new agent once it has a session, or once it has gone
+/// [`CREATE_GRACE_MS`] without one.
+fn announce(name: &str, tracked: &mut Tracked, view: &AgentView, now_ms: u64) -> Option<Event> {
+    tracked.view = view.clone();
+    let waited = now_ms.saturating_sub(tracked.first_seen_ms) >= CREATE_GRACE_MS;
+    if view.state == IdleState::Stopped && !waited {
+        return None;
+    }
+    tracked.announced = true;
+    Some(Event::Created {
+        agent: name.to_string(),
+        state: view.state,
+        url: view.url.clone(),
+    })
+}
+
+/// Move one announced agent that is still in the frame to its new view.
 fn transition(
     name: &str,
     tracked: &mut Tracked,
@@ -297,6 +347,7 @@ fn transition(
             };
             tracked.view = next.clone();
             tracked.crash_pending_since = None;
+            tracked.gone_reported = true;
             Some(Event::Gone {
                 agent: name.to_string(),
                 reason,
@@ -305,6 +356,7 @@ fn transition(
         (_, to) => {
             tracked.view = next.clone();
             tracked.crash_pending_since = None;
+            tracked.gone_reported = false;
             (from != to).then(|| Event::IdleState {
                 agent: name.to_string(),
                 from,
@@ -485,7 +537,8 @@ pub(crate) fn cmd_events(
 }
 
 /// The event loop behind [`cmd_events`]. Returns only with an error: the
-/// stream closed, went silent for [`FRAME_TIMEOUT_MS`], or `out` failed.
+/// stream closed, went silent for [`FRAME_TIMEOUT_MS`], could not list
+/// worktrees for that long (such frames are skipped), or `out` failed.
 ///
 /// Deadlines, heartbeats and grace periods run on the monotonic clock, as
 /// milliseconds since the loop started; the wall clock only stamps `ts`.
@@ -505,6 +558,7 @@ fn run_events(
     let mut fleet: Option<Fleet> = None;
     let mut last_line_ms = 0;
     let mut next_heartbeat_ms: Option<u64> = None;
+    let mut failing_since_ms: Option<u64> = None;
     loop {
         let now = elapsed_ms();
         let frame_deadline = last_line_ms + FRAME_TIMEOUT_MS;
@@ -530,11 +584,23 @@ fn run_events(
         let now = elapsed_ms();
         last_line_ms = now;
         match reader.push(&line) {
-            Some(Tick::Frame(raw)) => latest = Some(parse_frame(&raw, cfg)),
+            Some(Tick::Frame(raw)) => latest = parse_frame(&raw, cfg),
             Some(Tick::Same) => {}
             None => continue,
         }
-        let Some(frame) = &latest else { continue };
+        let Some(frame) = &latest else {
+            let since = *failing_since_ms.get_or_insert(now);
+            if now.saturating_sub(since) >= FRAME_TIMEOUT_MS {
+                return Err(SkulkError::SshFailed(format!(
+                    "`git worktree list` in {} has failed on {} for {}s.",
+                    cfg.base_path,
+                    cfg.host,
+                    FRAME_TIMEOUT_MS / 1000
+                )));
+            }
+            continue;
+        };
+        failing_since_ms = None;
         let events = if let Some(fleet) = &mut fleet {
             fleet.apply(frame, now)
         } else {
@@ -639,16 +705,35 @@ mod tests {
     }
 
     fn frame(agents: &[A], archives: &[(&str, i64)]) -> Frame {
-        parse_frame(&frame_text(agents, archives), &test_config())
+        parse_frame(&frame_text(agents, archives), &test_config()).expect("complete frame")
     }
 
-    /// The stream lines for one frame.
-    fn frame_lines(agents: &[A], archives: &[(&str, i64)]) -> Vec<String> {
-        let text = frame_text(agents, archives);
+    /// Frame text whose worktree listing failed on the remote.
+    fn failed_frame_text() -> String {
+        frame_text(&[], &[]).replacen(
+            "__WORKTREES_END__",
+            &format!("{WORKTREES_FAILED}\n__WORKTREES_END__"),
+            1,
+        )
+    }
+
+    fn lines_of(text: &str) -> Vec<String> {
         let mut lines = vec![FRAME_START.to_string()];
         lines.extend(text.trim_end_matches('\n').lines().map(String::from));
         lines.push(FRAME_END.to_string());
         lines
+    }
+
+    /// The stream lines for one frame.
+    fn frame_lines(agents: &[A], archives: &[(&str, i64)]) -> Vec<String> {
+        lines_of(&frame_text(agents, archives))
+    }
+
+    fn gone(agent: &str, reason: GoneReason) -> Vec<Event> {
+        vec![Event::Gone {
+            agent: agent.into(),
+            reason,
+        }]
     }
 
     /// Monotonic time is the shared counter in ms. The wall clock matches it,
@@ -834,13 +919,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_frame_rejects_a_frame_whose_worktree_listing_failed() {
+        assert!(parse_frame(&failed_frame_text(), &test_config()).is_none());
+    }
+
+    #[test]
     fn parse_frame_ignores_archive_records_of_other_prefixes() {
         let raw = format!(
             "{}__ARCHIVE_START__\nother-a 5\n__ARCHIVE_END__\n",
             frame_text(&[], &[]).replace("__ARCHIVE_START__\n__ARCHIVE_END__\n", "")
         );
 
-        let f = parse_frame(&raw, &test_config());
+        let f = parse_frame(&raw, &test_config()).unwrap();
 
         assert!(f.archived_at.is_empty());
     }
@@ -908,18 +998,121 @@ mod tests {
     }
 
     #[test]
-    fn apply_reports_destroyed_when_agent_disappears() {
+    fn apply_reports_destroyed_once_absence_outlasts_the_grace_period() {
         let (mut fleet, _) = Fleet::start(&frame(&[working("a")], &[]));
+        let empty = frame(&[], &[]);
 
-        let events = fleet.apply(&frame(&[], &[]), 0);
+        let early = fleet.apply(&empty, 10_000);
+        let still_early = fleet.apply(&empty, 10_000 + DESTROY_GRACE_MS - 1);
+        let late = fleet.apply(&empty, 10_000 + DESTROY_GRACE_MS);
+        let after = fleet.apply(&empty, 10_000 + 2 * DESTROY_GRACE_MS);
 
+        assert!(early.is_empty() && still_early.is_empty());
+        assert_eq!(late, gone("a", GoneReason::Destroyed));
+        assert!(after.is_empty(), "{after:?}");
+    }
+
+    #[test]
+    fn apply_ignores_an_absence_shorter_than_the_grace_period() {
+        let (mut fleet, _) = Fleet::start(&frame(&[working("a")], &[]));
+        fleet.apply(&frame(&[], &[]), 0);
+
+        let back = fleet.apply(&frame(&[working("a")], &[]), 1_000);
+        let later = fleet.apply(&frame(&[working("a")], &[]), 1_000 + DESTROY_GRACE_MS);
+
+        assert!(back.is_empty() && later.is_empty(), "{back:?} {later:?}");
+    }
+
+    #[test]
+    fn apply_reports_destroyed_for_an_agent_stopped_in_the_snapshot() {
+        let (mut fleet, _) = Fleet::start(&frame(&[stopped("a")], &[]));
+        fleet.apply(&frame(&[], &[]), 0);
+
+        let events = fleet.apply(&frame(&[], &[]), DESTROY_GRACE_MS);
+
+        assert_eq!(events, gone("a", GoneReason::Destroyed));
+    }
+
+    #[test]
+    fn apply_does_not_report_destroyed_after_archived() {
+        let (mut fleet, _) = Fleet::start(&frame(&[working("a")], &[]));
+        let archived = fleet.apply(&frame(&[stopped("a")], &[("a", 2_000)]), 0);
+        fleet.apply(&frame(&[], &[]), 1_000);
+
+        let removed = fleet.apply(&frame(&[], &[]), 1_000 + DESTROY_GRACE_MS);
+        let recreated = fleet.apply(&frame(&[working("a")], &[]), 2_000 + DESTROY_GRACE_MS);
+
+        assert_eq!(archived, gone("a", GoneReason::Archived));
+        assert!(removed.is_empty(), "{removed:?}");
         assert_eq!(
-            events,
-            vec![Event::Gone {
+            recreated,
+            vec![Event::Created {
                 agent: "a".into(),
-                reason: GoneReason::Destroyed,
+                state: IdleState::Working,
+                url: None,
             }]
         );
+    }
+
+    #[test]
+    fn apply_does_not_report_destroyed_after_crashed() {
+        let (mut fleet, _) = Fleet::start(&frame(&[working("a")], &[]));
+        fleet.apply(&frame(&[stopped("a")], &[]), 0);
+        let crashed = fleet.apply(&frame(&[stopped("a")], &[]), CRASH_GRACE_MS);
+        fleet.apply(&frame(&[], &[]), 10_000);
+
+        let removed = fleet.apply(&frame(&[], &[]), 10_000 + DESTROY_GRACE_MS);
+
+        assert_eq!(crashed, gone("a", GoneReason::Crashed));
+        assert!(removed.is_empty(), "{removed:?}");
+    }
+
+    #[test]
+    fn apply_holds_back_created_until_a_new_agent_has_a_session() {
+        let (mut fleet, _) = Fleet::start(&frame(&[], &[]));
+
+        let worktree_only = fleet.apply(&frame(&[stopped("a")], &[]), 0);
+        let running = fleet.apply(&frame(&[working("a")], &[]), 1_000);
+
+        assert!(worktree_only.is_empty(), "{worktree_only:?}");
+        assert_eq!(
+            running,
+            vec![Event::Created {
+                agent: "a".into(),
+                state: IdleState::Working,
+                url: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_reports_created_stopped_when_no_session_appears_within_grace() {
+        let (mut fleet, _) = Fleet::start(&frame(&[], &[]));
+        let worktree_only = frame(&[stopped("a")], &[]);
+
+        let early = fleet.apply(&worktree_only, 0);
+        let late = fleet.apply(&worktree_only, CREATE_GRACE_MS);
+
+        assert!(early.is_empty(), "{early:?}");
+        assert_eq!(
+            late,
+            vec![Event::Created {
+                agent: "a".into(),
+                state: IdleState::Stopped,
+                url: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_drops_a_never_announced_agent_silently() {
+        let (mut fleet, _) = Fleet::start(&frame(&[], &[]));
+        fleet.apply(&frame(&[stopped("a")], &[]), 0);
+
+        let rolled_back = fleet.apply(&frame(&[], &[]), 1_000);
+        let later = fleet.apply(&frame(&[], &[]), 1_000 + DESTROY_GRACE_MS);
+
+        assert!(rolled_back.is_empty() && later.is_empty());
     }
 
     #[test]
@@ -957,19 +1150,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_reports_only_destroyed_when_worktree_goes_within_grace() {
+    fn apply_reports_only_destroyed_when_worktree_goes_within_crash_grace() {
         let (mut fleet, _) = Fleet::start(&frame(&[working("a")], &[]));
         fleet.apply(&frame(&[stopped("a")], &[]), 0);
+        fleet.apply(&frame(&[], &[]), 1_000);
 
-        let events = fleet.apply(&frame(&[], &[]), 1_000);
+        let events = fleet.apply(&frame(&[], &[]), 1_000 + DESTROY_GRACE_MS);
 
-        assert_eq!(
-            events,
-            vec![Event::Gone {
-                agent: "a".into(),
-                reason: GoneReason::Destroyed,
-            }]
-        );
+        assert_eq!(events, gone("a", GoneReason::Destroyed));
     }
 
     #[test]
@@ -1190,6 +1378,35 @@ mod tests {
         assert_eq!(printed.len(), 2, "{printed:?}");
         assert_eq!(printed[1]["type"], "heartbeat");
         assert_eq!(printed[1]["ts"], rfc3339(30_000 + 3_600_000));
+    }
+
+    #[test]
+    fn run_events_skips_frames_whose_worktree_listing_failed() {
+        let cfg = test_config_json();
+        let mut lines = at(0, frame_lines(&[working("a")], &[]));
+        lines.extend(at(1_000, lines_of(&failed_frame_text())));
+        lines.extend((2..=6).map(|s| (s * 1_000, SAME.to_string())));
+        lines.extend(at(7_000, frame_lines(&[working("a")], &[])));
+
+        let (_, printed) = run(lines, Some(8_000), &cfg);
+
+        assert_eq!(printed.len(), 1, "{printed:?}");
+        assert_eq!(parse(&printed[0])["type"], "snapshot");
+    }
+
+    #[test]
+    fn run_events_returns_error_when_the_worktree_listing_keeps_failing() {
+        let cfg = test_config_json();
+        let mut lines = at(0, lines_of(&failed_frame_text()));
+        lines.extend((1..=30).map(|s| (s * 1_000, SAME.to_string())));
+
+        let (err, printed) = run(lines, Some(31_000), &cfg);
+
+        assert_eq!(printed, Vec::<String>::new());
+        assert_err!(Err::<(), _>(err), SkulkError::SshFailed(msg) => {
+            assert!(msg.contains("git worktree list"), "{msg}");
+            assert!(msg.contains("20s"), "{msg}");
+        });
     }
 
     #[test]
