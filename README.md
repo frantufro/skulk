@@ -425,6 +425,42 @@ skulk new -bad-name       # invalid (leading hyphen)
 | `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
 | `--dry-run` | `gc` | Preview what would be cleaned |
 
+## JSON Output
+
+With `--json` (or `output_format = "json"` in the config), each command prints
+one JSON object on stdout when it succeeds. Every object carries `"v": 1`, the
+schema version, which changes only when a payload changes in a way that breaks
+consumers.
+
+```bash
+skulk --json list
+# {"agents":[{"branch":"skulk-fix-bug","name":"fix-bug","status":"idle",...}],"v":1}
+```
+
+On failure, skulk exits non-zero, prints nothing on stdout, and prints one error
+object on stderr:
+
+```json
+{"v":1,"error":"skulk destroy: No agent 'ghost' found.","code":"not_found"}
+```
+
+`code` is one of `validation`, `not_found`, `ssh_exec`, `ssh_failed`,
+`diagnostic`, or `update_failed`.
+
+| Command | Success payload (besides `v`) |
+|---------|-------------------------------|
+| `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch}` |
+| `ship` | `ok`, `agent`, `pr_url` |
+| `wait` | `ok`, `agent`, `status`, or `reason` on timeout |
+| `status`, `gc`, `logs`, `diff`, `restart-window` | command-specific fields |
+
+A `wait` that times out is the one failure reported on stdout:
+`{"ok": false, "reason": "timeout", ...}` with exit code 1.
+
+> **Breaking change in the `v: 1` contract:** `list` used to print a bare JSON
+> array. It now prints `{"v": 1, "agents": [...]}`. Read `.agents` instead of
+> the top-level array.
+
 ## Error Handling
 
 `skulk` classifies common SSH failures and surfaces actionable suggestions instead of raw stderr:
