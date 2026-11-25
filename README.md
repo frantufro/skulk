@@ -453,6 +453,7 @@ or loaded).
 | Command | Success payload (besides `v`) |
 |---------|-------------------------------|
 | `list` | `agents`: array of `{name, status, branch, uptime_secs, session_created_epoch}` |
+| `archive` | `ok`, `agent`, `branch`, `worktree`, `reason`, `warnings` |
 | `push` | `ok`, `agent`, `branch`, `remote`, `output` |
 | `pull` | `ok`, `base_path`, `branch`, `force`, `output` |
 | `ship` | `ok`, `agent`, `pr_url` |

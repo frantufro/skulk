@@ -21,6 +21,23 @@ fn unique(prefix: &str) -> String {
     )
 }
 
+/// Whether tmux can run here. In CI a missing tmux fails the test instead of
+/// letting it pass without checking anything.
+fn tmux_available() -> bool {
+    let installed = Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    assert!(
+        installed || std::env::var_os("CI").is_none(),
+        "tmux is required for this test in CI"
+    );
+    if !installed {
+        eprintln!("skipping: tmux is not installed");
+    }
+    installed
+}
+
 struct Project {
     root: PathBuf,
 }
@@ -102,6 +119,46 @@ impl Project {
             .env("SHELL", "/bin/sh")
             .env_remove("TMUX");
         cmd
+    }
+
+    fn has_session(&self, session: &str) -> bool {
+        self.private_tmux()
+            .args(["has-session", "-t", session])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Stage an archived agent: worktree and branch `skulk-<name>`, no session.
+    fn stage_archived_agent(&self, name: &str) {
+        let qualified = format!("skulk-{name}");
+        let worktree = self.root.join("worktrees").join(&qualified);
+        git(
+            &self.base_path(),
+            &["worktree", "add", "-q", "-b", &qualified, path(&worktree)],
+        );
+    }
+
+    /// Stage a running agent: an archived agent plus its session on the
+    /// private server.
+    fn stage_running_agent(&self, name: &str) {
+        self.stage_archived_agent(name);
+        let qualified = format!("skulk-{name}");
+        let worktree = self.root.join("worktrees").join(&qualified);
+        let out = self
+            .private_tmux()
+            .args(["-f", "/dev/null", "new-session", "-d", "-s", &qualified])
+            .args(["-c", path(&worktree), "sleep", "600"])
+            .output()
+            .expect("run tmux");
+        assert!(
+            out.status.success(),
+            "tmux new-session failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            self.has_session(&qualified),
+            "agent session must be on the private server before a destructive call"
+        );
     }
 }
 
@@ -246,4 +303,31 @@ fn pull_emits_json_error_when_base_clone_is_missing() {
     let err = json_failure(&project.skulk(&["pull"]));
 
     assert_eq!(err["code"], "validation");
+}
+
+// ── archive ─────────────────────────────────────────────────────────────
+
+#[test]
+fn archive_emits_one_json_result_on_success() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let name = unique("archive");
+    project.stage_running_agent(&name);
+
+    let value = json_success(&project.skulk(&["archive", &name, "--reason", "done"]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["reason"], "done");
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert!(!project.has_session(&format!("skulk-{name}")));
+}
+
+#[test]
+fn archive_emits_json_error_when_agent_is_not_running() {
+    let project = Project::with_base_clone();
+
+    json_failure(&project.skulk(&["archive", &unique("ghost")]));
 }
