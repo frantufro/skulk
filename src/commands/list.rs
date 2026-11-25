@@ -59,15 +59,23 @@ fn parse_url_map(raw: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Build the SSH command for `skulk list`: epoch, tmux sessions, worktrees,
-/// Stop/`UserPromptSubmit` hook marker contents, and each worktree's app URL
-/// (first line of `url_file`) in one call.
+/// Build the SSH command for `skulk list`: the remote epoch followed by
+/// [`agent_state_probe`].
 pub(crate) fn list_command(cfg: &Config) -> String {
+    format!(
+        "echo __EPOCH__$(date +%s)__EPOCH__ && {}",
+        agent_state_probe(cfg)
+    )
+}
+
+/// Shell snippet printing tmux sessions, worktrees, Stop/`UserPromptSubmit`
+/// hook marker contents, and each worktree's app URL (first line of
+/// `url_file`) as delimited sections. Parse it with [`parse_agent_sessions`].
+pub(crate) fn agent_state_probe(cfg: &Config) -> String {
     let base_path = &cfg.base_path;
     let url_file = cfg.url_file();
     format!(
-        "echo __EPOCH__$(date +%s)__EPOCH__ && \
-         echo __TMUX_START__ && \
+        "echo __TMUX_START__ && \
          tmux list-sessions -F '{TMUX_FORMAT}' 2>&1 && \
          echo __TMUX_END__ && \
          echo __WORKTREES_START__ && \
@@ -85,8 +93,13 @@ pub(crate) fn list_command(cfg: &Config) -> String {
 
 /// Parse the raw output of `list_command` into sessions and `remote_now` epoch.
 pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) {
-    let remote_now = parse_remote_epoch(raw);
+    (parse_agent_sessions(raw, cfg), parse_remote_epoch(raw))
+}
 
+/// Parse the output of [`agent_state_probe`] into one `Session` per agent:
+/// live sessions with their idle state, plus worktrees without a session as
+/// `Stopped`.
+pub(crate) fn parse_agent_sessions(raw: &str, cfg: &Config) -> Vec<Session> {
     // Parse tmux sessions
     let tmux_raw = extract_section(raw, "__TMUX_START__\n", "\n__TMUX_END__");
     let tmux_output = if tmux_raw.lines().any(is_tmux_no_server) {
@@ -136,7 +149,7 @@ pub(crate) fn parse_list_output(raw: &str, cfg: &Config) -> (Vec<Session>, i64) 
         }
     }
 
-    (sessions, remote_now)
+    sessions
 }
 
 /// Build the `list` command's JSON payload: `{"agents": [...]}`.
