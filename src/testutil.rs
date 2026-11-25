@@ -10,7 +10,7 @@ use crate::commands::local_ops::LocalOps;
 use crate::config::{Config, OutputFormat};
 use crate::error::SkulkError;
 use crate::inventory::AgentInventory;
-use crate::ssh::Ssh;
+use crate::ssh::{LineStream, Ssh, StreamRecv};
 
 /// Matches a `Result<_, SkulkError>` against an expected error variant.
 ///
@@ -93,7 +93,19 @@ pub(crate) struct MockSsh {
     pub responses: RefCell<VecDeque<Result<String, SkulkError>>>,
     pub upload_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
     pub download_responses: RefCell<VecDeque<Result<(), SkulkError>>>,
+    pub stream_responses: RefCell<VecDeque<Result<Vec<StreamRecv>, SkulkError>>>,
     calls: RefCell<Vec<String>>,
+}
+
+/// A [`LineStream`] that replays a fixed script, then reports `Closed`.
+pub(crate) struct ScriptedStream(pub VecDeque<StreamRecv>);
+
+impl LineStream for ScriptedStream {
+    fn recv(&mut self, _timeout: std::time::Duration) -> StreamRecv {
+        self.0.pop_front().unwrap_or_else(|| {
+            StreamRecv::Closed(SkulkError::SshFailed("mock stream ended".into()))
+        })
+    }
 }
 
 impl MockSsh {
@@ -102,6 +114,7 @@ impl MockSsh {
             responses: RefCell::new(responses.into()),
             upload_responses: RefCell::new(VecDeque::new()),
             download_responses: RefCell::new(VecDeque::new()),
+            stream_responses: RefCell::new(VecDeque::new()),
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -117,6 +130,16 @@ impl MockSsh {
     /// `download_file` is called, the mock returns `Ok(())`.
     pub fn with_download_responses(mut self, responses: Vec<Result<(), SkulkError>>) -> Self {
         self.download_responses = RefCell::new(responses.into());
+        self
+    }
+
+    /// Queue results for `stream` calls: a script of reads to replay, or an
+    /// error from starting the stream. An empty queue panics.
+    pub fn with_stream_responses(
+        mut self,
+        responses: Vec<Result<Vec<StreamRecv>, SkulkError>>,
+    ) -> Self {
+        self.stream_responses = RefCell::new(responses.into());
         self
     }
 
@@ -161,6 +184,16 @@ impl Ssh for MockSsh {
             .borrow_mut()
             .pop_front()
             .unwrap_or(Ok(()))
+    }
+
+    fn stream(&self, cmd: &str) -> Result<Box<dyn LineStream>, SkulkError> {
+        self.calls.borrow_mut().push(cmd.to_string());
+        let script = self
+            .stream_responses
+            .borrow_mut()
+            .pop_front()
+            .expect("MockSsh: unexpected stream call")?;
+        Ok(Box::new(ScriptedStream(script.into())))
     }
 }
 

@@ -20,8 +20,8 @@ use clap::{Parser, Subcommand};
 
 use commands::local_ops::LocalOps;
 use commands::{
-    completions, destroy, doctor, download, gc, interact, list, new, pull, put, replay, restart,
-    ship, status, update, upload, wait,
+    completions, destroy, doctor, download, events, gc, interact, list, new, pull, put, replay,
+    restart, ship, status, update, upload, wait,
 };
 use config::Config;
 use error::SkulkError;
@@ -382,6 +382,14 @@ pub(crate) enum Commands {
         name: String,
     },
 
+    /// Stream fleet changes as they happen, until the connection drops
+    ///
+    /// Holds one SSH session open. Prints a snapshot first, then a line per
+    /// idle-state change, agent created and agent gone (destroyed, archived or
+    /// crashed). With --json each line is a JSON object, and a heartbeat line
+    /// arrives every 30s. Exits non-zero when the connection is lost.
+    Events,
+
     /// Block until an agent has finished its current turn
     ///
     /// Polls a marker file maintained by Claude Code `Stop` and
@@ -503,6 +511,7 @@ impl Commands {
             Commands::Ship { .. } => "ship",
             Commands::Status { .. } => "status",
             Commands::Transcript { .. } => "transcript",
+            Commands::Events => "events",
             Commands::Wait { .. } => "wait",
             Commands::Completions { .. } => "completions",
             Commands::Update => "update",
@@ -626,6 +635,7 @@ pub(crate) fn run(
         Commands::Transcript { name, output } => {
             interact::cmd_transcript(ssh, &name, output.as_deref(), cfg)
         }
+        Commands::Events => events::cmd_events(ssh, cfg, &crate::timings::SystemClock),
         Commands::Wait { name, all, timeout } => wait::run_wait(
             ssh,
             name.as_deref(),
@@ -1251,6 +1261,25 @@ mod tests {
             },
         };
         assert!(run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero()).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_events_and_fails_when_the_stream_closes() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![]).with_stream_responses(vec![Ok(vec![])]);
+        let cli = Cli {
+            no_color: true,
+            json: false,
+            human: false,
+            config: None,
+            command: Commands::Events,
+        };
+
+        let result = run(cli, &ssh, &cfg, &confirm_yes, &local(), &Timings::zero());
+
+        let (cmd, _) = result.expect_err("a closed stream must fail");
+        assert_eq!(cmd, "events");
+        assert_eq!(ssh.calls(), vec![events::events_command(&cfg)]);
     }
 
     #[test]

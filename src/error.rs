@@ -18,6 +18,9 @@ pub(crate) enum SkulkError {
     /// Update operation failed
     #[error("Update failed: {0}")]
     UpdateFailed(String),
+    /// Writing results to stdout failed (e.g. the reader went away)
+    #[error("Failed to write output: {0}")]
+    Output(String),
 }
 
 impl SkulkError {
@@ -29,6 +32,7 @@ impl SkulkError {
             SkulkError::Validation(_) => "validation",
             SkulkError::NotFound(_) => "not_found",
             SkulkError::UpdateFailed(_) => "update_failed",
+            SkulkError::Output(_) => "output",
         }
     }
 }
