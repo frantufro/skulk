@@ -59,6 +59,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # tests/cli_json.rs drives tmux on a private server and fails under CI
+      # when tmux is missing, rather than skipping.
+      - name: Install tmux
+        run: |
+          command -v tmux && exit 0
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install tmux
+          else
+            sudo apt-get update && sudo apt-get install -y tmux
+          fi
+
       # --locked fails when Cargo.lock is out of date, which catches a version
       # bump that moved Cargo.toml without refreshing the lock.
       - run: cargo test --locked

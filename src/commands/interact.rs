@@ -366,10 +366,16 @@ pub(crate) fn cmd_archive(
     reason: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    for warning in archive_agent(ssh, name, reason, cfg)? {
-        eprintln!("Warning: {warning}");
+    let warnings = archive_agent(ssh, name, reason, cfg)?;
+    match cfg.output_format {
+        OutputFormat::Json => emit_json(&json_archive_result(name, reason, &warnings, cfg)),
+        OutputFormat::Human => {
+            for warning in &warnings {
+                eprintln!("Warning: {warning}");
+            }
+            eprintln!("Archived agent '{name}'. Worktree and branch preserved.");
+        }
     }
-    eprintln!("Archived agent '{name}'. Worktree and branch preserved.");
     Ok(())
 }
 
@@ -390,6 +396,24 @@ fn archive_agent(
         }
     }
     Ok(warnings)
+}
+
+/// Build the JSON result for a successful `archive`.
+pub(crate) fn json_archive_result(
+    name: &str,
+    reason: Option<&str>,
+    warnings: &[String],
+    cfg: &Config,
+) -> serde_json::Value {
+    let agent = AgentRef::new(name, cfg);
+    serde_json::json!({
+        "ok": true,
+        "agent": name,
+        "branch": agent.branch_name(),
+        "worktree": agent.worktree_path(cfg),
+        "reason": reason,
+        "warnings": warnings,
+    })
 }
 
 /// Maximum scrollback lines captured by `skulk transcript`.
@@ -1182,14 +1206,57 @@ mod tests {
     }
 
     #[test]
+    fn json_archive_result_reports_preserved_worktree_and_reason() {
+        let cfg = test_config_json();
+
+        let value = json_archive_result("my-task", Some("PR merged"), &[], &cfg);
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["agent"], "my-task");
+        assert_eq!(value["branch"], "skulk-my-task");
+        assert_eq!(value["worktree"], "~/test-project-worktrees/skulk-my-task");
+        assert_eq!(value["reason"], "PR merged");
+        assert_eq!(value["warnings"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn json_archive_result_without_reason_has_null_reason() {
+        let cfg = test_config_json();
+
+        let value = json_archive_result("my-task", None, &[], &cfg);
+
+        assert!(value["reason"].is_null());
+    }
+
+    #[test]
     fn archive_warnings_record_a_failed_reason_write() {
-        let cfg = test_config();
+        let cfg = test_config_json();
         let ssh = MockSsh::new(vec![ssh_ok(), ssh_err("disk full")]);
 
         let warnings = archive_agent(&ssh, "my-task", Some("PR merged"), &cfg).unwrap();
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("archive reason"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn cmd_archive_in_json_mode_succeeds() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![ssh_ok()]);
+
+        assert!(cmd_archive(&ssh, "test", None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_in_json_mode_returns_error_for_emit_json_error() {
+        let cfg = test_config_json();
+        let ssh = MockSsh::new(vec![Err(SkulkError::SshFailed(
+            "can't find session: skulk-ghost".into(),
+        ))]);
+
+        let result = cmd_archive(&ssh, "ghost", None, &cfg);
+
+        assert_err!(result, SkulkError::NotFound(_) => {});
     }
 
     #[test]
