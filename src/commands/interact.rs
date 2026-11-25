@@ -366,16 +366,30 @@ pub(crate) fn cmd_archive(
     reason: Option<&str>,
     cfg: &Config,
 ) -> Result<(), SkulkError> {
-    let agent = Agent::resolve(name, cfg)?;
-    remote::kill_session(ssh, name, cfg).map_err(|e| agent.classify(e))?;
-    if let Some(text) = reason {
-        let session_name = agent.session_name();
-        if let Err(e) = ssh.run(&archive_reason_command(&session_name, text)) {
-            eprintln!("Warning: failed to write archive reason for '{name}': {e}");
-        }
+    for warning in archive_agent(ssh, name, reason, cfg)? {
+        eprintln!("Warning: {warning}");
     }
     eprintln!("Archived agent '{name}'. Worktree and branch preserved.");
     Ok(())
+}
+
+/// Kill the agent's session and store `reason`, returning non-fatal warnings.
+fn archive_agent(
+    ssh: &impl Ssh,
+    name: &str,
+    reason: Option<&str>,
+    cfg: &Config,
+) -> Result<Vec<String>, SkulkError> {
+    let agent = Agent::resolve(name, cfg)?;
+    remote::kill_session(ssh, name, cfg).map_err(|e| agent.classify(e))?;
+    let mut warnings = Vec::new();
+    if let Some(text) = reason {
+        let session_name = agent.session_name();
+        if let Err(e) = ssh.run(&archive_reason_command(&session_name, text)) {
+            warnings.push(format!("failed to write archive reason for '{name}': {e}"));
+        }
+    }
+    Ok(warnings)
 }
 
 /// Maximum scrollback lines captured by `skulk transcript`.
@@ -1165,6 +1179,17 @@ mod tests {
         let cfg = test_config();
         let ssh = MockSsh::new(vec![ssh_ok()]);
         assert!(cmd_archive(&ssh, "test", None, &cfg).is_ok());
+    }
+
+    #[test]
+    fn archive_warnings_record_a_failed_reason_write() {
+        let cfg = test_config();
+        let ssh = MockSsh::new(vec![ssh_ok(), ssh_err("disk full")]);
+
+        let warnings = archive_agent(&ssh, "my-task", Some("PR merged"), &cfg).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("archive reason"), "{}", warnings[0]);
     }
 
     #[test]
