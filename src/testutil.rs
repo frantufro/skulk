@@ -332,6 +332,18 @@ pub(crate) fn mock_url_section(contents: &str) -> String {
     format!("__URL_START__\n{contents}\n__URL_END__\n")
 }
 
+/// Helper: build the `__URLS_START__` / `__URLS_END__` section that
+/// `list_command` appends: one `<worktree path>\t<first line of url_file>`
+/// line per worktree whose url file exists.
+pub(crate) fn mock_urls_section(entries: &[(&str, &str)]) -> String {
+    let mut out = String::from("__URLS_START__\n");
+    for (path, url) in entries {
+        writeln!(out, "{path}\t{url}").expect("writing to String is infallible");
+    }
+    out.push_str("__URLS_END__\n");
+    out
+}
+
 /// Helper: like [`mock_list_output`] but also injects Stop/`UserPromptSubmit`
 /// hook marker entries as `(session_name, marker_content)` pairs, where
 /// `marker_content` is the literal string the hooks would have written
