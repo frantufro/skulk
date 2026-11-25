@@ -127,10 +127,6 @@ impl Ssh for RealSsh {
         })
     }
 
-    /// Spawn `cmd` with stdout piped and hand back its lines as they arrive.
-    ///
-    /// Remote hosts get SSH keepalives, so a dead link closes the stream
-    /// instead of hanging; `skulk events` also times out on missing frames.
     fn run_with_input(
         &self,
         cmd: &str,
@@ -221,6 +217,10 @@ impl Ssh for RealSsh {
         Ok((status.code(), captured))
     }
 
+    /// Spawn `cmd` with stdout piped and hand back its lines as they arrive.
+    ///
+    /// Remote hosts get SSH keepalives, so a dead link closes the stream
+    /// instead of hanging; `skulk events` also times out on missing frames.
     fn stream(&self, cmd: &str) -> Result<Box<dyn LineStream>, SkulkError> {
         let local = is_localhost(&self.host);
         let mut command = if local {
