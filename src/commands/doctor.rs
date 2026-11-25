@@ -4,8 +4,10 @@
 //! remote host. All remote checks share a single SSH roundtrip so the command
 //! is fast even on slow links.
 
-use crate::config::{self, Config};
-use crate::display::{checkmark, crossmark, dim, use_color, warnmark};
+use crate::config::{self, Config, OutputFormat};
+use crate::display::{
+    JSON_SCHEMA_VERSION, checkmark, crossmark, dim, emit_json, use_color, warnmark,
+};
 use crate::error::SkulkError;
 use crate::ssh::Ssh;
 
@@ -396,6 +398,52 @@ fn render_row(row: &CheckRow, color: bool) -> String {
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
+/// Note attached to skipped checks in the JSON output (the text output shows
+/// them as a bare `[skip]`).
+const SKIPPED_NOTE: &str = "skipped: SSH check failed";
+
+impl CheckStatus {
+    fn as_json_str(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "fail",
+            CheckStatus::Skipped => "skip",
+        }
+    }
+}
+
+/// Build the `--json` payload:
+/// `{"v", "ok", "checks": [{"id", "label", "value", "status", "note"}]}`.
+///
+/// `ok` is false when any check failed. A skipped check reports `value: null`
+/// and a note saying why; other rows without a note report `note: null`.
+fn json_report(rows: &[CheckRow]) -> serde_json::Value {
+    let checks: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let skipped = r.status == CheckStatus::Skipped;
+            let note = if skipped {
+                Some(SKIPPED_NOTE)
+            } else {
+                r.note.as_deref()
+            };
+            serde_json::json!({
+                "id": r.id,
+                "label": r.label,
+                "value": if skipped { None } else { Some(r.value.as_str()) },
+                "status": r.status.as_json_str(),
+                "note": note,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "v": JSON_SCHEMA_VERSION,
+        "ok": !rows.iter().any(|r| r.status == CheckStatus::Fail),
+        "checks": checks,
+    })
+}
+
 pub(crate) fn cmd_doctor(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError> {
     let color = use_color();
     let mut rows: Vec<CheckRow> = Vec::with_capacity(8);
@@ -414,8 +462,12 @@ pub(crate) fn cmd_doctor(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError>
         }
     }
 
-    for row in &rows {
-        println!("{}", render_row(row, color));
+    if cfg.output_format == OutputFormat::Json {
+        emit_json(&json_report(&rows));
+    } else {
+        for row in &rows {
+            println!("{}", render_row(row, color));
+        }
     }
 
     let fail_count = rows
@@ -842,5 +894,145 @@ mod tests {
         let note = row.note.as_ref().unwrap();
         assert!(note.contains("resolve hostname"));
         assert!(note.contains("Check your DNS"));
+    }
+
+    // ── json_report ────────────────────────────────────────────────────
+
+    fn report_for(probe: &str) -> serde_json::Value {
+        let cfg = test_config();
+        let mut rows = vec![config_row(&cfg), skulk_row(), ssh_ok_row(&cfg)];
+        rows.extend(remote_rows(&parse_probe_output(probe), &cfg));
+        json_report(&rows)
+    }
+
+    fn check<'a>(report: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+        report["checks"]
+            .as_array()
+            .and_then(|c| c.iter().find(|c| c["id"] == id))
+            .unwrap_or_else(|| panic!("no check {id}: {report}"))
+    }
+
+    #[test]
+    fn json_report_all_ok_has_stable_ids_and_shape() {
+        let report = report_for(&probe_output_all_ok());
+
+        assert_eq!(report["v"], 1);
+        assert_eq!(report["ok"], true);
+        let ids: Vec<&str> = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "config",
+                "skulk",
+                "ssh",
+                "tmux",
+                "harness",
+                "gh",
+                "base_clone",
+                "worktree_dir"
+            ]
+        );
+        assert_eq!(check(&report, "tmux")["label"], "tmux");
+        assert_eq!(check(&report, "tmux")["value"], "3.3a");
+        assert_eq!(check(&report, "tmux")["status"], "ok");
+        assert!(check(&report, "tmux")["note"].is_null());
+    }
+
+    #[test]
+    fn json_report_warn_keeps_ok_true() {
+        let report = report_for(
+            "tmux:installed:tmux 3.3a\nharness:installed:1.2.0\n\
+             gh:missing\ngh-auth:na\nbase:exists\nworktree:exists\n",
+        );
+
+        assert_eq!(report["ok"], true);
+        assert_eq!(check(&report, "gh")["status"], "warn");
+        assert!(
+            check(&report, "gh")["note"]
+                .as_str()
+                .unwrap()
+                .contains("gh")
+        );
+    }
+
+    #[test]
+    fn json_report_fail_sets_ok_false() {
+        let report = report_for(
+            "tmux:missing\nharness:installed:1.2.0\n\
+             gh:installed:gh version 2.40.1\ngh-auth:yes\n\
+             base:exists\nworktree:exists\n",
+        );
+
+        assert_eq!(report["ok"], false);
+        assert_eq!(check(&report, "tmux")["status"], "fail");
+        assert_eq!(check(&report, "tmux")["value"], "missing");
+        assert!(
+            check(&report, "tmux")["note"]
+                .as_str()
+                .unwrap()
+                .contains("apt-get")
+        );
+    }
+
+    #[test]
+    fn json_report_skipped_checks_have_null_value_and_reason() {
+        let cfg = test_config();
+        let err = SkulkError::Diagnostic {
+            message: "refused".into(),
+            suggestion: "start sshd".into(),
+        };
+        let mut rows = vec![config_row(&cfg), skulk_row(), ssh_fail_row(&cfg, &err)];
+        rows.extend(skipped_remote_rows(&cfg));
+
+        let report = json_report(&rows);
+
+        assert_eq!(report["ok"], false);
+        assert_eq!(check(&report, "ssh")["status"], "fail");
+        for id in ["tmux", "harness", "gh", "base_clone", "worktree_dir"] {
+            let c = check(&report, id);
+            assert_eq!(c["status"], "skip", "{id}");
+            assert!(c["value"].is_null(), "{id}");
+            assert_eq!(c["note"], "skipped: SSH check failed", "{id}");
+        }
+    }
+
+    #[test]
+    fn text_output_of_skipped_row_is_unchanged() {
+        let row = skipped_row("tmux", "tmux", "—");
+        assert!(render_row(&row, false).contains("[skip]"));
+        assert_eq!(render_row(&row, false).lines().count(), 1);
+    }
+
+    #[test]
+    fn cmd_doctor_json_succeeds_when_all_ok() {
+        let cfg = crate::testutil::test_config_json();
+        let ssh = MockSsh::new(vec![Ok(probe_output_all_ok())]);
+        assert!(cmd_doctor(&ssh, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cmd_doctor_json_exits_nonzero_on_fail() {
+        let cfg = crate::testutil::test_config_json();
+        let probe = "tmux:missing\nharness:installed:1.2.0\n\
+                     gh:installed:gh version 2.40.1\ngh-auth:yes\n\
+                     base:exists\nworktree:exists\n";
+        let ssh = MockSsh::new(vec![Ok(probe.to_string())]);
+        assert_err!(cmd_doctor(&ssh, &cfg), SkulkError::Validation(msg) => {
+            assert!(msg.contains("1 check failed"));
+        });
+    }
+
+    #[test]
+    fn cmd_doctor_json_succeeds_with_only_a_warning() {
+        let cfg = crate::testutil::test_config_json();
+        let probe = "tmux:installed:tmux 3.3a\nharness:installed:1.2.0\n\
+                     gh:missing\ngh-auth:na\nbase:exists\nworktree:exists\n";
+        let ssh = MockSsh::new(vec![Ok(probe.to_string())]);
+        assert!(cmd_doctor(&ssh, &cfg).is_ok());
     }
 }
