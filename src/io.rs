@@ -173,7 +173,7 @@ impl Ssh for RealSsh {
             .stdout
             .take()
             .ok_or_else(|| SkulkError::SshExec("stream stdout was not captured".into()))?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| SkulkError::SshExec("stream stderr was not captured".into()))?;
@@ -188,12 +188,7 @@ impl Ssh for RealSsh {
                 }
             }
         });
-        let stderr_reader = std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = String::new();
-            let _ = stderr.read_to_string(&mut buf);
-            buf
-        });
+        let stderr_reader = std::thread::spawn(move || stderr_tail(stderr));
 
         Ok(Box::new(ChildStream {
             child,
@@ -526,6 +521,29 @@ fn run_init() -> Result<InitOutcome, SkulkError> {
     Ok(InitOutcome::Done)
 }
 
+/// How many trailing stderr lines a stream keeps for its close reason.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Read `stderr` to EOF, keeping only the last [`STDERR_TAIL_LINES`] lines,
+/// so a stream that runs for weeks never holds more than a screenful.
+fn stderr_tail(stderr: impl std::io::Read) -> String {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(stderr);
+    let mut tail = std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
+    let mut buf = Vec::new();
+    // Bytes, not `lines()`: a non-UTF-8 line must not stop the draining, or
+    // the remote would eventually block writing to a full stderr pipe.
+    while reader.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+        if tail.len() == STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        let line = String::from_utf8_lossy(&buf);
+        tail.push_back(line.trim_end_matches(['\n', '\r']).to_string());
+        buf.clear();
+    }
+    Vec::from(tail).join("\n")
+}
+
 /// Stdout of a child process started by [`RealSsh::stream`].
 struct ChildStream {
     child: std::process::Child,
@@ -701,5 +719,39 @@ mod tests {
     #[test]
     fn is_localhost_remote_host() {
         assert!(!is_localhost("myserver.example.com"));
+    }
+
+    // ── stderr_tail tests ────────────────────────────────────────────────
+
+    #[test]
+    fn stderr_tail_keeps_only_the_last_lines() {
+        let input = (0..STDERR_TAIL_LINES + 5)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let tail = stderr_tail(std::io::Cursor::new(input));
+
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), STDERR_TAIL_LINES);
+        assert_eq!(lines[0], "line 5");
+        assert_eq!(
+            lines.last().copied(),
+            Some(format!("line {}", STDERR_TAIL_LINES + 4).as_str())
+        );
+    }
+
+    #[test]
+    fn stderr_tail_keeps_reading_past_invalid_utf8() {
+        let tail = stderr_tail(std::io::Cursor::new(b"bad \xff byte\nlast line\n".to_vec()));
+
+        assert_eq!(tail, "bad \u{fffd} byte\nlast line");
+    }
+
+    #[test]
+    fn stderr_tail_returns_short_output_unchanged() {
+        let tail = stderr_tail(std::io::Cursor::new("Connection reset\nbye\n"));
+
+        assert_eq!(tail, "Connection reset\nbye");
     }
 }
