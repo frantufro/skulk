@@ -379,6 +379,12 @@ skulk archive <name>           # stop the agent
   due to an upstream bug. Only use it for interactive mobile/web sessions.
 - `skulk send` delivers text via tmux — shell metacharacters in prompts are
   safe but long prompts may be truncated. Use `--from` for large prompts.
+- `new`, `replay` and `send` confirm the harness submitted the prompt and
+  press Enter again if needed. If it still sits unsent in the input box, they
+  say "not submitted" (`prompt: "not_submitted"` with `--json`) and the agent
+  is idle. Check with `skulk logs <name>`, then `skulk connect <name>` and
+  press Enter. Don't re-send the same prompt on top of it: `send` appends to
+  the text already in the box.
 - Each agent works in its own git worktree. There are no merge conflicts
   between agents during work. Conflicts only arise at merge time.
 - `skulk ship` generates PR descriptions using `claude -p` on the remote.

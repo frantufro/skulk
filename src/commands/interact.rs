@@ -558,7 +558,8 @@ pub(crate) fn cmd_send(
         Submission::Submitted => eprintln!("Prompt delivered to {session_name}."),
         Submission::NotSubmitted => eprintln!(
             "Warning: Prompt typed into {session_name} but not submitted; it is still in the \
-             input box. Inspect with `skulk connect {name}` and press Enter."
+             input box. Attach with `skulk connect {name}` and press Enter (don't re-send it: \
+             `send` would append)."
         ),
     }
     Ok(())
@@ -1244,10 +1245,11 @@ mod tests {
             stuck(),
             ssh_ok(),
             stuck(),
+            ssh_ok(), // marker back to idle
         ]);
 
         assert!(cmd_send(&ssh, "test", "fix the bug", &cfg, &SubmitPacing::zero()).is_ok());
-        assert_eq!(ssh.calls().len(), 6);
+        assert_eq!(ssh.calls().len(), 7);
     }
 
     #[test]

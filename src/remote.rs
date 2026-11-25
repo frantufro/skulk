@@ -1545,6 +1545,7 @@ mod tests {
             stuck(),
             ssh_ok(),
             stuck(),
+            ssh_ok(), // marker back to idle
         ]);
 
         let result =
