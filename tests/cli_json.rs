@@ -857,6 +857,19 @@ fn get_copies_a_symlink_that_stays_inside_as_a_regular_file() {
     assert_eq!(std::fs::read(&copied).expect("copied link"), b"notes");
 }
 
+#[cfg(unix)]
+#[test]
+fn get_refuses_a_missing_path_under_a_symlink_leading_outside() {
+    let project = Project::with_base_clone();
+    let name = project.agent_with_media();
+    let outside = project.local_dir("outside");
+    std::os::unix::fs::symlink(&outside, project.worktree(&name).join("docs")).expect("symlink");
+
+    let err = json_failure(&project.skulk(&["get", &name, "docs/nope.png"]));
+
+    assert_eq!(err["code"], "validation");
+}
+
 #[test]
 fn get_emits_not_found_when_the_path_is_missing() {
     let project = Project::with_base_clone();

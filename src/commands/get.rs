@@ -18,6 +18,11 @@ const REFUSAL: &str = "skulk-get-refused: ";
 /// exist, reported as not found.
 const MISSING: &str = "skulk-get-missing: ";
 
+/// Refusal for a path that leads outside the worktree, through a symlink to
+/// an outside target or to nothing. One wording for both, so `get` cannot
+/// tell which outside paths exist.
+const UNRESOLVED: &str = "does not resolve to a path inside the agent's worktree.";
+
 /// First stdout line of a successful walk: `HEADER\t<kind>\t<staging dir>`.
 const HEADER: &str = "skulk-get-ok";
 
@@ -172,6 +177,9 @@ fn normalize_path(path: &str) -> Result<String, SkulkError> {
 /// line, then one `<bytes>\t<path>` line per file, `path` relative to the
 /// worktree. Prints nothing when the worktree does not exist.
 ///
+/// Before the path is reported missing, each existing leading component is
+/// resolved physically and refused unless it stays inside the worktree, so a
+/// missing path under a symlink leading out is refused rather than probed.
 /// Every entry is resolved to its physical path and refused unless it stays
 /// inside the worktree, so a symlink leading out fails the whole call; links
 /// that stay inside are followed and their targets copied as regular files.
@@ -183,6 +191,11 @@ fn walk_script(worktree: &str, rel: &str, recursive: bool, stage: bool, max_byte
     let rec = u8::from(recursive);
     let stage = u8::from(stage);
     let wt = shell_quote_path(worktree);
+    let parts: Vec<String> = rel
+        .split('/')
+        .map(|c| format!("'{}'", shell_escape(c)))
+        .collect();
+    let parts = parts.join(" ");
     let rel = shell_escape(rel);
     format!(
         "cd {wt} 2>/dev/null || exit 0; W=$(pwd -P) || exit 1; S=\n\
@@ -190,10 +203,17 @@ fn walk_script(worktree: &str, rel: &str, recursive: bool, stage: bool, max_byte
          refuse() {{ echo \"{REFUSAL}$1\" >&2; die; }}\n\
          inside() {{ case \"$1/\" in \"$W\"/*) return 0;; esac; return 1; }}\n\
          p='./{rel}'; q=${{p#./}}\n\
-         if [ ! -e \"$p\" ]; then\n\
-         [ -L \"$p\" ] && refuse \"$q is a symlink to nothing.\"\n\
-         echo \"{MISSING}$q does not exist in the agent's worktree.\" >&2; exit 1\n\
+         cur=$W; lp=\n\
+         for c in {parts}; do\n\
+         lp=${{lp:+$lp/}}$c; n=$cur/$c\n\
+         if [ -L \"$n\" ]; then\n\
+         r=$(readlink -f \"$n\" 2>/dev/null) && inside \"$r\" || refuse \"$lp {UNRESOLVED}\"\n\
+         n=$r\n\
          fi\n\
+         [ -e \"$n\" ] || break\n\
+         cur=$n\n\
+         done\n\
+         [ -e \"$p\" ] || {{ echo \"{MISSING}$q does not exist in the agent's worktree.\" >&2; exit 1; }}\n\
          if [ -d \"$p\" ]; then\n\
          k=dir; [ {rec} = 1 ] || refuse \"$q is a directory; pass --recursive to copy it.\"\n\
          nl=$(printf '\\nx'); nl=${{nl%x}}\n\
@@ -206,9 +226,7 @@ fn walk_script(worktree: &str, rel: &str, recursive: bool, stage: bool, max_byte
          while IFS= read -r f; do\n\
          [ -z \"$f\" ] && continue\n\
          g=${{f#./}}\n\
-         [ -L \"$f\" ] && [ ! -e \"$f\" ] && refuse \"$g is a symlink to nothing.\"\n\
-         r=$(readlink -f \"$f\") || die\n\
-         inside \"$r\" || refuse \"$g leads outside the agent's worktree.\"\n\
+         r=$(readlink -f \"$f\" 2>/dev/null) && [ -e \"$r\" ] && inside \"$r\" || refuse \"$g {UNRESOLVED}\"\n\
          [ -d \"$f\" ] && continue\n\
          [ -f \"$f\" ] || refuse \"$g is not a regular file.\"\n\
          b=$(wc -c < \"$f\") || die; b=$((b)); t=$((t + b))\n\
@@ -726,6 +744,43 @@ mod tests {
 
         assert!(!out.ok);
         assert!(out.stderr.contains(REFUSAL), "{}", out.stderr);
+        let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_refuses_missing_path_under_a_symlink_leading_outside() {
+        let wt = worktree_with_media();
+        let outside = temp_dir("skulk_get_outside");
+        symlink(&outside, &wt.join("docs"));
+
+        let out = run_walk(&wt, "docs/nope/x", false, true, 1000);
+
+        assert!(!out.ok);
+        assert!(out.stderr.contains(REFUSAL), "{}", out.stderr);
+        assert!(!out.stderr.contains(MISSING), "{}", out.stderr);
+        let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_answers_alike_for_outside_targets_that_exist_and_that_do_not() {
+        let wt = worktree_with_media();
+        let outside = temp_dir("skulk_get_outside");
+        std::fs::write(outside.join("secret"), b"x").expect("write");
+        symlink(&outside.join("secret"), &wt.join("link"));
+        symlink(&outside.join("nothing"), &wt.join("dangling"));
+
+        let to_existing = run_walk(&wt, "link", false, true, 1000);
+        let to_nothing = run_walk(&wt, "dangling", false, true, 1000);
+
+        assert!(!to_existing.ok && !to_nothing.ok);
+        assert_eq!(
+            to_existing.stderr.replace("link", "NAME"),
+            to_nothing.stderr.replace("dangling", "NAME")
+        );
         let _ = std::fs::remove_dir_all(&wt);
         let _ = std::fs::remove_dir_all(&outside);
     }
