@@ -348,6 +348,13 @@ fn quote_argv(argv: &[String]) -> String {
 /// it. A watchdog whose `TERM` finds no group left records `gone`: the
 /// command had already ended, so the run did not time out.
 ///
+/// The watchdog and the stdin watcher are stopped with `KILL`, never `TERM`:
+/// a subshell that bash has just forked still runs the parent's traps, so a
+/// `TERM` landing there would run the `TERM` trap and, through its `exit`,
+/// the `EXIT` trap that deletes the temp dir under the running script.
+/// Each is waited for with stderr silenced, since bash reports a job that
+/// `KILL` ended.
+///
 /// The temp dir goes away (an `EXIT` trap covers early exits) before the
 /// script writes its report, and `SIGPIPE` is ignored from then on, so a
 /// dead connection never leaves captured output behind in `$TMPDIR`.
@@ -407,7 +414,7 @@ _reap() {{
 _st=$(mktemp -d "${{TMPDIR:-/tmp}}/skulk-exec.XXXXXX") || {{ echo 'skulk exec: cannot create a temp directory' >&2; exit 1; }}
 _sp= _sv= _sw=
 trap 'rm -rf "$_st"' EXIT
-trap 'for _g in $_sw $_sv; do kill -TERM -"$_g" 2>/dev/null; done; [ -n "$_sp" ] && _reap "$_sp"; exit 130' INT TERM HUP
+trap 'for _g in $_sw $_sv; do {{ kill -KILL -"$_g"; wait "$_g"; }} 2>/dev/null; done; [ -n "$_sp" ] && _reap "$_sp"; exit 130' INT TERM HUP
 set -m
 printf '\036{STARTED}\n' >&2
 {cmd} </dev/null 3<&-{redirect} & _sp=$!
@@ -415,11 +422,11 @@ printf '\036{STARTED}\n' >&2
 exec 3<&-
 {watchdog}wait "$_sp" 2>/dev/null; _sc=$?; _sx=0
 if [ -n "$_sw" ]; then
-  if mkdir "$_st/claim" 2>/dev/null; then kill -TERM -"$_sw" 2>/dev/null
+  if mkdir "$_st/claim" 2>/dev/null; then {{ kill -KILL -"$_sw"; wait "$_sw"; }} 2>/dev/null
   else wait "$_sw" 2>/dev/null; [ -f "$_st/gone" ] || {{ _sc={TIMEOUT_EXIT_CODE}; _sx=1; }}
   fi
 fi
-kill -TERM -"$_sv" 2>/dev/null
+{{ kill -KILL -"$_sv"; wait "$_sv"; }} 2>/dev/null
 _reap "$_sp"
 set +m
 trap '' PIPE
