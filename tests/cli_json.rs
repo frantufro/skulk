@@ -1361,6 +1361,36 @@ fn exec_returns_stdout_stderr_and_zero_exit() {
     assert_eq!(result["stdout_truncated"], false);
 }
 
+/// A fast command ends right after skulk forks its helper subshells, so a
+/// race there loses output on some runs only; concurrent runs widen the
+/// window enough to hit it.
+#[test]
+fn exec_keeps_the_output_of_a_fast_command_on_every_run() {
+    let project = Project::with_base_clone();
+    let name = unique("exec");
+    project.exec_agent(&name);
+
+    let results: Vec<Output> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    (0..25)
+                        .map(|_| project.skulk(&["exec", &name, "--", "echo", "out"]))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("worker thread"))
+            .collect()
+    });
+
+    for out in &results {
+        assert_eq!(json_success(out)["stdout"], "out\n");
+    }
+}
+
 #[test]
 fn exec_runs_in_worktree_with_agent_environment() {
     let project = Project::with_base_clone();
