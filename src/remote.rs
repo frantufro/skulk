@@ -316,6 +316,9 @@ pub(crate) fn clear_prompt(ssh: &impl Ssh, session_name: &str) -> Result<(), Sku
 ///   skipped and a stderr warning is emitted if the user explicitly requested
 ///   it.
 /// - `--model <name>`: shared.
+/// - `--mcp-config <file>`: Claude Code only, added when `cfg.mcp_config_path` is
+///   set and the file exists at launch (after the init hook, which usually
+///   writes it). Skipped with a stderr warning for other harnesses.
 ///
 /// The init hook is gated on file existence (`[ -f {init_script} ]`), so a
 /// project without `.skulk/init.sh` starts the harness directly. When the hook
@@ -367,8 +370,20 @@ fn build_launch_sequence(
         Some(args) if !args.is_empty() => format!(" {args}"),
         _ => String::new(),
     };
-    let harness_cmd =
-        format!("{harness}{permissions_flag}{remote_control_flag}{model_flag}{extra_args}");
+    let flags = format!("{permissions_flag}{remote_control_flag}{model_flag}{extra_args}");
+    let harness_cmd = match cfg.mcp_config_path.as_deref() {
+        // The file is usually written by the init script, so its existence is
+        // checked at launch, not here. `--mcp-config` takes several values, so
+        // it goes first, where the next token is a flag.
+        Some(mcp) if is_claude => format!(
+            "if [ -f {mcp} ]; then {harness} --mcp-config {mcp}{flags}; else {harness}{flags}; fi"
+        ),
+        Some(_) => {
+            eprintln!("warning: mcp_config is Claude Code only; ignoring for harness '{harness}'");
+            format!("{harness}{flags}")
+        }
+        None => format!("{harness}{flags}"),
+    };
     // Grouping `{ set -a; . ./.env; set +a; }` (not `&&`-chained) guarantees
     // `set +a` runs even if `.env` has a syntax error and sourcing fails —
     // otherwise the shell would stay in auto-export mode and leak locals
@@ -1832,6 +1847,130 @@ mod tests {
         assert!(
             !seq.contains("--remote-control"),
             "opencode launch must not include --remote-control even when requested: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_omits_mcp_config_when_unset() {
+        let cfg = test_config();
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            !seq.contains("--mcp-config"),
+            "no --mcp-config without mcp_config: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_adds_mcp_config_only_when_file_exists() {
+        let mut cfg = test_config();
+        cfg.mcp_config_path = Some("tmp/mcp.json".into());
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            seq.contains(
+                "if [ -f tmp/mcp.json ]; then \
+                 claude --mcp-config tmp/mcp.json --dangerously-skip-permissions; \
+                 else claude --dangerously-skip-permissions; fi"
+            ),
+            "expected launch gated on the mcp config file: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_puts_mcp_config_before_other_flags() {
+        // --mcp-config takes several values, so it must be followed by a flag,
+        // never by a bare argument from claude_args.
+        let mut cfg = test_config();
+        cfg.mcp_config_path = Some("tmp/mcp.json".into());
+        let seq = build_launch_sequence("my-task", &cfg, true, Some("opus"), Some("extra"));
+        assert!(
+            seq.contains(
+                "claude --mcp-config tmp/mcp.json --dangerously-skip-permissions \
+                 --remote-control skulk-my-task --model opus extra;"
+            ),
+            "expected --mcp-config right after the binary: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_checks_mcp_config_after_init_script() {
+        let mut cfg = test_config();
+        cfg.mcp_config_path = Some("tmp/mcp.json".into());
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        let init_idx = seq.find("bash .skulk/init.sh").expect("init hook missing");
+        let mcp_idx = seq.find("[ -f tmp/mcp.json ]").expect("mcp check missing");
+        assert!(
+            init_idx < mcp_idx,
+            "mcp config must be checked after init.sh: {seq}"
+        );
+    }
+
+    #[test]
+    fn build_launch_sequence_skips_mcp_config_for_non_claude_harness() {
+        let mut cfg = test_config();
+        cfg.harness = "opencode".into();
+        cfg.mcp_config_path = Some("tmp/mcp.json".into());
+        let seq = build_launch_sequence("my-task", &cfg, false, None, None);
+        assert!(
+            !seq.contains("--mcp-config") && !seq.contains("tmp/mcp.json"),
+            "opencode launch must not include --mcp-config: {seq}"
+        );
+    }
+
+    /// Runs the launch sequence in `sh` inside a scratch worktree, with a stub
+    /// `claude` on `PATH` that prints its arguments.
+    fn run_launch_sequence_with_stub(cfg: &Config, init_sh: Option<&str>) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "skulk_launch_mcp_{}_{}",
+            std::process::id(),
+            init_sh.is_some()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        let wt = dir.join("wt");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(wt.join(".skulk")).unwrap();
+        let stub = bin.join("claude");
+        std::fs::write(&stub, "#!/bin/sh\necho \"ARGS: $*\"\n").unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", stub.to_str().unwrap()])
+            .status()
+            .unwrap();
+        if let Some(script) = init_sh {
+            std::fs::write(wt.join(".skulk/init.sh"), script).unwrap();
+        }
+        let seq = build_launch_sequence("my-task", cfg, false, None, None);
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", &seq])
+            .current_dir(&wt)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn launch_runs_claude_without_mcp_config_when_file_missing() {
+        let mut cfg = test_config();
+        cfg.mcp_config_path = Some("tmp/mcp.json".into());
+        let out = run_launch_sequence_with_stub(&cfg, None);
+        assert_eq!(out.trim(), "ARGS: --dangerously-skip-permissions");
+    }
+
+    #[test]
+    fn launch_passes_mcp_config_written_by_init_script() {
+        let mut cfg = test_config();
+        cfg.mcp_config_path = Some("tmp/mcp.json".into());
+        let init = "mkdir -p tmp && echo '{}' > tmp/mcp.json\n";
+        let out = run_launch_sequence_with_stub(&cfg, Some(init));
+        assert_eq!(
+            out.trim(),
+            "ARGS: --mcp-config tmp/mcp.json --dangerously-skip-permissions"
         );
     }
 
