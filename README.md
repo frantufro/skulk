@@ -274,6 +274,14 @@ mkdir -p "$SKULK_WORKTREE/tmp"
 echo "http://localhost:$PORT" > "$SKULK_WORKTREE/tmp/dev-server-url"
 ```
 
+**Per-agent MCP config:** Claude Code keeps project MCP overrides per repository, not per worktree, so `init.sh` can't repoint a project MCP server (for example, one served by your app on this agent's port) for a single agent. Instead, set `mcp_config = "tmp/mcp.json"` in `.skulk/config.toml` and have `init.sh` write that file in the worktree. When the file exists at launch, skulk starts Claude with `--mcp-config tmp/mcp.json`; when it doesn't, Claude starts as usual. Claude Code only: other harnesses ignore it, with a warning.
+
+```bash
+mkdir -p "$SKULK_WORKTREE/tmp"
+printf '{"mcpServers":{"my-app":{"type":"http","url":"http://localhost:%s/mcp"}}}\n' "$PORT" \
+  > "$SKULK_WORKTREE/tmp/mcp.json"
+```
+
 `skulk init` writes `.skulk/init.sh.example` — rename it to `.skulk/init.sh` and customize to enable.
 
 ## Claude Code Plugin
