@@ -24,10 +24,6 @@ pub(crate) fn json_wait_result(name: &str, success: bool, reason: Option<&str>) 
     }
 }
 
-/// The error a `--json` wait returns when it times out, after printing its
-/// timeout payload to stdout: exit 1 and nothing more on stderr.
-const TIMEOUT_EXIT: SkulkError = SkulkError::CommandExit(1);
-
 /// Build the SSH command to read an agent's idle-marker file.
 ///
 /// The marker file is maintained by the Stop and `UserPromptSubmit` hooks
@@ -63,19 +59,51 @@ pub(crate) fn cmd_wait(
     timeout: Duration,
 ) -> Result<(), SkulkError> {
     let agent = Agent::resolve(name, cfg)?;
-    wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)
+    match wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)? {
+        WaitOutcome::Idle => Ok(()),
+        WaitOutcome::TimedOut => Err(timeout_error(&agent, cfg, timeout)),
+    }
 }
 
-/// The wait loop for an already-resolved agent.
+/// How waiting for one agent ended, short of an error.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    Idle,
+    TimedOut,
+}
+
+/// The error a wait that timed out on `agent` returns.
+///
+/// With `--json` the timeout is the one failure reported on stdout (printed
+/// by [`wait_for_agent`]), so the error carries only the exit code and io.rs
+/// adds no second JSON object on stderr.
+fn timeout_error(agent: &Agent, cfg: &Config, timeout: Duration) -> SkulkError {
+    if cfg.output_format == OutputFormat::Json {
+        return SkulkError::CommandExit(1);
+    }
+    SkulkError::Diagnostic {
+        message: format!(
+            "Timed out after {}s waiting for {} to become idle.",
+            timeout.as_secs(),
+            agent.session_name()
+        ),
+        suggestion: format!(
+            "Inspect the agent: `skulk connect {}` (or raise --timeout).",
+            agent.name()
+        ),
+    }
+}
+
+/// The wait loop for an already-resolved agent. Prints the agent's result
+/// (idle, or with `--json` the timeout payload) and reports how it ended.
 fn wait_for_agent(
     ssh: &impl Ssh,
     agent: &Agent,
     cfg: &Config,
     poll_interval: Duration,
     timeout: Duration,
-) -> Result<(), SkulkError> {
+) -> Result<WaitOutcome, SkulkError> {
     let name = agent.name();
-    let session_name = agent.session_name();
 
     remote::ensure_session_exists(ssh, name, cfg).map_err(|e| agent.classify(e))?;
 
@@ -89,28 +117,15 @@ fn wait_for_agent(
             if cfg.output_format == OutputFormat::Json {
                 emit_json(&json_wait_result(name, true, None))?;
             } else {
-                eprintln!("Agent {session_name} is idle.");
+                eprintln!("Agent {} is idle.", agent.session_name());
             }
-            return Ok(());
+            return Ok(WaitOutcome::Idle);
         }
         if start.elapsed() >= timeout {
-            let message = format!(
-                "Timed out after {}s waiting for {session_name} to become idle.",
-                timeout.as_secs()
-            );
-            let suggestion =
-                format!("Inspect the agent: `skulk connect {name}` (or raise --timeout).");
             if cfg.output_format == OutputFormat::Json {
-                // The timeout is the one failure reported on stdout. The error
-                // carries only the exit code, so io.rs exits 1 without adding
-                // a second JSON object on stderr.
                 emit_json(&json_wait_result(name, false, Some("timeout")))?;
-                return Err(TIMEOUT_EXIT);
             }
-            return Err(SkulkError::Diagnostic {
-                message,
-                suggestion,
-            });
+            return Ok(WaitOutcome::TimedOut);
         }
         std::thread::sleep(poll_interval);
     }
@@ -118,11 +133,11 @@ fn wait_for_agent(
 
 /// Block until every running agent on the host is idle.
 ///
-/// Walks the inventory once, then calls [`cmd_wait`] for each session in
-/// turn. A host with no running agents is a no-op (just logs a message).
-/// `timeout` applies per agent, not in aggregate. With `--json` a timed-out
-/// agent does not stop the walk: every agent gets its own result line, and
-/// the command exits 1 at the end if any of them timed out.
+/// Walks the inventory once, then waits for each session in turn. A host
+/// with no running agents is a no-op (just logs a message). `timeout`
+/// applies per agent, not in aggregate. With `--json` a timed-out agent does
+/// not stop the walk: every agent gets its own result line, and the command
+/// exits 1 at the end if any of them timed out.
 pub(crate) fn cmd_wait_all(
     ssh: &impl Ssh,
     cfg: &Config,
@@ -134,17 +149,20 @@ pub(crate) fn cmd_wait_all(
         eprintln!("No running agents.");
         return Ok(());
     }
-    let mut result = Ok(());
+    let mut timed_out = false;
     for session in &inv.sessions {
         let agent = Agent::from_qualified(session, cfg);
-        match wait_for_agent(ssh, &agent, cfg, poll_interval, timeout) {
-            Err(SkulkError::CommandExit(1)) if cfg.output_format == OutputFormat::Json => {
-                result = Err(TIMEOUT_EXIT);
+        if wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)? == WaitOutcome::TimedOut {
+            if cfg.output_format == OutputFormat::Human {
+                return Err(timeout_error(&agent, cfg, timeout));
             }
-            other => other?,
+            timed_out = true;
         }
     }
-    result
+    if timed_out {
+        return Err(SkulkError::CommandExit(1));
+    }
+    Ok(())
 }
 
 /// Dispatch `skulk wait` between a single agent and `--all`.
