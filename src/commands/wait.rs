@@ -24,6 +24,10 @@ pub(crate) fn json_wait_result(name: &str, success: bool, reason: Option<&str>) 
     }
 }
 
+/// The error a `--json` wait returns when it times out, after printing its
+/// timeout payload to stdout: exit 1 and nothing more on stderr.
+const TIMEOUT_EXIT: SkulkError = SkulkError::CommandExit(1);
+
 /// Build the SSH command to read an agent's idle-marker file.
 ///
 /// The marker file is maintained by the Stop and `UserPromptSubmit` hooks
@@ -48,8 +52,9 @@ pub(crate) fn wait_state_command(name: &str, cfg: &Config) -> String {
 /// `poll_interval` and `timeout` are exposed for testing; production callers
 /// supply them from `Timings` and the CLI flag respectively. The timeout is
 /// checked after each poll that sees `busy`, so the function always attempts
-/// at least one poll and returns a `Diagnostic` if the agent stays busy
-/// past the deadline.
+/// at least one poll. If the agent stays busy past the deadline it returns a
+/// `Diagnostic`, or with `--json` prints the timeout payload to stdout and
+/// returns `CommandExit(1)`.
 pub(crate) fn cmd_wait(
     ssh: &impl Ssh,
     name: &str,
@@ -96,13 +101,11 @@ fn wait_for_agent(
             let suggestion =
                 format!("Inspect the agent: `skulk connect {name}` (or raise --timeout).");
             if cfg.output_format == OutputFormat::Json {
-                // Emit the structured timeout payload and exit with code 1
-                // directly. Returning Err here would cause io.rs to also emit
-                // a JSON error object to stderr, giving consumers two JSON
-                // objects across two streams. The non-zero exit code is the
-                // machine-readable signal; the stdout payload carries the detail.
+                // The timeout is the one failure reported on stdout. The error
+                // carries only the exit code, so io.rs exits 1 without adding
+                // a second JSON object on stderr.
                 emit_json(&json_wait_result(name, false, Some("timeout")))?;
-                std::process::exit(1);
+                return Err(TIMEOUT_EXIT);
             }
             return Err(SkulkError::Diagnostic {
                 message,
@@ -117,7 +120,9 @@ fn wait_for_agent(
 ///
 /// Walks the inventory once, then calls [`cmd_wait`] for each session in
 /// turn. A host with no running agents is a no-op (just logs a message).
-/// `timeout` applies per agent, not in aggregate.
+/// `timeout` applies per agent, not in aggregate. With `--json` a timed-out
+/// agent does not stop the walk: every agent gets its own result line, and
+/// the command exits 1 at the end if any of them timed out.
 pub(crate) fn cmd_wait_all(
     ssh: &impl Ssh,
     cfg: &Config,
@@ -129,11 +134,17 @@ pub(crate) fn cmd_wait_all(
         eprintln!("No running agents.");
         return Ok(());
     }
+    let mut result = Ok(());
     for session in &inv.sessions {
         let agent = Agent::from_qualified(session, cfg);
-        wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)?;
+        match wait_for_agent(ssh, &agent, cfg, poll_interval, timeout) {
+            Err(SkulkError::CommandExit(1)) if cfg.output_format == OutputFormat::Json => {
+                result = Err(TIMEOUT_EXIT);
+            }
+            other => other?,
+        }
     }
-    Ok(())
+    result
 }
 
 /// Dispatch `skulk wait` between a single agent and `--all`.
@@ -367,6 +378,55 @@ mod tests {
                 "expected timeout message, got: {message}"
             );
         });
+    }
+
+    #[test]
+    fn cmd_wait_json_timeout_returns_command_exit_1() {
+        // The timeout payload goes to stdout; the error carries only the exit
+        // code so io.rs exits 1 without printing a second JSON object.
+        let cfg = test_config_with_format(OutputFormat::Json);
+        let ssh = MockSsh::new(vec![
+            ssh_ok(),          // has-session
+            Ok("busy".into()), // first poll, then timeout fires
+        ]);
+
+        let result = cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::ZERO);
+
+        assert_err!(result, SkulkError::CommandExit(1) => {});
+    }
+
+    #[test]
+    fn cmd_wait_all_json_waits_for_every_agent_after_a_timeout() {
+        let cfg = test_config_with_format(OutputFormat::Json);
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(&["skulk-alpha", "skulk-beta"], &[], &[])),
+            ssh_ok(),          // has-session alpha
+            Ok("busy".into()), // alpha busy, times out
+            ssh_ok(),          // has-session beta
+            Ok("idle".into()), // beta idle
+        ]);
+
+        let result = cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::ZERO);
+
+        assert_err!(result, SkulkError::CommandExit(1) => {});
+        assert_eq!(ssh.calls().len(), 5, "beta must still be polled");
+    }
+
+    #[test]
+    fn cmd_wait_all_json_stops_at_an_error_that_is_not_a_timeout() {
+        let cfg = test_config_with_format(OutputFormat::Json);
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(&["skulk-alpha", "skulk-beta"], &[], &[])),
+            ssh_ok(),          // has-session alpha
+            Ok("busy".into()), // alpha busy, times out
+            Err(SkulkError::SshFailed(
+                "can't find session: skulk-beta".into(),
+            )),
+        ]);
+
+        let result = cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::ZERO);
+
+        assert_err!(result, SkulkError::NotFound(_) => {});
     }
 
     #[test]
