@@ -266,7 +266,7 @@ pub(crate) fn create_agent_with_prompt(
             remote_control,
             prompt: prompt_status,
         };
-        emit_json(&json_new_result(name, &launch, &warnings, cfg));
+        emit_json(&json_new_result(name, &launch, &warnings, cfg))?;
         return Ok(());
     }
 

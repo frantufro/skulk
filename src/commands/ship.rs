@@ -174,7 +174,7 @@ pub(crate) fn cmd_ship(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
     match cfg.output_format {
         OutputFormat::Json => {
             let pr_url = output.trim();
-            emit_json(&json_ship_result(name, pr_url));
+            emit_json(&json_ship_result(name, pr_url))?;
         }
         OutputFormat::Human => {
             if !output.is_empty() {

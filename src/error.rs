@@ -24,6 +24,9 @@ pub(crate) enum SkulkError {
     /// A command run by `skulk exec` exited non-zero; skulk exits with its code
     #[error("Command exited with status {0}")]
     CommandExit(i32),
+    /// A `--json` payload could not be rendered
+    #[error("JSON serialization failed: {0}")]
+    JsonSerialization(String),
 }
 
 impl SkulkError {
@@ -37,6 +40,7 @@ impl SkulkError {
             SkulkError::UpdateFailed(_) => "update_failed",
             SkulkError::Output(_) => "output",
             SkulkError::CommandExit(_) => "command_exit",
+            SkulkError::JsonSerialization(_) => "json_serialization",
         }
     }
 }
@@ -449,6 +453,10 @@ mod tests {
             (SkulkError::Validation("x".into()), "validation"),
             (SkulkError::NotFound("x".into()), "not_found"),
             (SkulkError::UpdateFailed("x".into()), "update_failed"),
+            (
+                SkulkError::JsonSerialization("x".into()),
+                "json_serialization",
+            ),
         ];
         for (err, expected_code) in variants {
             assert_eq!(

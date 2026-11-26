@@ -463,7 +463,7 @@ pub(crate) fn cmd_doctor(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError>
     }
 
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_report(&rows));
+        emit_json(&json_report(&rows))?;
     } else {
         for row in &rows {
             println!("{}", render_row(row, color));

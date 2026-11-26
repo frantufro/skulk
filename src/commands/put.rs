@@ -89,7 +89,7 @@ pub(crate) fn cmd_put(
     };
 
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_put_result(name, &remote_path));
+        emit_json(&json_put_result(name, &remote_path))?;
     } else {
         println!("{remote_path}");
     }

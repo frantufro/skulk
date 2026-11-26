@@ -241,7 +241,7 @@ pub(crate) fn cmd_diff(
         OutputFormat::Json => emit_json(&serde_json::json!({
             "agent": name,
             "diff": output,
-        })),
+        }))?,
         OutputFormat::Human => print!("{output}"),
     }
     Ok(())
@@ -254,7 +254,7 @@ pub(crate) fn cmd_push(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(), S
         .run(&push_command(name, cfg))
         .map_err(|e| agent.classify(e))?;
     match cfg.output_format {
-        OutputFormat::Json => emit_json(&json_push_result(name, cfg, &output)),
+        OutputFormat::Json => emit_json(&json_push_result(name, cfg, &output))?,
         OutputFormat::Human => {
             if !output.is_empty() {
                 print!("{output}");
@@ -294,7 +294,7 @@ pub(crate) fn cmd_git_log(
     };
     let output = ssh.run(&command).map_err(|e| agent.classify(e))?;
     if json {
-        emit_json(&json_git_log_result(name, cfg, &output)?);
+        emit_json(&json_git_log_result(name, cfg, &output)?)?;
     } else {
         print!("{output}");
     }
@@ -363,7 +363,7 @@ pub(crate) fn cmd_logs(
             if let Some(w) = window {
                 doc["window"] = w.into();
             }
-            emit_json(&doc);
+            emit_json(&doc)?;
         }
         OutputFormat::Human => print!("{output}"),
     }
@@ -411,7 +411,7 @@ pub(crate) fn cmd_restart_window(
             "agent": name,
             "window": window,
             "restarted": true,
-        })),
+        }))?,
         OutputFormat::Human => eprintln!("Restarted window '{window}' of agent '{name}'."),
     }
     Ok(())
@@ -442,7 +442,7 @@ pub(crate) fn cmd_archive(
 ) -> Result<(), SkulkError> {
     let warnings = archive_agent(ssh, name, reason, cfg)?;
     match cfg.output_format {
-        OutputFormat::Json => emit_json(&json_archive_result(name, reason, &warnings, cfg)),
+        OutputFormat::Json => emit_json(&json_archive_result(name, reason, &warnings, cfg))?,
         OutputFormat::Human => {
             for warning in &warnings {
                 eprintln!("Warning: {warning}");
@@ -551,7 +551,7 @@ pub(crate) fn cmd_send(
         .map_err(|e| agent.classify(e))?;
     let submission = confirm_submission(ssh, &session_name, prompt, cfg, pacing);
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_send_result(name, submission));
+        emit_json(&json_send_result(name, submission))?;
         return Ok(());
     }
     match submission {

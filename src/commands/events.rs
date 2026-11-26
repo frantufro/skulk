@@ -472,10 +472,7 @@ fn emit(
 ) -> Result<(), SkulkError> {
     let ts = rfc3339(now_ms);
     let line = match format {
-        OutputFormat::Json => Some(
-            render_json(&event_json(event, &ts))
-                .map_err(|e| SkulkError::Output(format!("json serialization failed: {e}")))?,
-        ),
+        OutputFormat::Json => Some(render_json(&event_json(event, &ts))?),
         OutputFormat::Human => event_human(event, &ts),
     };
     if let Some(line) = line {

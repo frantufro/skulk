@@ -97,7 +97,7 @@ pub(crate) fn cmd_get(ssh: &impl Ssh, req: &GetRequest, cfg: &Config) -> Result<
 
     listing.files.sort_by(|a, b| a.path.cmp(&b.path));
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_get_result(req.name, &listing.files, dest.as_deref()));
+        emit_json(&json_get_result(req.name, &listing.files, dest.as_deref()))?;
     } else if let Some(dest) = &dest {
         for entry in &listing.files {
             println!(
