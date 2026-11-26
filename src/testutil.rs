@@ -585,6 +585,15 @@ impl LocalOps for MockLocalOps {
     }
 }
 
+/// Fail the calling test when tmux is missing. A real-tmux test that skipped
+/// itself would pass without checking anything.
+pub(crate) fn require_tmux(installed: bool) {
+    assert!(
+        installed,
+        "tmux is required for this test; install it to run the suite"
+    );
+}
+
 static NEXT_PRIVATE_TMUX: AtomicU64 = AtomicU64::new(0);
 
 /// A tmux server private to one test.
@@ -599,17 +608,14 @@ pub(crate) struct PrivateTmux {
 
 impl PrivateTmux {
     /// Start a private server whose new windows are numbered from
-    /// `base_index`. Returns `None` (the caller skips) when tmux is not
-    /// installed.
-    pub(crate) fn start(base_index: u32) -> Option<Self> {
-        let installed = std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if !installed {
-            eprintln!("skipping: tmux is not installed");
-            return None;
-        }
+    /// `base_index`. Fails the test when tmux is not installed.
+    pub(crate) fn start(base_index: u32) -> Self {
+        require_tmux(
+            std::process::Command::new("tmux")
+                .arg("-V")
+                .output()
+                .is_ok_and(|o| o.status.success()),
+        );
         // Kept short: tmux socket paths are limited to about 100 bytes.
         let dir = PathBuf::from(format!(
             "/tmp/skulk-tmux-{}-{}",
@@ -627,7 +633,7 @@ impl PrivateTmux {
             "tmux -f /dev/null new-session -d -s keeper cat && \
              tmux set-option -g base-index {base_index}"
         ));
-        Some(tmux)
+        tmux
     }
 
     /// Run `script` with `sh -c` against this server and return stdout.
@@ -685,13 +691,22 @@ mod tests {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "tmux is required")]
+    fn require_tmux_fails_the_test_when_tmux_is_missing() {
+        require_tmux(false);
+    }
+
+    #[test]
+    fn require_tmux_lets_the_test_run_when_tmux_is_installed() {
+        require_tmux(true);
+    }
+
+    #[test]
     fn private_tmux_never_talks_to_the_callers_tmux_server() {
         // `cargo test` usually runs inside an agent's tmux session, where
         // `$TMUX` names the shared server every agent runs in; tmux prefers
         // that socket over `TMUX_TMPDIR`, so `command` must drop it.
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         let socket = tmux.sh("tmux display-message -p -t keeper '#{socket_path}'");
         assert!(
             Path::new(socket.trim()).starts_with(tmux.dir()),

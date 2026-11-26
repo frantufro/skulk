@@ -1138,9 +1138,7 @@ mod tests {
 
     #[test]
     fn new_agent_session_has_the_status_line_off_on_a_real_tmux() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         let cfg = Config {
             harness: "true".to_string(),
             ..test_config()
@@ -1163,9 +1161,7 @@ mod tests {
 
     #[test]
     fn hide_status_line_turns_off_an_existing_sessions_status_line_on_a_real_tmux() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat");
 
         tmux.sh(&hide_status_line_command("skulk-my-task"));
@@ -1249,9 +1245,7 @@ mod tests {
 
     #[test]
     fn respawn_window_refuses_the_first_window_of_a_session_without_an_agent_window() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n claude cat && \
              tmux new-window -d -t skulk-my-task -n server cat");
         let pid = tmux.sh("tmux display-message -p -t skulk-my-task:=claude '#{pane_pid}'");
@@ -1271,9 +1265,7 @@ mod tests {
 
     #[test]
     fn respawn_window_still_restarts_other_windows_of_a_session_without_an_agent_window() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n claude cat && \
              tmux new-window -d -t skulk-my-task -n server cat");
         let pid = tmux.sh("tmux display-message -p -t skulk-my-task:=server '#{pane_pid}'");
@@ -1287,9 +1279,7 @@ mod tests {
 
     #[test]
     fn respawn_window_reports_a_missing_window() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat");
         let cfg = test_config();
 
@@ -1307,9 +1297,7 @@ mod tests {
 
     #[test]
     fn resolved_named_window_reads_that_window_not_the_agent_one() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
              tmux new-window -d -t skulk-my-task -n server 'echo SERVER-LOG; exec cat'");
         let resolve = resolve_window("skulk-my-task", Some("server"));
@@ -1324,9 +1312,7 @@ mod tests {
 
     #[test]
     fn resolved_named_window_does_not_prefix_match() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
              tmux new-window -d -t skulk-my-task -n server cat");
         let resolve = resolve_window("skulk-my-task", Some("serv"));
@@ -1345,9 +1331,7 @@ mod tests {
 
     #[test]
     fn respawned_window_reruns_its_command_and_leaves_the_agent_alone() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         let counter = tmux.dir().join("starts");
         let counter = counter.display();
         tmux.sh(&format!(
@@ -1374,9 +1358,7 @@ mod tests {
 
     #[test]
     fn respawned_window_restarts_a_command_that_already_exited() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         let counter = tmux.dir().join("starts");
         let counter = counter.display();
         tmux.sh(&format!(
@@ -1419,9 +1401,7 @@ mod tests {
 
     #[test]
     fn resolved_window_is_the_named_agent_window_when_server_window_is_active() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
              tmux new-window -t skulk-my-task -n server cat");
         assert_eq!(active_window_name(&tmux), "server");
@@ -1437,9 +1417,7 @@ mod tests {
 
     #[test]
     fn resolved_window_falls_back_to_window_zero_in_an_unnamed_session() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task cat && \
              tmux new-window -t skulk-my-task -n server cat");
         assert_eq!(active_window_name(&tmux), "server");
@@ -1455,9 +1433,7 @@ mod tests {
 
     #[test]
     fn resolved_window_falls_back_to_window_one_when_base_index_is_one() {
-        let Some(tmux) = PrivateTmux::start(1) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(1);
         tmux.sh("tmux new-session -d -s skulk-my-task cat && \
              tmux new-window -t skulk-my-task -n server cat");
         let indexes = tmux.sh("tmux list-windows -t skulk-my-task -F '#{window_index}'");
