@@ -61,7 +61,7 @@ pub(crate) fn cmd_wait(
     let agent = Agent::resolve(name, cfg)?;
     match wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)? {
         WaitOutcome::Idle => Ok(()),
-        WaitOutcome::TimedOut => Err(timeout_error(&agent, cfg, timeout)),
+        WaitOutcome::TimedOut => Err(timeout_error(&[agent], cfg, timeout)),
     }
 }
 
@@ -72,25 +72,31 @@ enum WaitOutcome {
     TimedOut,
 }
 
-/// The error a wait that timed out on `agent` returns.
+/// The error a wait returns when `timed_out` (never empty) did not become
+/// idle in time.
 ///
 /// With `--json` the timeout is the one failure reported on stdout (printed
 /// by [`wait_for_agent`]), so the error carries only the exit code and io.rs
 /// adds no second JSON object on stderr.
-fn timeout_error(agent: &Agent, cfg: &Config, timeout: Duration) -> SkulkError {
+fn timeout_error(timed_out: &[Agent], cfg: &Config, timeout: Duration) -> SkulkError {
     if cfg.output_format == OutputFormat::Json {
         return SkulkError::CommandExit(1);
     }
+    let sessions: Vec<String> = timed_out.iter().map(Agent::session_name).collect();
+    let suggestion = match timed_out {
+        [agent] => format!(
+            "Inspect the agent: `skulk connect {}` (or raise --timeout).",
+            agent.name()
+        ),
+        _ => "Inspect each agent with `skulk connect <name>` (or raise --timeout).".to_string(),
+    };
     SkulkError::Diagnostic {
         message: format!(
             "Timed out after {}s waiting for {} to become idle.",
             timeout.as_secs(),
-            agent.session_name()
+            sessions.join(", ")
         ),
-        suggestion: format!(
-            "Inspect the agent: `skulk connect {}` (or raise --timeout).",
-            agent.name()
-        ),
+        suggestion,
     }
 }
 
@@ -135,9 +141,9 @@ fn wait_for_agent(
 ///
 /// Walks the inventory once, then waits for each session in turn. A host
 /// with no running agents is a no-op (just logs a message). `timeout`
-/// applies per agent, not in aggregate. With `--json` a timed-out agent does
-/// not stop the walk: every agent gets its own result line, and the command
-/// exits 1 at the end if any of them timed out.
+/// applies per agent, not in aggregate. A timed-out agent does not stop the
+/// walk: every agent gets its result, and the command fails at the end,
+/// naming each agent that timed out, if any did.
 pub(crate) fn cmd_wait_all(
     ssh: &impl Ssh,
     cfg: &Config,
@@ -149,20 +155,18 @@ pub(crate) fn cmd_wait_all(
         eprintln!("No running agents.");
         return Ok(());
     }
-    let mut timed_out = false;
+    let mut timed_out = Vec::new();
     for session in &inv.sessions {
         let agent = Agent::from_qualified(session, cfg);
         if wait_for_agent(ssh, &agent, cfg, poll_interval, timeout)? == WaitOutcome::TimedOut {
-            if cfg.output_format == OutputFormat::Human {
-                return Err(timeout_error(&agent, cfg, timeout));
-            }
-            timed_out = true;
+            timed_out.push(agent);
         }
     }
-    if timed_out {
-        return Err(SkulkError::CommandExit(1));
+    if timed_out.is_empty() {
+        Ok(())
+    } else {
+        Err(timeout_error(&timed_out, cfg, timeout))
     }
-    Ok(())
 }
 
 /// Dispatch `skulk wait` between a single agent and `--all`.
@@ -411,6 +415,50 @@ mod tests {
         let result = cmd_wait(&ssh, "test", &cfg, Duration::ZERO, Duration::ZERO);
 
         assert_err!(result, SkulkError::CommandExit(1) => {});
+    }
+
+    #[test]
+    fn cmd_wait_all_human_waits_for_every_agent_after_a_timeout() {
+        let cfg = test_config_with_format(OutputFormat::Human);
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(&["skulk-alpha", "skulk-beta"], &[], &[])),
+            ssh_ok(),          // has-session alpha
+            Ok("busy".into()), // alpha busy, times out
+            ssh_ok(),          // has-session beta
+            Ok("idle".into()), // beta idle
+        ]);
+
+        let result = cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(ssh.calls().len(), 5, "beta must still be polled");
+        assert_err!(result, SkulkError::Diagnostic { message, suggestion } => {
+            assert_eq!(
+                message,
+                "Timed out after 0s waiting for skulk-alpha to become idle."
+            );
+            assert!(suggestion.contains("skulk connect alpha"), "got: {suggestion}");
+        });
+    }
+
+    #[test]
+    fn cmd_wait_all_human_names_every_agent_that_timed_out() {
+        let cfg = test_config_with_format(OutputFormat::Human);
+        let ssh = MockSsh::new(vec![
+            Ok(mock_inventory(&["skulk-alpha", "skulk-beta"], &[], &[])),
+            ssh_ok(),          // has-session alpha
+            Ok("busy".into()), // alpha times out
+            ssh_ok(),          // has-session beta
+            Ok("busy".into()), // beta times out
+        ]);
+
+        let result = cmd_wait_all(&ssh, &cfg, Duration::ZERO, Duration::ZERO);
+
+        assert_err!(result, SkulkError::Diagnostic { message, .. } => {
+            assert_eq!(
+                message,
+                "Timed out after 0s waiting for skulk-alpha, skulk-beta to become idle."
+            );
+        });
     }
 
     #[test]

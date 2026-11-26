@@ -443,7 +443,7 @@ skulk new -bad-name       # invalid (leading hyphen)
 | `--recursive`, `-r` | `get` | Copy a directory and everything under it |
 | `--list` | `get` | List the files (path relative to the worktree, bytes) instead of copying |
 | `--max-mb <MB>` | `get` | Refuse when the files total more than this many megabytes, where 1 MB = 1,000,000 bytes (default: 200) |
-| `--all` | `wait` | Wait for every running agent instead of one |
+| `--all` | `wait` | Wait for every running agent instead of one. An agent that times out does not stop the wait for the others; skulk exits 1 at the end if any timed out |
 | `--timeout <SECS>` | `wait` | Maximum seconds to wait before giving up (default: 1800; applies per agent with `--all`) |
 | `--force` | `pull` | Hard-reset to `origin/main` instead of fast-forward |
 | `--force` | `destroy`, `destroy-all` | Skip the confirmation prompt |
@@ -499,7 +499,8 @@ idle.
 to answer the confirmation prompt. If they leave anything behind, they fail
 with a `diagnostic` error naming what is left. A `wait` that times out is
 the one failure reported on stdout: `{"ok": false, "reason": "timeout", ...}`
-with exit code 1.
+with exit code 1. `wait --all` prints one line per agent and exits 1 if any of
+them timed out.
 
 `prompt: "not_submitted"` (from `new`, `replay` and `send`) means the prompt
 reached the agent's input box but the harness never took the Enter, even after
