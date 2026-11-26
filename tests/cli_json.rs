@@ -506,6 +506,51 @@ fn destroy_without_force_emits_json_error_instead_of_prompting() {
     );
 }
 
+// ── destroy-all ─────────────────────────────────────────────────────────
+
+#[test]
+fn destroy_all_force_emits_one_json_result_naming_every_agent() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let running = unique("a-running");
+    let archived = unique("b-archived");
+    project.stage_running_agent(&running);
+    project.stage_archived_agent(&archived);
+
+    let value = json_success(&project.skulk(&["destroy-all", "--force"]));
+
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["agents"], serde_json::json!([running, archived]));
+    assert!(!project.has_session(&format!("skulk-{running}")));
+    assert!(
+        !project
+            .root
+            .join("worktrees")
+            .join(format!("skulk-{archived}"))
+            .exists()
+    );
+}
+
+#[test]
+fn destroy_all_force_emits_json_diagnostic_when_an_agent_is_left_behind() {
+    let project = Project::with_base_clone();
+    let name = unique("stuck");
+    // The base clone has the agent's branch checked out, so `git branch -D`
+    // refuses to delete it.
+    git(
+        &project.base_path(),
+        &["checkout", "-q", "-b", &format!("skulk-{name}")],
+    );
+
+    let err = json_failure(&project.skulk(&["destroy-all", "--force"]));
+
+    assert_eq!(err["code"], "diagnostic");
+    let message = err["error"].as_str().expect("error message");
+    assert!(message.contains(&name), "must name the leftover: {message}");
+}
+
 // ── wait ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -603,6 +648,27 @@ fn replay_emits_one_json_result_on_success() {
     assert_eq!(value["agent"], replayed.as_str());
     assert_eq!(value["prompt"], "delivered");
     assert!(project.has_session(&format!("skulk-{replayed}")));
+}
+
+#[test]
+fn replay_emits_json_not_found_when_no_prompt_is_stored() {
+    let project = Project::with_base_clone();
+    let source = unique("never-run");
+    let replayed = unique("replayed");
+
+    let err = json_failure(&project.skulk(&["replay", &source, "--as", &replayed]));
+
+    assert_eq!(err["code"], "not_found");
+    let message = err["error"].as_str().expect("error message");
+    assert!(message.contains(&source), "must name the agent: {message}");
+    assert!(
+        !project
+            .root
+            .join("worktrees")
+            .join(format!("skulk-{replayed}"))
+            .exists(),
+        "no agent may be created without a prompt"
+    );
 }
 
 #[test]
