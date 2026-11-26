@@ -76,6 +76,7 @@ pub(crate) fn test_config_with_format(output_format: OutputFormat) -> Config {
         init_script: None,
         auto_approve_permissions: false,
         url_file: None,
+        mcp_config_path: None,
         output_format,
         root_dir: None,
     }

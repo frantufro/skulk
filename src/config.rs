@@ -51,6 +51,11 @@ pub(crate) struct Config {
     /// Reported as `url` in `status --json` and `list --json`.
     #[serde(default)]
     pub url_file: Option<String>,
+    /// Path (relative to the worktree) of a per-agent MCP config, typically
+    /// written by the init script. When the file exists at launch, Claude Code
+    /// starts with `--mcp-config <file>`. Ignored for other harnesses.
+    #[serde(default, rename = "mcp_config")]
+    pub mcp_config_path: Option<String>,
     /// Output format for commands that produce structured data (e.g. `skulk list`).
     /// Defaults to `human`. Can be overridden by `--json` / `--human` CLI flags.
     #[serde(default)]
@@ -185,6 +190,9 @@ fn load_config_file(path: &Path) -> Result<Config, String> {
     }
     if let Some(ref url_file) = cfg.url_file {
         validate_shell_safe(url_file, "url_file")?;
+    }
+    if let Some(ref mcp_config) = cfg.mcp_config_path {
+        validate_shell_safe(mcp_config, "mcp_config")?;
     }
     // root_dir is the project directory: the parent of `.skulk/` for the usual
     // `project/.skulk/config.toml`, or the file's own directory for a config
@@ -347,6 +355,55 @@ mod tests {
         let result = load_config(&dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("url_file"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_config_parses_as_none_when_absent() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.mcp_config_path.is_none());
+    }
+
+    #[test]
+    fn mcp_config_parses_when_set() {
+        let toml_str = r#"
+            host = "x"
+            session_prefix = "a-"
+            base_path = "~/p"
+            worktree_base = "~/w"
+            mcp_config = "tmp/mcp.json"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mcp_config_path.as_deref(), Some("tmp/mcp.json"));
+    }
+
+    #[test]
+    fn config_load_rejects_unsafe_mcp_config() {
+        let dir = std::env::temp_dir().join("skulk_mcp_config_unsafe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CONFIG_DIR)).unwrap();
+        std::fs::write(
+            config_path_in(&dir),
+            r#"
+                host = "x"
+                session_prefix = "a-"
+                base_path = "~/p"
+                worktree_base = "~/w"
+                mcp_config = "mcp.json; rm -rf /"
+            "#,
+        )
+        .unwrap();
+
+        let result = load_config(&dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("mcp_config"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
