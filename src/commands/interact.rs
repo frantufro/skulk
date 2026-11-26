@@ -911,9 +911,7 @@ mod tests {
 
     #[test]
     fn send_and_logs_reach_the_agent_window_while_server_window_is_active() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         tmux.sh("tmux new-session -d -s skulk-my-task -n agent cat && \
              tmux new-window -t skulk-my-task -n server cat");
         let active = tmux.sh("tmux display-message -p -t skulk-my-task '#{window_name}'");
@@ -1077,9 +1075,7 @@ mod tests {
 
     #[test]
     fn server_window_logs_and_restart_work_on_a_real_tmux() {
-        let Some(tmux) = PrivateTmux::start(0) else {
-            return;
-        };
+        let tmux = PrivateTmux::start(0);
         let counter = tmux.dir().join("boots");
         let counter = counter.display();
         tmux.sh(&format!(

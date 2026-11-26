@@ -22,21 +22,23 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-/// Whether tmux can run here. In CI a missing tmux fails the test instead of
-/// letting it pass without checking anything.
-fn tmux_available() -> bool {
-    let installed = Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|o| o.status.success());
+/// Fail the calling test when tmux is missing. A real-tmux test that skipped
+/// itself would pass without checking anything.
+fn require_tmux(installed: bool) {
     assert!(
-        installed || std::env::var_os("CI").is_none(),
-        "tmux is required for this test in CI"
+        installed,
+        "tmux is required for this test; install it to run the suite"
     );
-    if !installed {
-        eprintln!("skipping: tmux is not installed");
-    }
-    installed
+}
+
+/// Fail the calling test unless tmux is installed.
+fn require_tmux_installed() {
+    require_tmux(
+        Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|o| o.status.success()),
+    );
 }
 
 struct Project {
@@ -296,6 +298,19 @@ fn json_success(out: &Output) -> serde_json::Value {
     single_json_object(&out.stdout)
 }
 
+// ── tmux guard ──────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "tmux is required")]
+fn require_tmux_fails_the_test_when_tmux_is_missing() {
+    require_tmux(false);
+}
+
+#[test]
+fn require_tmux_lets_the_test_run_when_tmux_is_installed() {
+    require_tmux(true);
+}
+
 // ── --config ────────────────────────────────────────────────────────────
 
 #[test]
@@ -406,9 +421,7 @@ fn doctor_prints_one_object_and_exits_nonzero_when_a_check_fails() {
 
 #[test]
 fn archive_emits_one_json_result_on_success() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let name = unique("archive");
     project.stage_running_agent(&name);
@@ -433,9 +446,7 @@ fn archive_emits_json_error_when_agent_is_not_running() {
 
 #[test]
 fn restart_emits_one_json_result_on_success() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let name = unique("restart");
     project.stage_archived_agent(&name);
@@ -461,9 +472,7 @@ fn restart_emits_json_error_when_agent_has_no_worktree() {
 
 #[test]
 fn destroy_emits_one_json_result_on_success() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let name = unique("destroy");
     project.stage_running_agent(&name);
@@ -510,9 +519,7 @@ fn destroy_without_force_emits_json_error_instead_of_prompting() {
 
 #[test]
 fn destroy_all_force_emits_one_json_result_naming_every_agent() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let running = unique("a-running");
     let archived = unique("b-archived");
@@ -555,9 +562,7 @@ fn destroy_all_force_emits_json_diagnostic_when_an_agent_is_left_behind() {
 
 #[test]
 fn wait_timeout_prints_its_payload_on_stdout_and_exits_1() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let name = unique("busy");
     project.stage_running_agent(&name);
@@ -579,9 +584,7 @@ fn wait_timeout_prints_its_payload_on_stdout_and_exits_1() {
 
 #[test]
 fn wait_all_reports_every_agent_and_exits_1_after_a_timeout() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let busy = unique("a-busy");
     let idle = unique("b-idle");
@@ -612,9 +615,7 @@ fn wait_all_reports_every_agent_and_exits_1_after_a_timeout() {
 
 #[test]
 fn new_emits_one_json_result_on_success() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let name = unique("new");
     let prompt = project.root.join("prompt.txt");
@@ -631,9 +632,7 @@ fn new_emits_one_json_result_on_success() {
 
 #[test]
 fn replay_emits_one_json_result_on_success() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let source = unique("source");
     let replayed = unique("replayed");
@@ -673,9 +672,7 @@ fn replay_emits_json_not_found_when_no_prompt_is_stored() {
 
 #[test]
 fn new_submits_a_long_prompt_when_the_first_enter_is_swallowed() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     project.set_harness_ignoring_enters(1);
     let name = unique("long");
@@ -690,9 +687,7 @@ fn new_submits_a_long_prompt_when_the_first_enter_is_swallowed() {
 
 #[test]
 fn new_reports_not_submitted_when_the_prompt_stays_in_the_input_box() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     project.set_harness_ignoring_enters(1_000);
     let name = unique("stuck");
@@ -721,9 +716,7 @@ fn new_reports_not_submitted_when_the_prompt_stays_in_the_input_box() {
 
 #[test]
 fn send_submits_a_long_prompt_when_the_first_enter_is_swallowed() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     project.set_harness_ignoring_enters(1);
     let name = unique("send");
@@ -1280,9 +1273,7 @@ fn write_marker(project: &Project, session: &str, contents: &str) {
 
 #[test]
 fn events_reports_an_idle_state_change_within_two_seconds() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     project.stage_running_agent("busy-one");
     write_marker(&project, "skulk-busy-one", "busy");
@@ -1300,9 +1291,7 @@ fn events_reports_an_idle_state_change_within_two_seconds() {
 
 #[test]
 fn events_exits_non_zero_when_the_connection_drops() {
-    if !tmux_available() {
-        return;
-    }
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let mut events = EventStream::start(&project);
     events.next_of_type("snapshot", Duration::from_secs(10));

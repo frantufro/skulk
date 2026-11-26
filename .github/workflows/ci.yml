@@ -59,8 +59,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # tests/cli_json.rs drives tmux on a private server and fails under CI
-      # when tmux is missing, rather than skipping.
+      # The real-tmux tests (tests/cli_json.rs and PrivateTmux unit tests) run
+      # on a private server and fail when tmux is missing, rather than skipping.
       - name: Install tmux
         run: |
           command -v tmux && exit 0
