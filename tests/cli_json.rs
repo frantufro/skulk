@@ -22,22 +22,16 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-/// Fail the calling test when tmux is missing. A real-tmux test that skipped
-/// itself would pass without checking anything.
-fn require_tmux(installed: bool) {
+/// Fail the calling test unless tmux is installed. A real-tmux test that
+/// skipped itself would pass without checking anything.
+fn require_tmux_installed() {
+    let installed = Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success());
     assert!(
         installed,
         "tmux is required for this test; install it to run the suite"
-    );
-}
-
-/// Fail the calling test unless tmux is installed.
-fn require_tmux_installed() {
-    require_tmux(
-        Command::new("tmux")
-            .arg("-V")
-            .output()
-            .is_ok_and(|o| o.status.success()),
     );
 }
 
@@ -298,19 +292,6 @@ fn json_success(out: &Output) -> serde_json::Value {
     single_json_object(&out.stdout)
 }
 
-// ── tmux guard ──────────────────────────────────────────────────────────
-
-#[test]
-#[should_panic(expected = "tmux is required")]
-fn require_tmux_fails_the_test_when_tmux_is_missing() {
-    require_tmux(false);
-}
-
-#[test]
-fn require_tmux_lets_the_test_run_when_tmux_is_installed() {
-    require_tmux(true);
-}
-
 // ── --config ────────────────────────────────────────────────────────────
 
 #[test]
@@ -542,6 +523,7 @@ fn destroy_all_force_emits_one_json_result_naming_every_agent() {
 
 #[test]
 fn destroy_all_force_emits_json_diagnostic_when_an_agent_is_left_behind() {
+    require_tmux_installed();
     let project = Project::with_base_clone();
     let name = unique("stuck");
     // The base clone has the agent's branch checked out, so `git branch -D`
@@ -555,7 +537,12 @@ fn destroy_all_force_emits_json_diagnostic_when_an_agent_is_left_behind() {
 
     assert_eq!(err["code"], "diagnostic");
     let message = err["error"].as_str().expect("error message");
-    assert!(message.contains(&name), "must name the leftover: {message}");
+    assert!(
+        message.starts_with(&format!(
+            "skulk destroy-all: Destroyed 0 agent(s); 1 left resources behind: {name}."
+        )),
+        "expected the left-behind diagnostic, got: {message}"
+    );
 }
 
 // ── wait ────────────────────────────────────────────────────────────────

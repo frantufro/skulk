@@ -585,15 +585,6 @@ impl LocalOps for MockLocalOps {
     }
 }
 
-/// Fail the calling test when tmux is missing. A real-tmux test that skipped
-/// itself would pass without checking anything.
-pub(crate) fn require_tmux(installed: bool) {
-    assert!(
-        installed,
-        "tmux is required for this test; install it to run the suite"
-    );
-}
-
 static NEXT_PRIVATE_TMUX: AtomicU64 = AtomicU64::new(0);
 
 /// A tmux server private to one test.
@@ -608,13 +599,16 @@ pub(crate) struct PrivateTmux {
 
 impl PrivateTmux {
     /// Start a private server whose new windows are numbered from
-    /// `base_index`. Fails the test when tmux is not installed.
+    /// `base_index`. Fails the test when tmux is not installed: a real-tmux
+    /// test that skipped itself would pass without checking anything.
     pub(crate) fn start(base_index: u32) -> Self {
-        require_tmux(
-            std::process::Command::new("tmux")
-                .arg("-V")
-                .output()
-                .is_ok_and(|o| o.status.success()),
+        let installed = std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        assert!(
+            installed,
+            "tmux is required for this test; install it to run the suite"
         );
         // Kept short: tmux socket paths are limited to about 100 bytes.
         let dir = PathBuf::from(format!(
@@ -689,17 +683,6 @@ impl Drop for PrivateTmux {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[should_panic(expected = "tmux is required")]
-    fn require_tmux_fails_the_test_when_tmux_is_missing() {
-        require_tmux(false);
-    }
-
-    #[test]
-    fn require_tmux_lets_the_test_run_when_tmux_is_installed() {
-        require_tmux(true);
-    }
 
     #[test]
     fn private_tmux_never_talks_to_the_callers_tmux_server() {
