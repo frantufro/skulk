@@ -343,7 +343,7 @@ pub(crate) fn cmd_status(ssh: &impl Ssh, name: &str, cfg: &Config) -> Result<(),
         .unwrap_or(0);
     let view = parse_status_output(&raw, name, cfg)?;
     match cfg.output_format {
-        OutputFormat::Json => emit_json(&json_agent_status(&view, remote_now)),
+        OutputFormat::Json => emit_json(&json_agent_status(&view, remote_now))?,
         OutputFormat::Human => println!("{}", format_status(&view)),
     }
     Ok(())

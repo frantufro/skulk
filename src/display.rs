@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::agent_ref::AgentRef;
 use crate::config::Config;
+use crate::error::SkulkError;
 use crate::inventory::{AgentState, GcOrphans, Session};
 
 /// Version of every JSON payload skulk prints, carried as `"v"`. Bump it when
@@ -11,7 +12,7 @@ pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
 /// Serialize an error as a JSON object and print it to stderr.
 ///
 /// Schema: `{"v": 1, "error": "<msg>", "code": "<snake_case_variant>"}`
-pub(crate) fn emit_json_error(msg: &str, err: &crate::error::SkulkError) {
+pub(crate) fn emit_json_error(msg: &str, err: &SkulkError) {
     eprintln!("{}", json_error(msg, err.code_str()));
 }
 
@@ -26,20 +27,15 @@ pub(crate) fn json_error(msg: &str, code: &str) -> serde_json::Value {
 
 /// Serialize `value` as compact JSON and print it to stdout.
 ///
-/// A payload that fails to serialize is reported on stderr as an error
-/// object with code `json_serialization`, keeping stdout free of anything
-/// but results.
-pub(crate) fn emit_json(value: &impl serde::Serialize) {
-    match render_json(value) {
-        Ok(json) => println!("{json}"),
-        Err(e) => eprintln!(
-            "{}",
-            json_error(
-                &format!("json serialization failed: {e}"),
-                "json_serialization"
-            )
-        ),
-    }
+/// # Errors
+///
+/// Returns [`SkulkError::JsonSerialization`] when the payload cannot be
+/// rendered (see [`render_json`]); nothing is printed then, so the caller's
+/// error path reports it and skulk exits non-zero.
+pub(crate) fn emit_json(value: &impl serde::Serialize) -> Result<(), SkulkError> {
+    let json = render_json(value)?;
+    println!("{json}");
+    Ok(())
 }
 
 /// Render `value` as the compact JSON line `emit_json` prints, stamping
@@ -49,15 +45,19 @@ pub(crate) fn emit_json(value: &impl serde::Serialize) {
 ///
 /// # Errors
 ///
-/// Fails only for types with non-string map keys or custom serializers that
-/// return errors; skulk's payloads have neither.
-pub(crate) fn render_json(value: &impl serde::Serialize) -> Result<String, serde_json::Error> {
-    let mut v = serde_json::to_value(value)?;
-    debug_assert!(v.is_object(), "JSON payloads must be objects, got: {v}");
-    if let serde_json::Value::Object(map) = &mut v {
-        map.insert("v".to_string(), JSON_SCHEMA_VERSION.into());
-    }
-    serde_json::to_string(&v)
+/// Returns [`SkulkError::JsonSerialization`] when `value` does not serialize
+/// to a JSON object, or when serde fails (non-string map keys, a custom
+/// serializer that errors).
+pub(crate) fn render_json(value: &impl serde::Serialize) -> Result<String, SkulkError> {
+    let serialization = |e: serde_json::Error| SkulkError::JsonSerialization(e.to_string());
+    let mut v = serde_json::to_value(value).map_err(serialization)?;
+    let serde_json::Value::Object(map) = &mut v else {
+        return Err(SkulkError::JsonSerialization(format!(
+            "payload must be a JSON object, got: {v}"
+        )));
+    };
+    map.insert("v".to_string(), JSON_SCHEMA_VERSION.into());
+    serde_json::to_string(&v).map_err(serialization)
 }
 
 const GREEN: &str = "\x1b[32m";
@@ -260,33 +260,32 @@ mod tests {
     }
 
     #[test]
-    fn emit_json_serializes_simple_struct() {
+    fn emit_json_succeeds_for_an_object_payload() {
         let value = Payload {
             name: "hello",
             count: 42,
         };
-        // Verify the serialized form contains the expected fields.
-        let json = serde_json::to_string(&value).expect("serialization must succeed");
-        assert!(json.contains("\"name\":\"hello\""));
-        assert!(json.contains("\"count\":42"));
-        // Exercise emit_json itself: must not panic on a valid serializable value.
-        emit_json(&value);
+
+        let result = emit_json(&value);
+
+        assert!(result.is_ok(), "got {result:?}");
     }
 
     #[test]
-    fn emit_json_produces_valid_json_string() {
-        // serde_json::to_string on a known-good value must succeed and round-trip
-        // back to the same value — verifying that emit_json's inner serialization
-        // path would produce parseable JSON.
-        let value = Payload {
-            name: "skulk",
-            count: 1,
-        };
-        let serialized = serde_json::to_string(&value).expect("serialization must not fail");
-        let round_tripped: serde_json::Value =
-            serde_json::from_str(&serialized).expect("output must be valid JSON");
-        assert_eq!(round_tripped["name"], "skulk");
-        assert_eq!(round_tripped["count"], 1_u32);
+    fn emit_json_fails_with_json_serialization_code_when_serialization_fails() {
+        // Tuple keys cannot become JSON object keys, so serde_json refuses them.
+        let value = std::collections::BTreeMap::from([((1_u8, 2_u8), 3_u8)]);
+
+        let err = emit_json(&value).expect_err("serialization must fail");
+
+        assert_eq!(err.code_str(), "json_serialization");
+    }
+
+    #[test]
+    fn emit_json_fails_with_json_serialization_code_for_non_object_payloads() {
+        let err = emit_json(&serde_json::json!([1, 2])).expect_err("arrays are rejected");
+
+        assert_eq!(err.code_str(), "json_serialization");
     }
 
     #[test]
@@ -304,9 +303,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "JSON payloads must be objects")]
-    fn render_json_rejects_non_object_payloads_in_debug_builds() {
-        let _ = render_json(&serde_json::json!([1, 2]));
+    fn render_json_rejects_non_object_payloads_in_every_build() {
+        let result = render_json(&serde_json::json!([1, 2]));
+
+        let err = result.expect_err("arrays are rejected");
+        assert_eq!(err.code_str(), "json_serialization");
+        assert!(
+            err.to_string().contains("must be a JSON object"),
+            "got: {err}"
+        );
     }
 
     #[test]

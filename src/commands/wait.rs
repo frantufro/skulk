@@ -82,7 +82,7 @@ fn wait_for_agent(
         let trimmed = state.trim();
         if trimmed == "idle" || trimmed == "missing" {
             if cfg.output_format == OutputFormat::Json {
-                emit_json(&json_wait_result(name, true, None));
+                emit_json(&json_wait_result(name, true, None))?;
             } else {
                 eprintln!("Agent {session_name} is idle.");
             }
@@ -101,7 +101,7 @@ fn wait_for_agent(
                 // a JSON error object to stderr, giving consumers two JSON
                 // objects across two streams. The non-zero exit code is the
                 // machine-readable signal; the stdout payload carries the detail.
-                emit_json(&json_wait_result(name, false, Some("timeout")));
+                emit_json(&json_wait_result(name, false, Some("timeout")))?;
                 std::process::exit(1);
             }
             return Err(SkulkError::Diagnostic {

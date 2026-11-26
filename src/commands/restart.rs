@@ -70,7 +70,7 @@ pub(crate) fn cmd_restart(
     }
 
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_restart_result(name, model, remote_control, cfg));
+        emit_json(&json_restart_result(name, model, remote_control, cfg))?;
         return Ok(());
     }
 

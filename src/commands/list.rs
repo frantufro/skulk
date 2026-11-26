@@ -221,7 +221,7 @@ pub(crate) fn cmd_list(ssh: &impl Ssh, cfg: &Config) -> Result<(), SkulkError> {
     let output = ssh.run(&list_command(cfg))?;
     let (sessions, remote_now) = parse_list_output(&output, cfg);
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_sessions(&sessions, remote_now, cfg));
+        emit_json(&json_sessions(&sessions, remote_now, cfg))?;
     } else {
         println!("{}", format_sessions_table(&sessions, remote_now, cfg));
     }

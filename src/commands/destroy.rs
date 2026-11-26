@@ -166,7 +166,7 @@ pub(crate) fn cmd_destroy(
         return Err(partial_destroy_error(name, &labels(&outcome.failed)));
     }
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_destroy_result(name, &outcome));
+        emit_json(&json_destroy_result(name, &outcome))?;
     }
     Ok(())
 }
@@ -212,7 +212,7 @@ pub(crate) fn cmd_destroy_all(
     let json = cfg.output_format == OutputFormat::Json;
     if agent_names.is_empty() {
         if json {
-            emit_json(&json_destroy_all_result(&[]));
+            emit_json(&json_destroy_all_result(&[]))?;
         } else {
             println!("No agents to destroy.");
         }
@@ -273,7 +273,7 @@ pub(crate) fn cmd_destroy_all(
         ));
     }
     if json {
-        emit_json(&json_destroy_all_result(&agent_names));
+        emit_json(&json_destroy_all_result(&agent_names))?;
     } else {
         println!("Destroyed {} agent(s).", agent_names.len());
     }

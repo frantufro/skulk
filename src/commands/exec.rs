@@ -104,7 +104,7 @@ pub(crate) fn cmd_exec(ssh: &impl Ssh, req: &ExecRequest, cfg: &Config) -> Resul
             })?;
         let exit = progress.finish(code, req.name, &cfg.host)?;
         let captured = parse_captured(&String::from_utf8_lossy(&out))?;
-        emit_json(&json_exec_result(req.name, exit, &captured));
+        emit_json(&json_exec_result(req.name, exit, &captured))?;
         return Ok(());
     }
 

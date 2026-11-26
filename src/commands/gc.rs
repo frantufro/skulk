@@ -147,7 +147,7 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
 
     if dry_run {
         if cfg.output_format == OutputFormat::Json {
-            emit_json(&json_gc_result(&orphans, true));
+            emit_json(&json_gc_result(&orphans, true))?;
         } else {
             println!("{}", format_gc_summary(&orphans, true));
         }
@@ -202,7 +202,7 @@ pub(crate) fn cmd_gc(ssh: &impl Ssh, dry_run: bool, cfg: &Config) -> Result<(), 
     cleanup_stale_state_files(ssh, &inv, &orphans, cfg);
 
     if cfg.output_format == OutputFormat::Json {
-        emit_json(&json_gc_result(&orphans, false));
+        emit_json(&json_gc_result(&orphans, false))?;
     } else {
         let prefix = if orphans.is_empty() { "" } else { "\n" };
         println!("{prefix}{}", format_gc_summary(&orphans, false));

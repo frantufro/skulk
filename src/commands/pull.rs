@@ -56,7 +56,7 @@ pub(crate) fn cmd_pull(ssh: &impl Ssh, force: bool, cfg: &Config) -> Result<(), 
     };
 
     match cfg.output_format {
-        OutputFormat::Json => emit_json(&json_pull_result(cfg, force, &output)),
+        OutputFormat::Json => emit_json(&json_pull_result(cfg, force, &output))?,
         OutputFormat::Human => println!("{output}"),
     }
     Ok(())
