@@ -116,6 +116,14 @@ impl Project {
         make_executable(&self.harness());
     }
 
+    /// Write the agent's idle marker (`idle`, `busy` or `pending`), which the
+    /// harness hooks maintain on a real host.
+    fn set_idle_marker(&self, name: &str, state: &str) {
+        let dir = self.home().join(".skulk/state");
+        std::fs::create_dir_all(&dir).expect("create state dir");
+        std::fs::write(dir.join(format!("skulk-{name}")), state).expect("write idle marker");
+    }
+
     fn base_path(&self) -> PathBuf {
         self.root.join("base")
     }
@@ -496,6 +504,63 @@ fn destroy_without_force_emits_json_error_instead_of_prompting() {
             .is_dir(),
         "nothing may be destroyed without --force"
     );
+}
+
+// ── wait ────────────────────────────────────────────────────────────────
+
+#[test]
+fn wait_timeout_prints_its_payload_on_stdout_and_exits_1() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let name = unique("busy");
+    project.stage_running_agent(&name);
+    project.set_idle_marker(&name, "busy");
+
+    let out = project.skulk(&["wait", &name, "--timeout", "0"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stderr.is_empty(),
+        "stderr must stay empty: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value = single_json_object(&out.stdout);
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["agent"], name.as_str());
+    assert_eq!(value["reason"], "timeout");
+}
+
+#[test]
+fn wait_all_reports_every_agent_and_exits_1_after_a_timeout() {
+    if !tmux_available() {
+        return;
+    }
+    let project = Project::with_base_clone();
+    let busy = unique("a-busy");
+    let idle = unique("b-idle");
+    project.stage_running_agent(&busy);
+    project.stage_running_agent(&idle);
+    project.set_idle_marker(&busy, "busy");
+    project.set_idle_marker(&idle, "idle");
+
+    let out = project.skulk(&["wait", "--all", "--timeout", "0"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty(), "stderr must stay empty");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+        .collect();
+    let result_for = |name: &str| {
+        lines
+            .iter()
+            .find(|v| v["agent"] == name)
+            .unwrap_or_else(|| panic!("no result line for {name}: {lines:?}"))
+    };
+    assert_eq!(result_for(&busy)["reason"], "timeout");
+    assert_eq!(result_for(&idle)["status"], "idle");
 }
 
 // ── new / replay ────────────────────────────────────────────────────────
